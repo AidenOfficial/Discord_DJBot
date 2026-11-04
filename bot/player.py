@@ -1,5 +1,4 @@
 # coding=utf-8
-import audioop
 import math
 import struct
 import subprocess as sp
@@ -13,8 +12,8 @@ from media.item import ValidationFailedError, PreparationFailedError
 
 
 class PlayerMixin:
-    """Playback half of MumbleBot: ffmpeg decoding, the send loop,
-    download orchestration, volume/ducking and transport control."""
+    """Playback half of DJBot: ffmpeg decoding, the send loop,
+    download orchestration, volume and transport control."""
 
     # Hard cap on concurrent downloads started by the prefetcher, so a long
     # queue cannot saturate bandwidth or disk.
@@ -22,6 +21,15 @@ class PlayerMixin:
 
     # Consecutive dead reconnect attempts before a live stream is given up on.
     LIVESTREAM_MAX_RETRIES = 3
+
+    def update_activity(self, title):
+        """bot 的 Discord 状态显示正在播的歌(None = 清除)。只在变化时发,不阻塞播放线程。"""
+        if title == getattr(self, '_activity', None):
+            return
+        self._activity = title
+        link = getattr(self, 'link', None)
+        if link is not None and hasattr(link, 'set_activity'):
+            threading.Thread(target=link.set_activity, args=(title,), name="Presence", daemon=True).start()
 
     def _livestream_retry(self, ffmpeg_rc):
         """Live streams drop for reasons that have nothing to do with the
@@ -240,13 +248,15 @@ class PlayerMixin:
 
         if var.config.getboolean('bot', 'announce_current_music') and not quiet:
             self.send_channel_msg(music_wrapper.format_current_playing())
+        self.update_activity(music_wrapper.format_title())
 
         if var.config.getboolean('debug', 'ffmpeg'):
             ffmpeg_debug = "debug"
         else:
             ffmpeg_debug = "warning"
 
-        channels = 2 if self.stereo else 1
+        # Discord 只收 48 kHz 立体声
+        channels = 2
         self.pcm_buffer_size = 960 * channels
 
         command = ["ffmpeg", '-v', ffmpeg_debug, '-nostdin']
@@ -432,7 +442,7 @@ class PlayerMixin:
         var.playlist.remove_by_id(item_id, rewind=not self.wait_for_ready)
 
     def remove_from_queue(self, index):
-        """用户删除队列第 index 首(聊天 !rm、Web 队列)。返回被删的条目。"""
+        """用户删除队列第 index 首(/remove、Web 队列)。返回被删的条目。"""
         playlist = var.playlist
         if index != playlist.current_index:
             return playlist.remove(index)
@@ -654,7 +664,7 @@ class PlayerMixin:
 
     # Main loop of the Bot
     def loop(self):
-        while not self.exit and self.mumble.alive:
+        while not self.exit and self.link.alive:
             self.last_loop_at = time.time()
             self._write_heartbeat()
             self._autosave_playlist()
@@ -683,7 +693,7 @@ class PlayerMixin:
                 # playlist.next() exactly once, skipping the offending item.
                 time.sleep(0.1)
 
-        while self.mumble.audio_buffered > 0 and self.mumble.alive:
+        while self.link.audio_buffered > 0 and self.link.alive:
             # Empty the buffer before exit
             time.sleep(0.01)
         time.sleep(0.5)
@@ -730,7 +740,7 @@ class PlayerMixin:
         # 发送端只缓冲 0.5 秒:写满时这里阻塞,由播放速度节流(以前是轮询缓冲大小再 sleep)。
         # 音量在发送端按帧施加,不再在这里乘,所以调音量 / 闪避当帧生效,不用等缓冲里的 0.5 秒播完。
         self._loop_status = 'Sending'
-        if not self.mumble.write_audio(pcm):
+        if not self.link.write_audio(pcm):
             self.log.debug("bot: audio stream closed, dropping pcm")
 
     def _loop_iteration(self):
@@ -754,7 +764,7 @@ class PlayerMixin:
             self.read_pcm_size += len(raw_music)
 
             if raw_music:
-                # Adjust the volume and send it to mumble
+                # Adjust the volume and send it to Discord
                 self.volume_cycle()
 
                 if is_first_chunk and not self.on_interrupting \
@@ -848,6 +858,7 @@ class PlayerMixin:
                         var.cache.free_and_delete(current.id)
                 else:
                     self._loop_status = 'Empty queue'
+                    self.update_activity(None)
             else:
                 # if wait_for_ready flag is true, means the pointer is already
                 # pointing to target song. start playing
@@ -881,54 +892,19 @@ class PlayerMixin:
                     self.wait_for_ready = False
 
     def volume_cycle(self):
+        """音量向目标值平滑过渡(改音量时不会突变),交给发送端按帧施加。"""
         delta = time.time() - self.last_volume_cycle_time
 
-        if self.on_ducking and self.ducking_release < time.time():
-            self.on_ducking = False
-            self._max_rms = 0
-
         if delta > 0.001:
-            if self.is_ducking and self.on_ducking:
-                self.volume_helper.real_volume = \
-                    (self.volume_helper.real_volume - self.volume_helper.ducking_volume_set) * math.exp(- delta / 0.2) \
-                    + self.volume_helper.ducking_volume_set
-            else:
-                self.volume_helper.real_volume = self.volume_helper.volume_set - \
-                                                 (self.volume_helper.volume_set - self.volume_helper.real_volume) * math.exp(- delta / 0.5)
-
+            self.volume_helper.real_volume = self.volume_helper.volume_set - \
+                (self.volume_helper.volume_set - self.volume_helper.real_volume) * math.exp(- delta / 0.5)
             self.last_volume_cycle_time = time.time()
 
-        # 把算好的音量交给发送端(变化很小时不发,省得每 10 ms 跨线程一次)
+        # 把算好的音量交给发送端(变化很小时不发)
         real = self.volume_helper.real_volume
         if abs(real - getattr(self, '_sent_volume', -1.0)) > 0.001:
-            self.mumble.volume = real
+            self.link.volume = real
             self._sent_volume = real
-
-    def ducking_sound_received(self, user, pcm):
-        """连接层回调:pcm 是解码后的 16 位单声道 PCM。"""
-        rms = audioop.rms(pcm, 2)
-        self._max_rms = max(rms, self._max_rms)
-        if self._display_rms:
-            if rms < self.ducking_threshold:
-                print('%6d/%6d  ' % (rms, self._max_rms) + '-' * int(rms / 200), end='\r')
-            else:
-                print('%6d/%6d  ' % (rms, self._max_rms) + '-' * int(self.ducking_threshold / 200)
-                      + '+' * int((rms - self.ducking_threshold) / 200), end='\r')
-
-        if rms > self.ducking_threshold:
-            now = time.time()
-            # A gap longer than the release window means this is the start
-            # of a fresh burst of noise.
-            if not self.on_ducking and now > self.ducking_release:
-                self.ducking_loud_since = now
-            self.ducking_release = now + 1  # ducking release after 1s
-
-            # Only duck once the noise has lasted at least ducking_delay
-            # seconds, so brief background noises don't dip the music.
-            if now - self.ducking_loud_since >= self.ducking_delay:
-                if self.on_ducking is False:
-                    self.log.debug("bot: ducking triggered")
-                    self.on_ducking = True
 
     def _fadeout(self, _pcm_data, stereo=False, fadein=False):
         pcm_data = bytearray(_pcm_data)
@@ -1027,7 +1003,7 @@ class PlayerMixin:
             self.on_interrupting = True
             # 以前要等发送缓冲里约 0.5 秒的旧歌播完,切歌/暂停才生效。现在发送端先淡出再清空,
             # 立即安静下来;playhead 按墙钟计,本来就约等于"已经听到的位置",暂停后续播也更准
-            self.mumble.cut_audio()
+            self.link.cut_audio()
 
             time.sleep(0.1)
             self.song_start_at = -1

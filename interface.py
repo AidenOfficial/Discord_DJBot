@@ -167,13 +167,13 @@ def requires_auth(f):
                 bad_access_count[request.remote_addr] = 1
                 log.info(f"web: bad token from ip {request.remote_addr}.")
 
-            command = f"{var.config.get('commands', 'command_symbol')[0]}" \
-                      f"{var.config.get('commands', 'requests_webinterface_access')}"
+            command = "/" + (var.bot.command_name('requests_webinterface_access') if var.bot else 'web')
+            bot_name = (var.bot.link.bot_name if var.bot else '') or 'the bot'
             return render_template('need_token.html',
                                    lang=var.language.split('_')[0],
                                    title=tr_web('token_required'),
                                    message=tr_web('token_required_message',
-                                                  name=html.escape(var.config.get('bot', 'username')),
+                                                  name=html.escape(bot_name),
                                                   command=html.escape(command)),
                                    token_label=tr_web('token'),
                                    submit=tr_web('submit'))

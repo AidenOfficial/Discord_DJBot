@@ -142,7 +142,7 @@ class Player(PlayerMixin):
     def __init__(self):
         self.log = logging.getLogger('test')
         self.stereo = True
-        self.mumble = FakeLink()
+        self.link = FakeLink()
         self.exit = False
         self.thread = None
         self.read_pcm_size = 0

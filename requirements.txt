@@ -8,9 +8,11 @@ requests
 PyJWT[crypto]
 # 导入歌单时简繁转换(纯 Python,Apache-2.0)
 opencc-python-reimplemented
-# Mumble 客户端库:我们自己维护的 pymumble-rev(https://github.com/AidenOfficial/PyMumble),
-# 取代了 pymumble。锁定到 commit,升级时改这里。运行时需要系统的 libopus(Docker 镜像里已装)。
-pymumble-rev @ git+https://github.com/AidenOfficial/PyMumble.git@bb57860653b14ef0c7ee4283fe64edcecf2ac0bd
+# Discord 客户端库。2.7 起支持 DAVE(语音端到端加密,Discord 已强制要求),[voice] 带上 PyNaCl 和 davey。
+# 运行时需要系统的 libopus(Docker 镜像里已装)。
+discord.py[voice]>=2.7.1,<3
+# Python 3.13 移除了 audioop(音量按帧缩放要用)
+audioop-lts; python_version >= "3.13"
 pyradios
 # 听歌识曲(Shazam)的音频指纹,Rust 实现,amd64/arm64 都有 abi3 轮子。
 # 只用它算指纹,请求自己发(不装 shazamio:它会带上 numpy/pydub/aiohttp)。2.x 刚发布,接口变了再放开

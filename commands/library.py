@@ -305,7 +305,7 @@ def cmd_delete_from_library(bot, user, text, command, parameter):
 
 
 def cmd_drop_database(bot, user, text, command, parameter):
-    if bot.is_admin(user):
+    if bot.is_admin(text):
         var.db.drop_table()
         var.db = SettingsDatabase(var.settings_db_path)
         var.music_db.drop_table()
@@ -317,7 +317,7 @@ def cmd_drop_database(bot, user, text, command, parameter):
 
 
 def cmd_refresh_cache(bot, user, text, command, parameter):
-    if bot.is_admin(user):
+    if bot.is_admin(text):
         var.cache.build_dir_cache()
         log.info("command: Local file cache refreshed.")
         bot.send_msg(tr('cache_refreshed'), text)

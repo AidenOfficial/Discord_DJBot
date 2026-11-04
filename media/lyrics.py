@@ -41,7 +41,7 @@ MAX_FILES = 5000          # 目录里最多留几首,超过按修改时间删最
 LRCLIB_URL = 'https://lrclib.net/api/search'
 NETEASE_LYRIC_URL = 'https://music.163.com/api/song/lyric'
 # LRCLIB 要求 User-Agent 写明是哪个程序
-LRCLIB_HEADERS = {'User-Agent': 'Mumble-DJBot (https://github.com/AidenOfficial/Mumble-DJBot)'}
+LRCLIB_HEADERS = {'User-Agent': 'Discord-DJBot (https://github.com/AidenOfficial/Discord_DJBot)'}
 
 _ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
 

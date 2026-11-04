@@ -46,7 +46,7 @@ def _item_summary(wrapper, index):
         'album': getattr(item, 'album', '') or '',
         # 匹配到专辑时曲库里的正式歌名(没有就是 ''),播放页用它代替视频标题
         'track': getattr(item, 'track', '') or '',
-        # 点歌人:网页点的是 Web 显示名,聊天点的绑定了就换成 Web 显示名、否则是 Mumble 名
+        # 点歌人:网页点的是 Web 显示名,聊天点的绑定了就换成 Web 显示名、否则是 Discord 名
         'requester': requester_display_name(getattr(wrapper, 'user', '') or ''),
     }
     if getattr(item, 'downloading', False):
@@ -60,6 +60,16 @@ def _item_summary(wrapper, index):
     return summary
 
 
+def _voice_channel(bot):
+    try:
+        cid = bot.my_channel_id()
+        if cid is None:
+            return None
+        return {'id': str(cid), 'name': bot.channel_display_name(cid)}
+    except Exception:
+        return None
+
+
 def _status_payload():
     bot = var.bot
     current = _current_wrapper()
@@ -69,8 +79,8 @@ def _status_payload():
         'play': not bot.is_pause,
         'mode': var.playlist.mode,
         'volume': bot.volume_helper.plain_volume_set,
-        'ducking': bool(getattr(bot, 'is_ducking', False)
-                        and getattr(bot, 'on_ducking', False)),
+        # bot 所在的语音频道;None = 不在语音里(网页上提示去 Settings 选一个)
+        'voice_channel': _voice_channel(bot),
         'playhead': bot.playhead if current is not None else 0,
         'queue_length': len(var.playlist),
         'current_index': var.playlist.current_index,
@@ -191,7 +201,7 @@ def _leave_group_if_detached(playlist, index):
 
 
 def _queue_remove(index):
-    """Remove the index-th queue item; shared with chat !rm and the legacy /post."""
+    """Remove the index-th queue item; shared with /remove and the legacy /post."""
     playlist = var.playlist
     if not (0 <= index < len(playlist)):
         abort(400)
@@ -366,7 +376,7 @@ def create_blueprint(requires_auth):
             abort(503)
         stats = var.play_history.stats()
         if var.user_db is not None:
-            # 绑定了 Mumble 的人:聊天点歌(记的是 Mumble 名)和网页点歌(记的是别名)合并成一行
+            # 绑定了 Discord 的人:聊天点歌(记的是 Discord 名)和网页点歌(记的是别名)合并成一行
             names = var.user_db.requester_display_names()
             merged = {}
             for row in stats.get('top_users', []):

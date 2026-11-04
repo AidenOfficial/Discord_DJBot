@@ -29,10 +29,29 @@ MODE_ALIASES = {
 
 
 
+def _play_query(bot, user, text, command, query):
+    """/play 后面跟的不是队列序号:按内容分给对应的点歌命令。"""
+    from . import sources, streaming
+    url = util.get_url_from_input(query)
+    if url and 'spotify.com' in url:
+        return streaming.cmd_play_spotify(bot, user, text, command, query)
+    if not url and util.get_bilibili_url_from_input(query):
+        return streaming.cmd_play_bilibili(bot, user, text, command, query)
+    if url:
+        return sources.cmd_play_url(bot, user, text, command, query)
+    return sources.cmd_yt_play(bot, user, text, command, query)
+
+
 def cmd_play(bot, user, text, command, parameter):
     params = parameter.split()
     index = -1
     start_at = 0
+    if len(params) > 0 and not params[0].isdigit():
+        # Discord 习惯:/play 歌名 或 /play 链接 直接点歌
+        _play_query(bot, user, text, command, parameter.strip())
+        if bot.is_pause and len(var.playlist) > 0:
+            bot.resume()
+        return
     if len(params) > 0:
         if params[0].isdigit() and 1 <= int(params[0]) <= len(var.playlist):
             index = int(params[0])
@@ -87,8 +106,9 @@ def cmd_stop_and_getout(bot, user, text, command, parameter):
     bot.stop()
     if var.playlist.mode == "one-shot":
         var.playlist.clear()
-
-    bot.join_channel()
+    bot.update_activity(None)
+    bot.send_msg(tr('left_channel'), text)
+    bot.leave_voice()
 
 
 
@@ -256,7 +276,7 @@ def cmd_mode(bot, user, text, command, parameter):
         var.playlist = media.playlist.get_playlist(mode, var.playlist)
         log.info(f"command: playback mode changed to {mode}.")
         bot.send_msg(tr("change_mode", mode=var.playlist.mode,
-                                  user=bot.mumble.users[text.actor].name), text)
+                                  user=user), text)
         if mode == "random":
             bot.interrupt()
 

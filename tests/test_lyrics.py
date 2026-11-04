@@ -429,7 +429,7 @@ class CommandTest(StoreTestCase):
     class Bot:
         def __init__(self):
             self.sent = []
-            self.mumble = type('M', (), {'max_message_length': 5000})()
+            self.link = type('M', (), {'max_message_length': 5000})()
 
         def send_msg(self, msg, text=None):
             self.sent.append(msg)
