@@ -10,8 +10,15 @@ import variables as var
 
 
 
+def _web_user(text, user):
+    """Web 登录(token / 密码)用的账号名:Discord 的唯一用户名,不是可以随便改的服务器昵称
+    (否则改个昵称就能冒充别人的 Web 账号)。"""
+    return getattr(text, 'username', None) or user
+
+
 def cmd_web_access(bot, user, text, command, parameter):
     auth_method = var.config.get("webinterface", "auth_method")
+    user = _web_user(text, user)
 
     if auth_method == 'token':
         interface.banned_ip = []
@@ -41,6 +48,7 @@ def cmd_user_password(bot, user, text, command, parameter):
         bot.send_msg(tr('bad_parameter', command=command), text)
         return
 
+    user = _web_user(text, user)
     user_info = var.db.get("user", user, fallback='{}')
     user_dict = json.loads(user_info)
     user_dict['password'], user_dict['salt'] = util.get_salted_password_hash(parameter)

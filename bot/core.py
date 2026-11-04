@@ -72,7 +72,7 @@ class DJBot(PlayerMixin, ChannelMixin):
 
         #
         self.on_interrupting = False
-        self._leaving = False
+        self._leaving_until = 0.0  # /leave 之后这段时间里的"离开语音"是自己走的,不算被踢
         self._activity = None
 
         token = args.token or os.environ.get("DISCORD_TOKEN") or var.config.get("discord", "token")
@@ -202,12 +202,11 @@ class DJBot(PlayerMixin, ChannelMixin):
 
     def _on_self_moved(self, old_channel, new_channel):
         """bot 自己进出 / 换语音频道(包括被管理员拖走、踢出)。"""
-        if new_channel is None and old_channel is not None and not self._leaving:
+        if new_channel is None and old_channel is not None and time.time() >= self._leaving_until:
             # 被人从语音里踢出去了:暂停,别在没人听的情况下继续"播"
             if not self.is_pause and len(var.playlist) > 0:
                 self.log.info("bot: disconnected from voice, pausing playback")
                 self.pause()
-        self._leaving = False
         self._humans_in_channel = self.get_user_count_in_channel()
         self.schedule_follow_check()
 
@@ -284,6 +283,15 @@ class DJBot(PlayerMixin, ChannelMixin):
         spec = entry['spec']
         user = ctx.name
         self.log.info(f'bot: received /{entry["name"]} "{ctx.argument}" from {user} ({ctx.actor})')
+
+        # 预检查之外再查一遍权限:管理员命令的 handler 自己不检查,不能只靠预检查
+        admin = self.is_admin(ctx)
+        if spec.admin and not admin:
+            self.send_msg(tr('not_admin'), ctx)
+            return
+        if not admin and var.db.has_option('user_ban', str(ctx.actor)):
+            self.send_msg(tr('user_ban'), ctx)
+            return
         self._refresh_discord_link(ctx)
 
         # 点歌类命令:bot 不在语音里就先进发命令的人所在的频道
@@ -391,5 +399,7 @@ class DJBot(PlayerMixin, ChannelMixin):
 
     def leave_voice(self):
         """/leave:离开语音频道(不触发"被踢出就暂停")。"""
-        self._leaving = True
+        if self.link.my_channel_id is None:
+            return
+        self._leaving_until = time.time() + 15
         self.link.leave_voice()

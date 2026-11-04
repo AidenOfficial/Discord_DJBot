@@ -250,6 +250,8 @@ def split_message(text, limit=MAX_LEN):
     """按行切成不超过 limit 的若干段;单行超长时硬切。代码块被切开时补上闭合/开头标记。"""
     if len(text) <= limit:
         return [text] if text else []
+    if '```' in text:
+        limit -= 8  # 留出给切开的代码块补 "```\n" / "\n```" 的位置
     chunks = []
     current = ''
     for line in text.split('\n'):

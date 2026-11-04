@@ -64,3 +64,9 @@ def test_split_message():
     code = '```\n' + '\n'.join(['line'] * 400) + '\n```'
     for part in split_message(code, limit=500):
         assert part.count('```') % 2 == 0
+
+
+def test_split_message_with_code_fence_stays_under_limit():
+    code = '```\n' + '\n'.join(['x' * 99] * 60) + '\n```'
+    for part in split_message(code, limit=2000):
+        assert len(part) <= 2000
