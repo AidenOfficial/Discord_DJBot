@@ -1,0 +1,85 @@
+# Mumble 音乐机器人 — 绿联 NAS / Docker 部署
+# 完整使用说明见 deploy/DOCKER.md
+services:
+  botamusique:
+    # 用 GitHub Actions 构建好的镜像(master 每次推送自动发布 edge 标签,公开可拉取)。
+    # 更新:docker compose pull && docker compose up -d
+    # 固定版本:在 .env 写 BAM_IMAGE=ghcr.io/aidenofficial/mumble-djbot:1.2.3
+    # 从本地源码构建:见 docker-compose.build.yml
+    image: ${BAM_IMAGE:-ghcr.io/aidenofficial/mumble-djbot:edge}
+    container_name: mumble-music
+    restart: unless-stopped
+    init: true
+    # 健康检查:90 秒内主循环没刷新心跳文件就判定 unhealthy。
+    # (容器卡死时 bot 内置看门狗会主动退出,由 restart 策略拉起;
+    #  若想让 unhealthy 也自动重启,可再挂一个 willfarrell/autoheal 容器。)
+    healthcheck:
+      test: ["CMD", "venv/bin/python", "-c", "import os,sys,time; p=os.environ.get('BAM_HEARTBEAT','/botamusique/data/.heartbeat'); sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p)<90 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    environment:
+      # 每次容器启动时把 yt-dlp / spotdl 升级到最新版(B 站 / YouTube 经常改版)。
+      BAM_UPDATE_ON_START: "1"
+      # 把状态数据库放进挂载目录,容器删除重建也不丢失。
+      BAM_DB: /botamusique/data/db.ini
+      BAM_MUSIC_DB: /botamusique/data/music.db
+      # 心跳文件:主循环每隔几秒刷新它,healthcheck 据此判断机器人是否还活着。
+      BAM_HEARTBEAT: /botamusique/data/.heartbeat
+      # 下载缓存放进挂载目录(默认的 /tmp 在容器里,重建就没了)。
+      # 上限/固定/手动清理见 Web UI 的 Cache 页和 tmp_folder_max_size。
+      BAM_TMP_FOLDER: /botamusique/cache/
+    volumes:
+      # 配置文件:执行 up 之前必须先在宿主机创建好这个文件,
+      # 否则 Docker 会把它当成目录创建,导致机器人读不到配置。
+      - ./configuration.ini:/botamusique/configuration.ini
+      # 机器人状态数据库(播放设置、音乐库索引)。
+      - ./data:/botamusique/data
+      # 本地音乐文件:把歌曲文件放进宿主机的 music_folder/ 即可。
+      - ./music_folder:/botamusique/music_folder
+      # YouTube / B 站下载缓存(常听的歌留在这里,不用每次重新下载)。
+      - ./cache:/botamusique/cache
+      # Spotify(spotdl)下载缓存。
+      - ./spotdl_cache:/botamusique/spotdl_cache
+      # 可选:B 站大会员 / YouTube 登录 cookies(Netscape 格式),
+      # 需要时取消下面这行的注释。
+      # - ./cookies:/botamusique/cookies
+    # 机器人是"客户端",主动连出到 Mumble 服务器,无需映射端口。
+    #
+    # Web 界面两种发布方式(configuration.ini 里 [webinterface] enabled=True,
+    # listening_addr=0.0.0.0):
+    #  1) 仅局域网直连:取消下面 ports 的注释。
+    #  2) 公网走 Cloudflare Tunnel + Access(推荐):**不要**开 ports,
+    #     用下面的 cloudflared 服务(见 deploy/WEBUI.md):
+    #       docker compose --profile tunnel up -d
+    # ports: ["8181:8181"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Cloudflare Tunnel:出站隧道把 Web 界面发布到公网,鉴权交给
+  # Cloudflare Access,8181 端口无需(也不应)暴露。
+  # 属于 "tunnel" profile —— 平时 `docker compose up -d` 不会启动它;
+  # 在 .env 写入 CLOUDFLARE_TUNNEL_TOKEN=<token> 后用:
+  #   docker compose --profile tunnel up -d
+  # Cloudflare 控制台里 Public hostname 的回源地址填 http://botamusique:8181
+  # (compose 服务名,同一默认网络内可直接解析)。
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: mumble-music-tunnel
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    command: tunnel --no-autoupdate run
+    environment:
+      # token 放同目录的 .env(已 gitignore):CLOUDFLARE_TUNNEL_TOKEN=eyJh...
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      - botamusique
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

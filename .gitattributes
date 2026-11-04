@@ -1,0 +1,11 @@
+# Shell scripts and systemd unit files MUST use LF, or they fail with
+# "bad interpreter" / fail to parse on the Linux deploy target. This is enforced
+# here so a Windows checkout (core.autocrlf=true) can't rewrite them to CRLF.
+*.sh        text eol=lf
+*.service   text eol=lf
+*.timer     text eol=lf
+entrypoint.sh text eol=lf
+
+# Everything else that git detects as text is stored and checked out with LF too
+# (a few files used to be CRLF, which made every edit show up as a whole-file diff).
+* text=auto eol=lf
