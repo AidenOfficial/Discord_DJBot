@@ -3,7 +3,6 @@ import collections
 import logging
 import os
 import queue
-import re
 import signal
 import sys
 import threading
@@ -15,34 +14,32 @@ import variables as var
 from constants import tr_cli as tr
 
 from .channels import ChannelMixin
-from .mumble_link import MumbleLink
+from .discord_link import CommandContext, DiscordLink
 from .player import PlayerMixin
 
 
-class MumbleBot(PlayerMixin, ChannelMixin):
+class DJBot(PlayerMixin, ChannelMixin):
     version = 'git'
 
     def __init__(self, args):
         self.log = logging.getLogger("bot")
-        self.log.info(f"bot: botamusique version {self.get_version()}, starting...")
+        self.log.info(f"bot: Discord-DJBot version {self.get_version()}, starting...")
         signal.signal(signal.SIGINT, self.ctrl_caught)
         # docker stop / restart 发的是 SIGTERM:默认处理会直接杀进程,
         # 队列来不及落盘。按 Ctrl-C 同样的路径优雅退出。
         signal.signal(signal.SIGTERM, self.ctrl_caught)
         self.cmd_handle = {}
+        self.slash_names = {}  # spec.key -> 斜杠命令名(帮助 / 提示文字用)
 
-        self.stereo = var.config.getboolean('bot', 'stereo')
+        # Discord 只收立体声
+        self.stereo = True
 
-        if args.channel:
-            self.channel = args.channel
-        else:
-            self.channel = var.config.get("server", "channel")
+        self.channel = args.channel if args.channel else var.config.get("discord", "channel")
 
-        var.user = args.user
         var.is_proxified = var.config.getboolean(
             "webinterface", "is_web_proxified")
 
-        # Flags to indicate the bot is exiting (Ctrl-C, or !kill)
+        # Flags to indicate the bot is exiting (Ctrl-C, or /kill)
         self.exit = False
         self.nb_exit = 0
 
@@ -64,7 +61,7 @@ class MumbleBot(PlayerMixin, ChannelMixin):
         self.last_loop_at = time.time()
         self._last_heartbeat_write = 0.0
         self.heartbeat_file = os.environ.get("BAM_HEARTBEAT") or \
-            os.path.join(var.tmp_folder, "botamusique.heartbeat")
+            os.path.join(var.tmp_folder, "djbot.heartbeat")
 
         # Play/pause status
         self.is_pause = False
@@ -75,118 +72,41 @@ class MumbleBot(PlayerMixin, ChannelMixin):
 
         #
         self.on_interrupting = False
+        self._leaving = False
+        self._activity = None
 
-        if args.host:
-            host = args.host
-        else:
-            host = var.config.get("server", "host")
-
-        if args.port:
-            port = args.port
-        else:
-            port = var.config.getint("server", "port")
-
-        if args.password:
-            password = args.password
-        else:
-            password = var.config.get("server", "password")
-
-        if args.channel:
-            self.channel = args.channel
-        else:
-            self.channel = var.config.get("server", "channel")
-
-        if args.certificate:
-            certificate = args.certificate
-        else:
-            certificate = util.solve_filepath(var.config.get("server", "certificate"))
-
-        # 命令行 / BAM_TOKENS 和配置文件一样是逗号分隔的字符串;
-        # 以前命令行这条路没 split,字符串被当成逐字符的 token 列表传给了服务器
-        tokens = args.tokens if args.tokens else var.config.get("server", "tokens")
-        tokens = [t.strip() for t in tokens.split(',') if t.strip()]
-
-
-        if args.user:
-            self.username = args.user
-        else:
-            self.username = var.config.get("bot", "username")
-
-        if args.bandwidth:
-            self.bandwidth = args.bandwidth
-        else:
-            self.bandwidth = var.config.getint("bot", "bandwidth")
-
-        self.mumble = MumbleLink(host, port, self.username, password=password, tokens=tokens,
-                                 certfile=certificate or None, stereo=self.stereo,
-                                 bitrate=self.bandwidth,
-                                 debug=var.config.getboolean('debug', 'mumble_connection'))
-        self._start_message_worker()
-        self.mumble.on_text = self.message_received
-
-        # 收语音只给闪避(ducking)用:默认关掉,省得解码每个收到的包
-        self._receive_sound = False
-        self._init_follow()
-        self.bots = set()
-        self.mumble.on_user_joined = self._on_user_created
-        self.mumble.on_user_updated = self._on_user_updated
-        self.mumble.on_user_left = self._on_user_removed
-
-        try:
-            self.mumble.connect()
-        except Exception as e:
-            self.log.error("bot: failed to connect to the Mumble server: %s", e)
+        token = args.token or os.environ.get("DISCORD_TOKEN") or var.config.get("discord", "token")
+        if not token:
+            self.log.error("bot: no Discord bot token. Set [discord] token in configuration.ini "
+                           "or the DISCORD_TOKEN environment variable.")
             sys.exit(1)
-        # 同步阶段的用户不会逐个触发"加入"回调:直接从快照记下每人所在频道,跟随逻辑要用
-        for user in self.mumble.users.values():
-            self._user_channels[user.session] = user.channel_id
+        guild_id = args.guild or var.config.get("discord", "guild_id")
+        admin_ids = [a.strip() for a in var.config.get('bot', 'admin').replace(';', ',').split(',')
+                     if a.strip().isdigit()]
 
-        self.set_comment()
-        self.set_avatar()
-        self.mumble.set_self_mute(False)  # by sure the user is not muted
-        self.join_channel()
-
-        bots = var.config.get("bot", "when_nobody_in_channel_ignore",fallback="")
-        self.bots = set(b.strip() for b in bots.split(',') if b.strip())
-        self._user_in_channel = self.get_user_count_in_channel()
-        # 默认频道可能本来就没人:连上后按跟随设置检查一次
-        self.schedule_follow_check(delay=5)
-
+        self.link = DiscordLink(
+            token,
+            guild_id=guild_id or None,
+            announce_channel_id=var.config.get("discord", "announce_channel") or None,
+            admin_ids=admin_ids,
+            admin_permission=var.config.getboolean("discord", "admin_by_permission"),
+            self_deaf=var.config.getboolean("discord", "self_deaf"),
+            bitrate=var.config.getint("discord", "bitrate"),
+            language=var.language,
+            debug=var.config.getboolean('debug', 'discord_connection'))
 
         # ====== Volume ======
         self.volume_helper = util.VolumeHelper()
 
         max_vol = var.config.getfloat('bot', 'max_volume')
         if var.db.has_option('bot', 'max_volume'):
-            max_vol = var.db.getfloat('bot', 'max_volume')                
+            max_vol = var.db.getfloat('bot', 'max_volume')
         _volume = var.config.getfloat('bot', 'volume')
         if var.db.has_option('bot', 'volume'):
             _volume = var.db.getfloat('bot', 'volume')
         _volume = min(_volume, max_vol)
         self.volume_helper.set_volume(_volume)
-
-        self.is_ducking = False
-        self.on_ducking = False
-        self.ducking_release = time.time()
         self.last_volume_cycle_time = time.time()
-
-        self._ducking_volume = 0
-        _ducking_volume = var.config.getfloat("bot", "ducking_volume")
-        _ducking_volume = var.db.getfloat("bot", "ducking_volume", fallback=_ducking_volume)
-        self.volume_helper.set_ducking_volume(_ducking_volume)
-
-        self.ducking_threshold = var.config.getfloat("bot", "ducking_threshold")
-        self.ducking_threshold = var.db.getfloat("bot", "ducking_threshold", fallback=self.ducking_threshold)
-
-        self.ducking_delay = var.config.getfloat("bot", "ducking_delay")
-        self.ducking_delay = var.db.getfloat("bot", "ducking_delay", fallback=self.ducking_delay)
-        self.ducking_loud_since = 0
-
-        if not var.db.has_option("bot", "ducking") and var.config.getboolean("bot", "ducking") \
-                or var.config.getboolean("bot", "ducking"):
-            self.is_ducking = True
-            self.mumble.on_voice = self.ducking_sound_received
-            self.set_receive_sound(True)
 
         assert var.config.get("bot", "when_nobody_in_channel") in ['pause', 'pause_resume', 'stop', 'nothing', ''], \
             "Unknown action for when_nobody_in_channel"
@@ -196,10 +116,37 @@ class MumbleBot(PlayerMixin, ChannelMixin):
 
         # Debug use
         self._loop_status = 'Idle'
-        self._display_rms = False
-        self._max_rms = 0
 
         self.redirect_ffmpeg_log = var.config.getboolean('debug', 'redirect_ffmpeg_log')
+
+        self._start_message_worker()
+        self._init_follow()
+        bots = var.config.get("bot", "when_nobody_in_channel_ignore", fallback="")
+        self.bots = set(b.strip() for b in bots.split(',') if b.strip())
+        self._humans_in_channel = 0
+
+    def start(self):
+        """连上 Discord。register_slash_commands() 之后调用。"""
+        self.link.on_command = self.command_received
+        self.link.on_precheck = self.precheck
+        self.link.on_autocomplete = self.autocomplete
+        self.link.on_user_joined = self._on_user_created
+        self.link.on_user_updated = self._on_user_updated
+        self.link.on_user_left = self._on_user_removed
+        self.link.on_self_moved = self._on_self_moved
+        try:
+            self.link.connect()
+        except Exception as e:
+            self.log.error("bot: failed to connect to Discord: %s", e)
+            sys.exit(1)
+        # 启动时已经在语音里的人不会逐个触发"加入"回调:直接从快照记下每人所在频道,跟随逻辑要用
+        for user in self.link.users.values():
+            self._user_channels[user.session] = user.channel_id
+
+        self.join_channel()
+        self._humans_in_channel = self.get_user_count_in_channel()
+        # 默认频道可能本来就没人:连上后按跟随设置检查一次
+        self.schedule_follow_check(delay=5)
 
     # Set the CTRL+C shortcut
     def ctrl_caught(self, signal, frame):
@@ -224,39 +171,24 @@ class MumbleBot(PlayerMixin, ChannelMixin):
         else:
             return util.get_snapshot_version()
 
-    def register_command(self, cmd, handle, no_partial_match=False, access_outside_channel=False, admin=False):
-        cmds = cmd.split(",")
-        for command in cmds:
-            command = command.strip()
-            if command:
-                self.cmd_handle[command] = {'handle': handle,
-                                            'partial_match': not no_partial_match,
-                                            'access_outside_channel': access_outside_channel,
-                                            'admin': admin}
-                self.log.debug("bot: command added: " + command)
+    def register_slash_commands(self, named_specs):
+        """[(斜杠命令名, Spec)]:交给连接层注册,命令分发表按 spec.key 索引。"""
+        for name, spec in named_specs:
+            self.cmd_handle[spec.key] = {'handle': spec.handler, 'spec': spec, 'name': name}
+            self.slash_names[spec.key] = name
+        self.link.register_commands(named_specs)
 
-    def set_comment(self):
-        self.mumble.set_comment(var.config.get('bot', 'comment'))
-
-    def set_avatar(self):
-        avatar_path = var.config.get('bot', 'avatar')
-
-        if avatar_path:
-            with open(avatar_path, 'rb') as avatar_file:
-                self.mumble.set_avatar(avatar_file.read())
-        else:
-            self.mumble.set_avatar(b'')
-
-    def set_receive_sound(self, value):
-        self._receive_sound = value
-        self.mumble.receive_voice = value
+    # =======================
+    #   Voice channel events
+    # =======================
 
     def _on_user_created(self, user):
         self._note_user_event(user, 'created')
+        self._dispatch_users_changed(user, 'created')
 
     def _on_user_updated(self, user, changed):
         if 'channel_id' not in (changed or ()):
-            return  # 只关心换频道(静音、评论之类的更新忽略)
+            return  # 只关心换频道(静音之类的更新忽略)
         self._note_user_event(user, 'updated')
         self._dispatch_users_changed(user, changed)
 
@@ -268,183 +200,164 @@ class MumbleBot(PlayerMixin, ChannelMixin):
         if getattr(self, '_react_to_empty_channel', False):
             threading.Thread(target=self.users_changed, args=(user, action), daemon=True).start()
 
+    def _on_self_moved(self, old_channel, new_channel):
+        """bot 自己进出 / 换语音频道(包括被管理员拖走、踢出)。"""
+        if new_channel is None and old_channel is not None and not self._leaving:
+            # 被人从语音里踢出去了:暂停,别在没人听的情况下继续"播"
+            if not self.is_pause and len(var.playlist) > 0:
+                self.log.info("bot: disconnected from voice, pausing playback")
+                self.pause()
+        self._leaving = False
+        self._humans_in_channel = self.get_user_count_in_channel()
+        self.schedule_follow_check()
+
     # =======================
-    #         Message
+    #         Commands
     # =======================
 
     def _start_message_worker(self):
-        # 回调在连接层的事件分发线程里依次执行;命令处理可能很慢(建条目、写库、起校验线程、
-        # 回消息),放在那里会拖住后面的用户/频道事件。回调只把消息入队,由单独的线程按顺序处理。
+        # 命令处理可能很慢(建条目、写库、起校验线程、回消息),放在连接层的事件线程里
+        # 会拖住后面的语音状态事件。回调只把命令入队,由单独的线程按顺序处理。
         self._message_queue = queue.Queue()
         th = threading.Thread(target=self._message_worker, name="CommandWorker", daemon=True)
         th.start()
 
     def _message_worker(self):
         while True:
-            text = self._message_queue.get()
+            ctx = self._message_queue.get()
             try:
-                self._handle_message(text)
+                self._handle_command(ctx)
             except Exception:
-                # 任何异常(例如发送者刚好下线导致 users[actor] KeyError)只影响这一条
-                self.log.exception("bot: failed to handle a text message")
+                self.log.exception("bot: failed to handle a command")
+            finally:
+                try:
+                    self.link.finish(ctx)
+                except Exception:
+                    pass
 
-    # All text send to the chat is analysed by this function
-    def message_received(self, text):
-        """连接层回调(在事件分发线程里):只入队,立刻返回。"""
+    def command_received(self, ctx):
+        """连接层回调:只入队,立刻返回。"""
         message_queue = getattr(self, '_message_queue', None)
         if message_queue is None:
             # 没走 __init__ 的场景(测试替身):退回同步处理
             try:
-                self._handle_message(text)
+                self._handle_command(ctx)
             except Exception:
-                self.log.exception("bot: failed to handle a text message")
+                self.log.exception("bot: failed to handle a command")
             return
-        message_queue.put(text)
+        message_queue.put(ctx)
 
-    def _handle_message(self, text):
-        raw_message = text.message.strip()
-        message = re.sub(r'<.*?>', '', raw_message)
-        if text.actor == 0:
-            # Some server will send a welcome message to the bot once connected.
-            # It doesn't have a valid "actor". Simply ignore it here.
+    def precheck(self, ctx):
+        """在 Discord 等回应的 3 秒内调用:返回拒绝理由(HTML)就只回给本人,不执行命令。"""
+        entry = self.cmd_handle.get(ctx.command)
+        if entry is None:
+            return tr('bad_command', command=ctx.command)
+        spec = entry['spec']
+        admin = self.is_admin(ctx)
+
+        if not admin and var.db.has_option('user_ban', str(ctx.actor)):
+            return tr('user_ban')
+
+        if not admin and ctx.argument:
+            input_url = util.get_url_from_input(ctx.argument)
+            if input_url and var.db.has_option('url_ban', input_url):
+                return tr('url_ban', url=input_url)
+
+        if spec.admin and not admin:
+            return tr('not_admin')
+
+        mine = self.link.my_channel_id
+        if not spec.outside_channel and not admin \
+                and not var.config.getboolean('bot', 'allow_other_channel_message') \
+                and mine is not None and ctx.voice_channel_id != mine:
+            return tr('not_in_my_channel')
+
+        if spec.joins_voice and mine is None and ctx.voice_channel_id is None:
+            return tr('join_voice_first')
+        return None
+
+    def _handle_command(self, ctx):
+        entry = self.cmd_handle.get(ctx.command)
+        if entry is None:
+            self.send_msg(tr('bad_command', command=ctx.command), ctx)
             return
+        spec = entry['spec']
+        user = ctx.name
+        self.log.info(f'bot: received /{entry["name"]} "{ctx.argument}" from {user} ({ctx.actor})')
+        self._refresh_discord_link(ctx)
 
-        user = self.mumble.users[text.actor].name
-
-        if var.config.getboolean('commands', 'split_username_at_space'):
-            # in can you use https://github.com/Natenom/mumblemoderator-module-collection/tree/master/os-suffixes ,
-            # you want to split the username
-            user = user.split()[0]
-
-        command_symbols = var.config.get('commands', 'command_symbol')
-        match = re.match(fr'^[{re.escape(command_symbols)}](?P<command>\S+)(?:\s(?P<argument>.*))?', message)
-        if match:
-            command = match.group("command").lower()
-            argument = match.group("argument") or ""
-
-            if not command:
+        # 点歌类命令:bot 不在语音里就先进发命令的人所在的频道
+        if spec.joins_voice and self.link.my_channel_id is None and ctx.voice_channel_id is not None:
+            if not self.move_to_channel(ctx.voice_channel_id, f'requested by {user}'):
+                self.send_msg(tr('cannot_join_voice'), ctx)
                 return
 
-            self.log.info(f'bot: received command "{command}" with arguments "{argument}" from {user}')
-            self._refresh_mumble_link(text)
+        try:
+            entry['handle'](self, user, ctx, entry['name'], ctx.argument)
+        except Exception:
+            error_traceback = traceback.format_exc()
+            error = error_traceback.rstrip().split("\n")[-1]
+            self.log.error(f"bot: command {ctx.command} failed with error: {error_traceback}\n")
+            self.send_msg(tr('error_executing_command', command=entry['name'], error=error), ctx)
 
-            # Anti stupid guy function
-            if not self.is_admin(user) and not var.config.getboolean('bot', 'allow_private_message') and text.session:
-                self.mumble.send_private(text.actor,
-                    tr('pm_not_allowed'))
-                return
+    def autocomplete(self, kind, ctx, current):
+        """斜杠命令参数的自动补全:[(显示文字, 值)],最多 25 条。"""
+        from commands import autocomplete
+        return autocomplete.suggest(self, kind, ctx, current)
 
-            for i in var.db.items("user_ban"):
-                if user.lower() == i[0]:
-                    self.mumble.send_private(text.actor,
-                        tr('user_ban'))
-                    return
-
-            if not self.is_admin(user) and argument:
-                input_url = util.get_url_from_input(argument)
-                if input_url and var.db.has_option('url_ban', input_url):
-                    self.mumble.send_private(text.actor,
-                        tr('url_ban'))
-                    return
-
-            command_exc = ""
-            try:
-                if command in self.cmd_handle:
-                    command_exc = command
-                else:
-                    # try partial match
-                    cmds = self.cmd_handle.keys()
-                    matches = []
-                    for cmd in cmds:
-                        if cmd.startswith(command) and self.cmd_handle[cmd]['partial_match']:
-                            matches.append(cmd)
-
-                    if len(matches) == 1:
-                        self.log.info("bot: {:s} matches {:s}".format(command, matches[0]))
-                        command_exc = matches[0]
-
-                    elif len(matches) > 1:
-                        self.mumble.send_private(text.actor,
-                            tr('which_command', commands="<br>".join(matches)))
-                        return
-                    else:
-                        self.mumble.send_private(text.actor,
-                            tr('bad_command', command=command))
-                        return
-
-                if self.cmd_handle[command_exc]['admin'] and not self.is_admin(user):
-                    self.mumble.send_private(text.actor, tr('not_admin'))
-                    return
-
-                if not self.cmd_handle[command_exc]['access_outside_channel'] \
-                        and not self.is_admin(user) \
-                        and not var.config.getboolean('bot', 'allow_other_channel_message') \
-                        and self.mumble.users[text.actor].channel_id != self.mumble.my_channel_id:
-                    self.mumble.send_private(text.actor,
-                        tr('not_in_my_channel'))
-                    return
-
-                self.cmd_handle[command_exc]['handle'](self, user, text, command_exc, argument)
-            except:
-                error_traceback = traceback.format_exc()
-                error = error_traceback.rstrip().split("\n")[-1]
-                self.log.error(f"bot: command {command_exc} failed with error: {error_traceback}\n")
-                self.send_msg(tr('error_executing_command', command=command_exc, error=error), text)
-
-    # 发消息从不抛异常:它被下载线程、进度播报、校验线程等到处调用,
-    # 断线重连期间 users/channels 查找会 KeyError,不能因此弄死调用方。
+    # 发消息从不抛异常:它被下载线程、进度播报、校验线程等到处调用。
     def send_msg(self, msg, text):
+        """回复发命令的人(text 是 CommandContext);没有上下文(Web / 后台)就发到公告频道。"""
         try:
             msg = msg.encode('utf-8', 'ignore').decode('utf-8')
-            # text if the object message, contain information if direct message or channel message
-            self.mumble.send_private(text.actor, msg)
+            if isinstance(text, CommandContext):
+                self.link.reply(text, msg)
+            else:
+                self.link.send_announcement(msg)
         except Exception:
-            self.log.warning("bot: could not send private message", exc_info=True)
+            self.log.warning("bot: could not send a reply", exc_info=True)
 
     def send_channel_msg(self, msg):
         try:
             msg = msg.encode('utf-8', 'ignore').decode('utf-8')
-            self.mumble.send_channel(self.mumble.my_channel_id, msg)
+            self.link.send_announcement(msg)
         except Exception:
             self.log.warning("bot: could not send channel message", exc_info=True)
 
-    def _refresh_mumble_link(self, text):
-        """绑定表里记着 Mumble 名(Web 队列 / 统计靠它把聊天点歌对上 Web 昵称),
+    def _refresh_discord_link(self, ctx):
+        """绑定表里记着 Discord 显示名(Web 队列 / 统计靠它把聊天点歌对上 Web 昵称),
         改名后在这里跟上;没绑定就是一次查不到。"""
         if var.user_db is None:
             return
         try:
-            from commands.personal import mumble_key
-            key, name = mumble_key(self, text)
+            from commands.personal import discord_key
+            key, name = discord_key(self, ctx)
             if key:
-                var.user_db.identity_for_mumble(key, name)
+                var.user_db.identity_for_discord(key, name)
         except Exception:
-            self.log.debug("bot: could not refresh mumble link", exc_info=True)
+            self.log.debug("bot: could not refresh discord link", exc_info=True)
 
-    @staticmethod
-    def is_admin(user):
-        list_admin = var.config.get('bot', 'admin').rstrip().split(';')
-        if user in list_admin:
-            return True
-        else:
-            return False
+    def is_admin(self, user):
+        """user 是 CommandContext(斜杠命令)或 Discord user id。"""
+        if isinstance(user, CommandContext):
+            return user.is_admin
+        admins = {a.strip() for a in var.config.get('bot', 'admin').replace(';', ',').split(',') if a.strip()}
+        return str(user) in admins
+
+    def command_name(self, key):
+        """spec.key -> 当前的斜杠命令名(改过名也对)。"""
+        return self.slash_names.get(key, key)
 
     # =======================
-    #   Other Mumble Events
+    #   Other voice events
     # =======================
 
     def get_user_count_in_channel(self):
-        mine = self.mumble.my_channel_id
-
-        # Build set of unique usernames
-        users = set(user.name for user in self.mumble.users.values() if user.channel_id == mine)
-
-        # Exclude all bots from the set of usernames
-        users = users.difference(self.bots)
-
-        # Return the number of elements in the set, as the final user count
-        return len(users)
-
+        """bot 所在语音频道里的真人数(不算 bot 自己和其他 bot)。"""
+        mine = self.link.my_channel_id
+        if mine is None:
+            return 0
+        return len(self.humans_by_channel().get(mine, []))
 
     def users_changed(self, user, message):
         try:
@@ -453,17 +366,17 @@ class MumbleBot(PlayerMixin, ChannelMixin):
             self.log.exception("bot: error while reacting to a channel user change")
 
     def _users_changed(self):
-        # only check if there is one more user currently in the channel
-        # else when the music is paused and somebody joins, music would start playing again
-        user_count = self.get_user_count_in_channel()
+        # only react when the first person comes back, so the music doesn't
+        # restart every time somebody joins a channel that already has listeners
+        humans = self.get_user_count_in_channel()
 
-        if user_count > self._user_in_channel and user_count == 2:
+        if humans > self._humans_in_channel and humans == 1:
             if var.config.get("bot", "when_nobody_in_channel") == "pause_resume":
                 self.resume()
             elif var.config.get("bot", "when_nobody_in_channel") == "pause" and self.is_pause:
                 self.send_channel_msg(tr("auto_paused"))
-        elif user_count == 1 and len(var.playlist) != 0:
-            # if the bot is the only user left in the channel and the playlist isn't empty
+        elif humans == 0 and self.link.my_channel_id is not None and len(var.playlist) != 0:
+            # 频道里只剩 bot 了
             if self.follow_would_move():
                 # 跟随模式马上会带 bot 去有人的频道,继续放,别暂停/清空
                 self.log.info('bot: No user in my channel, following users instead of pausing.')
@@ -474,4 +387,9 @@ class MumbleBot(PlayerMixin, ChannelMixin):
                 self.log.info('bot: No user in my channel. Pause music now.')
                 self.pause()
 
-        self._user_in_channel = user_count
+        self._humans_in_channel = humans
+
+    def leave_voice(self):
+        """/leave:离开语音频道(不触发"被踢出就暂停")。"""
+        self._leaving = True
+        self.link.leave_voice()

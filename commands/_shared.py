@@ -11,15 +11,15 @@ try:
 except ImportError:
     # Spotify is an optional fork feature (media/spotify.py + the spotdl CLI).
     # If the module is missing the rest of the bot must still start - only the
-    # !spotify command becomes unavailable. (See cmd_play_spotify.)
+    # /spotify command becomes unavailable. (See cmd_play_spotify.)
     _spotify_available = False
 
 log = logging.getLogger("bot")
 
 ITEMS_PER_PAGE = 50
 
-# Last search/browse results (!file match, !ytquery, !search, !listfile,
-# !findtagged ...) - read back by !shortlist and !delete_from_library.
+# Last search/browse results (/filematch, /ysearch, /search, /listfile,
+# /findtagged ...) - read back by /pick and /delete.
 song_shortlist = []
 
 
@@ -29,8 +29,8 @@ def send_multi_lines(bot, lines, text, linebreak="<br />"):
     for newline in lines:
         msg += br
         br = linebreak
-        if bot.mumble.max_message_length \
-                and (len(msg) + len(newline)) > (bot.mumble.max_message_length - 4):  # 4 == len("<br>")
+        if bot.link.max_message_length \
+                and (len(msg) + len(newline)) > (bot.link.max_message_length - 4):  # 4 == len("<br>")
             bot.send_msg(msg, text)
             msg = ""
         msg += newline
@@ -44,8 +44,8 @@ def send_multi_lines_in_channel(bot, lines, linebreak="<br />"):
     for newline in lines:
         msg += br
         br = linebreak
-        if bot.mumble.max_message_length \
-                and (len(msg) + len(newline)) > (bot.mumble.max_message_length - 4):  # 4 == len("<br>")
+        if bot.link.max_message_length \
+                and (len(msg) + len(newline)) > (bot.link.max_message_length - 4):  # 4 == len("<br>")
             bot.send_channel_msg(msg)
             msg = ""
         msg += newline

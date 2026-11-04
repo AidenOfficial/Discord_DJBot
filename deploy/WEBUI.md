@@ -57,13 +57,13 @@ docker compose logs -f cloudflared               # 看到 "Registered tunnel con
 Cloudflare Access 回源时会带上登录者邮箱(`Cf-Access-Authenticated-User-Email`),
 Web UI 据此识别"是谁":
 
-- 右上角头像 → 设置**别名**(显示名)。在 Web 上点的歌,Mumble 里和统计页都显示别名;
+- 右上角头像 → 设置**别名**(显示名)。在 Web 上点的歌,队列、公告和统计页都显示别名;
   不设则用邮箱 @ 前面的部分。别名全站唯一(不分大小写),不能含 `< > & "`。
 - **我喜欢的音乐**:正在播放、队列、搜索、曲库、歌单里每首歌旁的心形按钮一键收藏 / 取消,
-  收进名为 `Favorites` 的歌单(和聊天里的 `!fav` 是同一张,没有就自动建),歌单页置顶显示。
+  收进名为 `Favorites` 的歌单(和 Discord 里的 `/fav` 是同一张,没有就自动建),歌单页置顶显示。
 - **Playlists** 页:每个人自己的歌单。任意页面歌曲旁的"加入歌单"按钮可加入任意歌单,也可以
   把当前整个队列存成歌单;歌单可"立即播放 / 随机 / 追加到队列 / 单曲插播"。
-  整张歌单入队后(网页播放、`!mylist`、`!playlist <链接>`),队列里折叠成一行歌单,
+  整张歌单入队后(网页播放、`/mylist`、`/playlist <链接>`),队列里折叠成一行歌单,
   显示正在播第几首;点开才列出歌曲(大歌单一次只渲染 100 首),也可以整组移出队列。
   还没读到信息的链接先用歌单里存的标题占位,不再显示成一串 https://…
 - **公开 / 私人**:歌单默认私人。歌单标题下的"私人 / 公开"按钮切换。公开的歌单
@@ -86,20 +86,25 @@ access_aud = <Access 应用 Overview 页的 Application Audience (AUD) Tag>
 开启后每个请求都校验 `Cf-Access-Jwt-Assertion`,没有合法 JWT 的一律 403
 (局域网直连也会被拒,这是预期行为)。
 
-## 频道与跟随(Settings 页)
+## 语音频道与跟随(Settings 页)
 
-- 实时显示服务器的频道树和每个频道里的人(bot 自己高亮,其他 bot 置灰)。
-- **☆ Default**:设为默认频道,启动和 `!oust` 时回到这里;优先于 `[server] channel`。
-- **Move here**:让 bot 立刻过去。
+- 实时显示服务器的语音频道(按分类分组,和 Discord 里的顺序一致)和每个频道里的人
+  (bot 自己高亮,其他 bot 置灰并带机器人图标)。
+- **☆ Default**:设为默认频道,bot 启动时进这里;优先于 `[discord] channel`。
+  **不设默认频道**则启动时不进任何频道,等有人 `/play` 或 `/join`。
+- **Move here**:让 bot 立刻过去。**离开语音**:暂停并退出语音频道。
+- 只有 bot 有「查看频道 / 连接 / 说话」权限的语音频道才能进;没权限的显示锁标记。
+  舞台频道不支持;服务器的 AFK 频道标为 AFK,跟随模式不会进去。
 - 跟随模式:
   - *Stay put*:不动(默认)。
-  - *Follow the crowd*:bot 所在频道没人了(只剩 bot / `when_nobody_in_channel_ignore` 里的 bot),
+  - *Follow the crowd*:bot 所在频道没人了(其他 bot、`when_nobody_in_channel_ignore` 里的不算),
     就去最后离开的那个人去的频道;那人下线了就去人最多的频道。
-  - *Follow someone*:始终跟着指定的人;对方离线时按 *Follow the crowd* 处理。
+  - *Follow someone*:始终跟着指定的人;对方离线或进了 AFK 频道时按 *Follow the crowd* 处理。
   - 可选"服务器上一个人都没有时回默认频道"。
+  - bot 不在语音频道里(还没人叫过、被 `/leave` 了)时,跟随模式不会自己进频道。
 - 有人换频道后等 2.5 秒再决定,来回切频道不会把 bot 带着乱跑。
 - 开着跟随时,`when_nobody_in_channel = pause/stop` 不会在 bot 即将跟过去时误暂停/清空队列。
-- bot 需要有进入目标频道的权限(Mumble ACL),没权限的频道服务器会拒绝移动。
+- 有人把 bot 从语音里断开(右键 → 断开连接)时,bot 会暂停播放。
 
 ## 没人时自动暂停(Settings 页)
 
@@ -114,7 +119,7 @@ access_aud = <Access 应用 Overview 页的 Application Audience (AUD) Tag>
   已等待时间、预计还要几秒开播、下载速度。读取信息阶段没有速度数据,按最近几次的耗时估算。
 - 开播后如果还在后台下载,进度条上浅色部分是已下载的位置,下方显示下载进度和剩余时间;
   队列里正在预下载的歌显示下载百分比。
-- Mumble 里只有在大家真的在等(当前曲还没出声)超过 6 秒时才播报一次在等什么、还要多久;
+- Discord 里只有在大家真的在等(当前曲还没出声)超过 6 秒时才播报一次在等什么、还要多久;
   后台预下载、已经边下边播的都不再刷屏。
 - 实测(B 站 50 分钟视频,2026-10-08):点歌到出声 9.7 秒 → 5.6–6.0 秒。剩下的主要是
   yt-dlp 读取视频信息(B 站约 4.5 秒,会请求网页/合集/签名/格式/章节好几个接口)。
@@ -135,24 +140,23 @@ access_aud = <Access 应用 Overview 页的 Application Audience (AUD) Tag>
   再去 YouTube 按"时长接近 + 官方频道优先 + 排除翻唱/现场/AMV"挑最像的一个。
   找不到的会列出来。导入几百首大约要一两分钟,页面上有进度。
 - Spotify 歌单 100 首以内不需要任何凭据(读公开嵌入页);超过 100 首时,配置了
-  `[spotify] client_id / client_secret`(和 `!spotify` 命令同一套)才能读完整列表,否则只导入前 100 首。
+  `[spotify] client_id / client_secret`(和 `/spotify` 命令同一套)才能读完整列表,否则只导入前 100 首。
 - 实测(2026-10-08):网易云 262/265、Spotify 78/79、YouTube 9/9、QQ 音乐 270/398;
   每 100 首匹配约 30–40 秒。QQ 那个歌单以抖音/独立音乐人的中文歌和片段版为主,
   很多在 YouTube 上本来就没有,没匹配上的会列出来。
 - 简体歌单会同时用简体和繁体搜索、比较时统一转简体(YouTube 上中文歌多为繁体标题)。
 
-## 绑定 Mumble 账号
+## 绑定 Discord 账号
 
-- 网页右上角头像 → **Link Mumble account**,生成 6 位绑定码(10 分钟有效),
-  在 Mumble 里私聊 bot 发 `!bind 123456`。
-- 绑定后在聊天里:
-  - `!mylist`:列出我的歌单;
-  - `!mylist 名字或序号 [shuffle]`:把歌单加入播放队列;
-  - `!fav [歌单名]`:把当前这首加入歌单(默认 Favorites,没有就自动建);
-  - `!unbind`:解除绑定。
-- 还没设别名的话,绑定时自动用 Mumble 名当别名;统计页会把同一个人在聊天和网页上的点歌合并成一行。
-- Mumble 账号的识别优先级:服务器注册用户 ID > 客户端证书指纹 > 用户名。
-  没注册的用户换了客户端证书就需要重新绑定。
+- 网页右上角头像 → **绑定 Discord 账号**,生成 6 位绑定码(10 分钟有效),
+  在服务器里输入 `/bind code:123456`(回复只有你自己看得到)。
+- 绑定后在 Discord 里:
+  - `/mylist`:列出我的歌单;
+  - `/mylist playlist:<名字或序号> [shuffle:True]`:把歌单加入播放队列(歌单名可以自动补全);
+  - `/fav [playlist]`:把当前这首加入歌单(默认 Favorites,没有就自动建);
+  - `/unbind`:解除绑定。
+- 还没设别名的话,绑定时自动用 Discord 显示名当别名;统计页会把同一个人在 Discord 和网页上的点歌合并成一行。
+- 按 Discord 用户 ID 识别,改昵称不影响绑定。
 - 绑定码输错 5 次锁 10 分钟。
 
 ## 缓存与上传
@@ -168,7 +172,7 @@ access_aud = <Access 应用 Overview 页的 Application Audience (AUD) Tag>
 
 右上角下拉可切换 English / 简体中文 / 日本語,选择存在浏览器 localStorage(`lang`)。
 没选过时按浏览器语言自动匹配(zh-* → 简体中文,ja-* → 日本語,其余 English)。
-只影响 Web UI;bot 在 Mumble 里的回复仍由 `[bot] language` 决定。
+只影响 Web UI;bot 在 Discord 里的回复由 `[bot] language` 决定。斜杠命令的说明则按每个人自己的 Discord 语言显示(英文 / 简体中文 / 日文)。
 
 文案在 `webui/src/i18n/`:`en.ts` 是基准,`zh-CN.ts`、`ja.ts` 必须有同样的 key
 (缺 key 时 `npm run build` 的类型检查直接报错)。加新语言:复制一份语言包,在
@@ -179,7 +183,7 @@ access_aud = <Access 应用 Overview 页的 Application Audience (AUD) Tag>
 遇到 bug 时不用再翻 `docker compose logs`:
 
 - 实时滚动显示 bot 日志,可按级别(全部 / 信息 / 警告 / 错误)筛选、搜索;
-  带异常的行点开看完整调用栈。第三方库(pymumble-rev、Flask 路由异常)的警告和错误也会收进来。
+  带异常的行点开看完整调用栈。第三方库(discord.py、Flask 路由异常)的警告和错误也会收进来。
 - **跨重启保留**:日志同时写进 settings 库旁边的 `logs/bot-log.jsonl`(Docker 里是
   `data/logs/`,2MB 滚动、保留 3 份)。bot 崩溃 / 被 watchdog 杀掉重启后,面板里
   "bot 已重启"分隔线上方就是崩溃前的日志。
@@ -196,4 +200,5 @@ access_aud = <Access 应用 Overview 页的 Application Audience (AUD) Tag>
 - [ ] 直连 NAS IP:8181 从公网不可达(仅 Tunnel 出站)。
 - [ ] `/api/status` 轮询正常、控件/队列/搜索/统计各页可用。
 - [ ] 上传大小上限 `max_upload_file_size` 符合预期;上传一个 >100MB 的视频能成功并只剩音轨。
-- [ ] 右上角显示的是自己的 Access 邮箱;设置别名后点一首歌,Mumble 里显示别名。
+- [ ] 右上角显示的是自己的 Access 邮箱;设置别名后点一首歌,队列里显示别名。
+- [ ] bot 不在语音频道时,Now Playing 顶部有提示;Settings 里能让 bot 进出频道。

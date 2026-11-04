@@ -19,7 +19,7 @@ from media.cache import MusicCache
 
 from . import logbuffer
 from .cleanup import CacheCleaner
-from .core import MumbleBot
+from .core import DJBot
 
 
 def start_web_interface(addr, port):
@@ -47,7 +47,7 @@ def main():
     supported_languages = util.get_supported_language()
 
     parser = argparse.ArgumentParser(
-        description='Bot for playing music on Mumble')
+        description='Music bot for Discord voice channels')
 
     # General arguments
     parser.add_argument("--config", dest='config', type=str, default='configuration.ini',
@@ -64,23 +64,13 @@ def main():
     parser.add_argument("-v", "--verbose", dest="verbose",
                         action="store_true", help="Show debug log")
 
-    # Mumble arguments
-    parser.add_argument("-s", "--server", dest="host",
-                        type=str, help="Hostname of the Mumble server")
-    parser.add_argument("-u", "--user", dest="user",
-                        type=str, help="Username for the bot")
-    parser.add_argument("-P", "--password", dest="password",
-                        type=str, help="Server password, if required")
-    parser.add_argument("-T", "--tokens", dest="tokens",
-                        type=str, help="Server tokens to enter a channel, if required (multiple entries separated with comma ','")
-    parser.add_argument("-p", "--port", dest="port",
-                        type=int, help="Port for the Mumble server")
+    # Discord arguments
+    parser.add_argument("-t", "--token", dest="token",
+                        type=str, help="Discord bot token (or set DISCORD_TOKEN)")
+    parser.add_argument("-g", "--guild", dest="guild",
+                        type=str, help="ID of the Discord server the bot serves")
     parser.add_argument("-c", "--channel", dest="channel",
-                        type=str, help="Default channel for the bot")
-    parser.add_argument("-C", "--cert", dest="certificate",
-                        type=str, default=None, help="Certificate file")
-    parser.add_argument("-b", "--bandwidth", dest="bandwidth",
-                        type=int, help="Bandwidth used by the bot")
+                        type=str, help="Default voice channel: 'Category/Channel' or a channel ID")
 
     args = parser.parse_args()
 
@@ -154,14 +144,8 @@ def main():
     # ======================
     #     Load Database
     # ======================
-    if args.user:
-        username = args.user
-    else:
-        username = var.config.get("bot", "username")
-
-    sanitized_username = "".join([x if x.isalnum() else "_" for x in username])
     var.settings_db_path = args.db if args.db is not None else util.solve_filepath(
-        config.get("bot", "database_path") or f"settings-{sanitized_username}.db")
+        config.get("bot", "database_path") or "settings.db")
     var.music_db_path = args.music_db if args.music_db is not None else util.solve_filepath(
         config.get("bot", "music_database_path"))
 
@@ -239,8 +223,9 @@ def main():
     # ======================
     #  Create bot instance
     # ======================
-    var.bot = MumbleBot(args)
+    var.bot = DJBot(args)
     commands.register_all_commands(var.bot)
+    var.bot.start()
 
     # load playlist
     if var.config.getboolean('bot', 'save_playlist'):
@@ -279,7 +264,7 @@ def main():
     # 一次性工作线程的任何小错误(yt-dlp 返回 None 时长、发消息时恰好断线……)
     # 都会把整个 bot 带走,这正是线上反复"崩溃重启"的主因。
     # 现在只记录日志;只有 Web 服务线程死掉才退出进程让 Docker 拉起
-    # (Mumble 线程断开时主循环自己会退出,不需要这里兜底)。
+    # (Discord 连接彻底断开时主循环自己会退出,不需要这里兜底)。
     fatal_threads = {"WebThread"}
     if hasattr(threading, "excepthook"):
         def _thread_excepthook(args):

@@ -11,7 +11,7 @@
 
 "area: bot":
   - changed-files:
-      - any-glob-to-any-file: ["bot/**", "mumbleBot.py", "variables.py", "constants.py", "util.py", "database.py"]
+      - any-glob-to-any-file: ["bot/**", "djbot.py", "variables.py", "constants.py", "util.py", "database.py"]
 
 "area: commands":
   - changed-files:

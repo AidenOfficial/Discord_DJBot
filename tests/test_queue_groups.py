@@ -1,5 +1,5 @@
 """整张歌单入队后的分组、网页收藏(♥)、歌单占位标题、下载期间条目被移出缓存、
-聊天命令不在 pymumble 线程里处理。"""
+斜杠命令不在连接层的事件线程里处理。"""
 import os
 import sys
 import tempfile
@@ -251,21 +251,23 @@ class PlaceholderTitleTest(unittest.TestCase):
 
 class MessageWorkerTest(unittest.TestCase):
     def test_callback_returns_before_command_finishes(self):
-        from bot.core import MumbleBot
-        bot = MumbleBot.__new__(MumbleBot)
+        from bot.core import DJBot
+        bot = DJBot.__new__(DJBot)
         bot.log = mock.Mock()
+        bot.link = mock.Mock()
         done = threading.Event()
-        bot._handle_message = lambda text: (time.sleep(0.3), done.set())
+        bot._handle_command = lambda ctx: (time.sleep(0.3), done.set())
         bot._start_message_worker()
         started = time.time()
-        bot.message_received(object())
-        self.assertLess(time.time() - started, 0.1)  # pymumble 线程立刻回去发音频
+        bot.command_received(object())
+        self.assertLess(time.time() - started, 0.1)  # 连接层的事件线程立刻返回
         self.assertTrue(done.wait(2))
 
     def test_worker_survives_a_failing_command(self):
-        from bot.core import MumbleBot
-        bot = MumbleBot.__new__(MumbleBot)
+        from bot.core import DJBot
+        bot = DJBot.__new__(DJBot)
         bot.log = mock.Mock()
+        bot.link = mock.Mock()
         handled = []
         done = threading.Event()
 
@@ -274,13 +276,16 @@ class MessageWorkerTest(unittest.TestCase):
                 raise RuntimeError('x')
             handled.append(text)
             done.set()
-        bot._handle_message = handle
+        bot._handle_command = handle
         bot._start_message_worker()
-        bot.message_received('boom')
-        bot.message_received('ok')
+        bot.command_received('boom')
+        bot.command_received('ok')
         self.assertTrue(done.wait(2))
         self.assertEqual(handled, ['ok'])
         bot.log.exception.assert_called_once()
+        # 每条命令处理完(包括失败的)都要告诉连接层,好收起 "思考中…"
+        time.sleep(0.05)
+        self.assertEqual([c.args[0] for c in bot.link.finish.call_args_list], ['boom', 'ok'])
 
 
 if __name__ == '__main__':

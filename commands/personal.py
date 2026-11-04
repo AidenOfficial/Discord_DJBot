@@ -1,11 +1,11 @@
 # coding=utf-8
-"""个人歌单相关的聊天命令:Mumble 账号与 Web 身份绑定后,在聊天里也能用自己的歌单。
+"""个人歌单相关的斜杠命令:Discord 账号与 Web 身份绑定后,在 Discord 里也能用自己的歌单。
 
-  !bind <6位码>      在 Web 右上角头像里生成绑定码,发给 bot 完成绑定(建议私聊发)
-  !unbind            解除绑定
-  !mylist            列出我的歌单
-  !mylist <名字|序号> [shuffle]   把歌单加进播放队列
-  !fav [歌单名]       把当前这首加入歌单(默认 "Favorites",没有就自动建)
+  /bind code:<6位码>   在 Web 右上角头像里生成绑定码,发给 bot 完成绑定(回复只有自己看得到)
+  /unbind              解除绑定
+  /mylist              列出我的歌单
+  /mylist playlist:<名字|序号> [shuffle]   把歌单加进播放队列
+  /fav [playlist]      把当前这首加入歌单(默认 "Favorites",没有就自动建)
 """
 import re
 import time
@@ -20,31 +20,22 @@ from ._shared import log
 FAV_DEFAULT = web_users.FAVORITES_NAME
 MAX_FAILURES = 5
 LOCKOUT_SECONDS = 600
-_failures = {}  # mumble_key -> [失败时间戳]
+_failures = {}  # discord_key -> [失败时间戳]
 
 
-def mumble_key(bot, text):
-    """Mumble 账号的稳定标识:注册用户用 user_id,否则用证书指纹,最后才退回名字。"""
-    try:
-        user = bot.mumble.users[text.actor]
-    except Exception:
+def discord_key(bot, text):
+    """Discord 账号的稳定标识(user id 不随改名变)和当前显示名。"""
+    actor = getattr(text, 'actor', None)
+    if not actor:
         return None, ''
-    name = getattr(user, 'name', '') or ''
-    if name and var.config.getboolean('commands', 'split_username_at_space', fallback=False):
-        # 和命令分发里的 user 保持一致:点歌记录 / 队列按这个名字对上绑定关系
-        name = name.split()[0]
-    if getattr(user, 'user_id', None):
-        return f"uid:{user.user_id}", name
-    if getattr(user, 'cert_hash', None):
-        return f"cert:{user.cert_hash}", name
-    return f"name:{name}", name
+    return f"discord:{actor}", getattr(text, 'name', '') or ''
 
 
 def _identity(bot, text):
-    key, name = mumble_key(bot, text)
+    key, name = discord_key(bot, text)
     if not key or var.user_db is None:
         return None
-    return var.user_db.identity_for_mumble(key, name)
+    return var.user_db.identity_for_discord(key, name)
 
 
 def _require_identity(bot, text):
@@ -65,7 +56,7 @@ def cmd_bind(bot, user, text, command, parameter):
     if len(code) != 6:
         bot.send_msg(tr('bind_usage'), text)
         return
-    key, name = mumble_key(bot, text)
+    key, name = discord_key(bot, text)
     if not key or var.user_db is None:
         bot.send_msg(tr('bind_failed'), text)
         return
@@ -79,7 +70,7 @@ def cmd_bind(bot, user, text, command, parameter):
         bot.send_msg(tr('bind_failed'), text)
         return
     _failures.pop(key, None)
-    # 还没设别名的话,用 Mumble 名当别名:这样聊天点歌和网页点歌显示的是同一个名字
+    # 还没设别名的话,用 Discord 显示名当别名:这样聊天点歌和网页点歌显示的是同一个名字
     if not var.user_db.get_alias(identity):
         try:
             var.user_db.set_alias(identity, web_users._validate_alias_text(name))
@@ -90,8 +81,8 @@ def cmd_bind(bot, user, text, command, parameter):
 
 
 def cmd_unbind(bot, user, text, command, parameter):
-    key, _ = mumble_key(bot, text)
-    if key and var.user_db is not None and var.user_db.unlink_mumble(key):
+    key, _ = discord_key(bot, text)
+    if key and var.user_db is not None and var.user_db.unlink_discord(key):
         bot.send_msg(tr('unbind_success'), text)
     else:
         bot.send_msg(tr('bind_required'), text)

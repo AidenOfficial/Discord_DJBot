@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { createBindCode, fetchMe, saveAlias, unbindMumble } from '../api'
+import { createBindCode, fetchMe, saveAlias, unbindDiscord } from '../api'
 import { useMe } from '../composables/useMe'
 import { t, tParts } from '../i18n'
 import type { Key } from '../i18n/en'
@@ -42,7 +42,7 @@ async function save(alias: string) {
   }
 }
 
-// ---- Mumble 绑定:生成一次性码,等用户在 Mumble 里发 !bind ----
+// ---- Discord 绑定:生成一次性码,等用户在 Discord 里发 /bind ----
 const bind = ref<{ code: string; command: string; expires_at: number } | null>(null)
 const bindMsg = ref('')
 const bindOk = ref(false)
@@ -64,10 +64,10 @@ async function startBind() {
       }
       try {
         const fresh = await fetchMe()
-        if (fresh.mumble) {
+        if (fresh.discord) {
           me.value = fresh
           bind.value = null
-          bindMsg.value = t('me.linked', { name: fresh.mumble.mumble_name })
+          bindMsg.value = t('me.linked', { name: fresh.discord.discord_name })
           bindOk.value = true
           clearInterval(bindPoll)
         }
@@ -89,7 +89,7 @@ async function copyCommand() {
 
 async function unlink() {
   if (!confirm(t('me.confirmUnlink'))) return
-  me.value = await unbindMumble()
+  me.value = await unbindDiscord()
   bindMsg.value = t('me.unlinked')
   bindOk.value = false
 }
@@ -170,17 +170,17 @@ const SOURCE_LABEL: Record<string, Key> = {
           >{{ t('me.clear') }}</button>
         </div>
 
-        <!-- Mumble 账号绑定 -->
+        <!-- Discord 账号绑定 -->
         <div class="mt-4 border-t pt-3" :style="{ borderColor: 'var(--c-border)' }">
-          <p class="text-xs font-medium" :style="{ color: 'var(--c-text-muted)' }">{{ t('me.mumble') }}</p>
-          <template v-if="me?.mumble">
+          <p class="text-xs font-medium" :style="{ color: 'var(--c-text-muted)' }">{{ t('me.discord') }}</p>
+          <template v-if="me?.discord">
             <div class="mt-1 flex items-center justify-between">
-              <span class="text-sm"><Icon icon="headphones" class="mr-1.5" :style="{ color: 'var(--c-accent)' }" />{{ me.mumble.mumble_name }}</span>
+              <span class="text-sm"><Icon icon="headphones" class="mr-1.5" :style="{ color: 'var(--c-accent)' }" />{{ me.discord.discord_name }}</span>
               <button class="cursor-pointer border-0 bg-transparent p-0 text-xs underline"
                       :style="{ color: 'var(--c-text-muted)' }" @click="unlink">{{ t('me.unlink') }}</button>
             </div>
             <p class="mt-1 text-[11px]" :style="{ color: 'var(--c-text-faint)' }">
-              <template v-for="(p, i) in tParts('me.mumbleHint', { mylist: '!mylist', fav: '!fav' })" :key="i"><b
+              <template v-for="(p, i) in tParts('me.discordHint', { mylist: '/mylist', fav: '/fav' })" :key="i"><b
                 v-if="p.param">{{ p.text }}</b><template v-else>{{ p.text }}</template></template>
             </p>
           </template>

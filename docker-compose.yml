@@ -1,13 +1,13 @@
-# Mumble 音乐机器人 — 绿联 NAS / Docker 部署
+# Discord 音乐机器人 — NAS / Docker 部署
 # 完整使用说明见 deploy/DOCKER.md
 services:
   botamusique:
     # 用 GitHub Actions 构建好的镜像(master 每次推送自动发布 edge 标签,公开可拉取)。
     # 更新:docker compose pull && docker compose up -d
-    # 固定版本:在 .env 写 BAM_IMAGE=ghcr.io/aidenofficial/mumble-djbot:1.2.3
+    # 固定版本:在 .env 写 BAM_IMAGE=ghcr.io/aidenofficial/discord_djbot:1.2.3
     # 从本地源码构建:见 docker-compose.build.yml
-    image: ${BAM_IMAGE:-ghcr.io/aidenofficial/mumble-djbot:edge}
-    container_name: mumble-music
+    image: ${BAM_IMAGE:-ghcr.io/aidenofficial/discord_djbot:edge}
+    container_name: discord-music
     restart: unless-stopped
     init: true
     # 健康检查:90 秒内主循环没刷新心跳文件就判定 unhealthy。
@@ -20,6 +20,8 @@ services:
       retries: 3
       start_period: 120s
     environment:
+      # Discord bot token:写在同目录的 .env 里(DISCORD_TOKEN=...,.env 已 gitignore),不要写进这个文件。
+      DISCORD_TOKEN: ${DISCORD_TOKEN:?set DISCORD_TOKEN in .env}
       # 每次容器启动时把 yt-dlp / spotdl 升级到最新版(B 站 / YouTube 经常改版)。
       BAM_UPDATE_ON_START: "1"
       # 把状态数据库放进挂载目录,容器删除重建也不丢失。
@@ -45,7 +47,7 @@ services:
       # 可选:B 站大会员 / YouTube 登录 cookies(Netscape 格式),
       # 需要时取消下面这行的注释。
       # - ./cookies:/botamusique/cookies
-    # 机器人是"客户端",主动连出到 Mumble 服务器,无需映射端口。
+    # 机器人主动连出到 Discord,无需映射端口。
     #
     # Web 界面两种发布方式(configuration.ini 里 [webinterface] enabled=True,
     # listening_addr=0.0.0.0):
@@ -69,7 +71,7 @@ services:
   # (compose 服务名,同一默认网络内可直接解析)。
   cloudflared:
     image: cloudflare/cloudflared:latest
-    container_name: mumble-music-tunnel
+    container_name: discord-music-tunnel
     restart: unless-stopped
     profiles: ["tunnel"]
     command: tunnel --no-autoupdate run

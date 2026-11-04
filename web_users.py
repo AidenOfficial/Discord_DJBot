@@ -30,10 +30,10 @@ ALIAS_MAX_LEN = 24
 NAME_MAX_LEN = 60
 MAX_PLAYLISTS_PER_USER = 50
 MAX_ITEMS_PER_PLAYLIST = 1000
-# "我喜欢的音乐":网页上的 ♥ 和聊天里的 !fav 都往这个名字的歌单里加(没有就自动建)
+# "我喜欢的音乐":网页上的 ♥ 和Discord 里的 /fav 都往这个名字的歌单里加(没有就自动建)
 FAVORITES_NAME = 'Favorites'
 BIND_CODE_TTL = 600
-# 别名会被拼进 Mumble 的 HTML 消息里,禁止尖括号等标记字符
+# 别名会被拼进 聊天消息(HTML 转 Markdown)里,禁止尖括号等标记字符
 _ALIAS_RE = re.compile(r'^[^<>&"\'\x00-\x1f]+$')
 
 
@@ -152,7 +152,7 @@ _requester_names = {'db': None, 'at': 0.0, 'names': {}}
 
 def requester_display_name(user):
     """队列里显示的点歌人。网页点歌入队时记的已经是显示名,原样返回;
-    聊天点歌记的是 Mumble 名:绑定了 Web 身份就换成 Web 显示名,没绑定原样显示。
+    聊天点歌记的是 Discord 名:绑定了 Web 身份就换成 Web 显示名,没绑定原样显示。
     状态接口轮询得很勤,绑定表短暂缓存一下。"""
     if not user:
         return ''
@@ -218,12 +218,12 @@ class UserDatabase:
                 "added_at REAL NOT NULL)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_user_playlist_item_pl "
                          "ON user_playlist_item (playlist_id, position)")
-            # Mumble 账号 <-> Web 身份。一个 Web 身份只绑一个 Mumble 账号
+            # Discord 账号 <-> Web 身份。一个 Web 身份只绑一个 Discord 账号
             conn.execute(
-                "CREATE TABLE IF NOT EXISTS mumble_link ("
-                "mumble_key TEXT PRIMARY KEY,"
+                "CREATE TABLE IF NOT EXISTS discord_link ("
+                "discord_key TEXT PRIMARY KEY,"
                 "identity TEXT NOT NULL UNIQUE,"
-                "mumble_name TEXT NOT NULL DEFAULT '',"
+                "discord_name TEXT NOT NULL DEFAULT '',"
                 "linked_at REAL NOT NULL)")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS bind_code ("
@@ -274,7 +274,7 @@ class UserDatabase:
                          "ON CONFLICT(identity) DO UPDATE SET alias=excluded.alias, "
                          "last_seen=excluded.last_seen", (identity, email, alias, now, now))
 
-    # ---- Mumble 绑定 ----------------------------------------------------------
+    # ---- Discord 绑定 ----------------------------------------------------------
 
     def create_bind_code(self, identity, ttl=BIND_CODE_TTL):
         import secrets
@@ -292,7 +292,7 @@ class UserDatabase:
                     continue
         raise RuntimeError('could not allocate a bind code')
 
-    def consume_bind_code(self, code, mumble_key, mumble_name):
+    def consume_bind_code(self, code, discord_key, discord_name):
         """校验并消耗绑定码(一次性)。成功返回 identity,否则 None。"""
         now = time.time()
         with self._conn() as conn:
@@ -302,46 +302,46 @@ class UserDatabase:
                 return None
             identity = row['identity']
             conn.execute("DELETE FROM bind_code WHERE code=?", (code,))
-            conn.execute("DELETE FROM mumble_link WHERE identity=? OR mumble_key=?", (identity, mumble_key))
-            conn.execute("INSERT INTO mumble_link (mumble_key, identity, mumble_name, linked_at) "
-                         "VALUES (?, ?, ?, ?)", (mumble_key, identity, mumble_name, now))
+            conn.execute("DELETE FROM discord_link WHERE identity=? OR discord_key=?", (identity, discord_key))
+            conn.execute("INSERT INTO discord_link (discord_key, identity, discord_name, linked_at) "
+                         "VALUES (?, ?, ?, ?)", (discord_key, identity, discord_name, now))
             return identity
 
-    def identity_for_mumble(self, mumble_key, mumble_name=None):
-        """按 Mumble 账号找 Web 身份;顺便更新记住的名字(改名后统计合并用)。"""
+    def identity_for_discord(self, discord_key, discord_name=None):
+        """按 Discord 账号找 Web 身份;顺便更新记住的名字(改名后统计合并用)。"""
         with self._conn() as conn:
-            row = conn.execute("SELECT identity, mumble_name FROM mumble_link WHERE mumble_key=?",
-                               (mumble_key,)).fetchone()
+            row = conn.execute("SELECT identity, discord_name FROM discord_link WHERE discord_key=?",
+                               (discord_key,)).fetchone()
             if row is None:
                 return None
-            if mumble_name and row['mumble_name'] != mumble_name:
-                conn.execute("UPDATE mumble_link SET mumble_name=? WHERE mumble_key=?", (mumble_name, mumble_key))
+            if discord_name and row['discord_name'] != discord_name:
+                conn.execute("UPDATE discord_link SET discord_name=? WHERE discord_key=?", (discord_name, discord_key))
             return row['identity']
 
-    def mumble_link_for(self, identity):
+    def discord_link_for(self, identity):
         with self._conn() as conn:
-            row = conn.execute("SELECT mumble_name, linked_at FROM mumble_link WHERE identity=?",
+            row = conn.execute("SELECT discord_name, linked_at FROM discord_link WHERE identity=?",
                                (identity,)).fetchone()
             return dict(row) if row else None
 
     def unlink_identity(self, identity):
         with self._conn() as conn:
-            return conn.execute("DELETE FROM mumble_link WHERE identity=?", (identity,)).rowcount > 0
+            return conn.execute("DELETE FROM discord_link WHERE identity=?", (identity,)).rowcount > 0
 
-    def unlink_mumble(self, mumble_key):
+    def unlink_discord(self, discord_key):
         with self._conn() as conn:
-            return conn.execute("DELETE FROM mumble_link WHERE mumble_key=?", (mumble_key,)).rowcount > 0
+            return conn.execute("DELETE FROM discord_link WHERE discord_key=?", (discord_key,)).rowcount > 0
 
     def requester_display_names(self):
-        """{Mumble 名: Web 显示名}:统计页把同一个人在聊天和 Web 上的点歌合并。"""
+        """{Discord 名: Web 显示名}:统计页把同一个人在聊天和 Web 上的点歌合并。"""
         with self._conn() as conn:
-            rows = conn.execute("SELECT l.mumble_name, u.alias, u.email FROM mumble_link l "
+            rows = conn.execute("SELECT l.discord_name, u.alias, u.email FROM discord_link l "
                                 "LEFT JOIN web_user u ON u.identity = l.identity").fetchall()
         names = {}
         for r in rows:
             display = r['alias'] or (r['email'].split('@', 1)[0] if r['email'] else None)
-            if r['mumble_name'] and display:
-                names[r['mumble_name']] = display
+            if r['discord_name'] and display:
+                names[r['discord_name']] = display
         return names
 
     # ---- 歌单 ---------------------------------------------------------------
@@ -470,7 +470,7 @@ class UserDatabase:
             return cur.rowcount > 0
 
     def favorites_id(self, owner, create=False):
-        """收藏歌单(按名字认,和 !fav 一致)的 id;没有且 create=False 时返回 None。"""
+        """收藏歌单(按名字认,和 /fav 一致)的 id;没有且 create=False 时返回 None。"""
         with self._conn() as conn:
             row = conn.execute("SELECT id FROM user_playlist WHERE owner=? AND name=? COLLATE NOCASE "
                                "ORDER BY id LIMIT 1", (owner, FAVORITES_NAME)).fetchone()
@@ -813,7 +813,7 @@ def create_blueprint(requires_auth):
     def _me_payload(ident):
         data = ident.to_dict()
         data['jwt_verified'] = data['source'] == 'cloudflare-jwt'
-        data['mumble'] = var.user_db.mumble_link_for(ident.key) if ident.key and var.user_db else None
+        data['discord'] = var.user_db.discord_link_for(ident.key) if ident.key and var.user_db else None
         import web_logs
         data['can_view_logs'] = web_logs.can_view()
         return data
@@ -826,14 +826,14 @@ def create_blueprint(requires_auth):
     @api.route('/me/bind', methods=['POST'])
     @requires_auth
     def create_bind():
-        """生成 6 位一次性绑定码,10 分钟有效;在 Mumble 里发 !bind <码> 完成绑定。"""
+        """生成 6 位一次性绑定码,10 分钟有效;在 Discord 里发 /bind <码> 完成绑定。"""
         ident = current_identity()
         if not ident.key or var.user_db is None:
             abort(403)
         code, expires_at = var.user_db.create_bind_code(ident.key)
-        symbol = var.config.get('commands', 'command_symbol', fallback='!')[:1] or '!'
-        name = var.config.get('commands', 'bind', fallback='bind').split(',')[0].strip()
-        return jsonify({'code': code, 'expires_at': expires_at, 'command': f"{symbol}{name} {code}"})
+        command_name = getattr(var.bot, 'command_name', None)
+        name = command_name('bind') if command_name else 'bind'
+        return jsonify({'code': code, 'expires_at': expires_at, 'command': f"/{name} code:{code}"})
 
     @api.route('/me/bind', methods=['DELETE'])
     @requires_auth
@@ -943,7 +943,7 @@ def create_blueprint(requires_auth):
     @requires_auth
     def toggle_favorite():
         """Body: 同 /playlists/<id>/items 的来源字段 + favorite: true(收藏)/ false(取消)。
-        收藏歌单就是名叫 Favorites 的那张(和聊天里的 !fav 同一张),没有就自动建。"""
+        收藏歌单就是名叫 Favorites 的那张(和Discord 里的 /fav 同一张),没有就自动建。"""
         owner = _owner()
         payload = _payload()
         entries = _entries_from_source(payload)

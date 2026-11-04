@@ -104,7 +104,7 @@ def _query(service, video_id, categories):
     url = f"{SERVERS[service]}/api/skipSegments/{prefix}"
     params = {'categories': json.dumps(list(categories)), 'actionTypes': json.dumps(['skip'])}
     resp = requests.get(url, params=params, timeout=TIMEOUT,
-                        headers={'User-Agent': 'Mumble-DJBot (sponsorblock)'})
+                        headers={'User-Agent': 'Discord-DJBot (sponsorblock)'})
     if resp.status_code == 404:
         return []  # 没人标注过
     resp.raise_for_status()

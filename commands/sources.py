@@ -206,7 +206,7 @@ def cmd_rb_query(bot, user, text, command, parameter):
         rb = RadioBrowser()
         rb_stations = rb.search(name=parameter, name_exact=False)
         msg = tr('rb_query_result')
-        msg += '\n<table><tr><th>!rbplay ID</th><th>Station Name</th><th>Genre</th><th>Codec/Bitrate</th><th>Country</th></tr>'
+        msg += '\n<table><tr><th>ID</th><th>Station Name</th><th>Genre</th><th>Codec/Bitrate</th><th>Country</th></tr>'
         if not rb_stations:
             log.debug(f"cmd: No matches found for rbquery {parameter}")
             bot.send_msg(f"Radio-Browser found no matches for {parameter}", text)
@@ -227,7 +227,7 @@ def cmd_rb_query(bot, user, text, command, parameter):
             else:
                 log.debug('Result too long stage I')
                 msg = tr('rb_query_result') + ' (shortened L1)'
-                msg += '\n<table><tr><th>!rbplay ID</th><th>Station Name</th></tr>'
+                msg += '\n<table><tr><th>ID</th><th>Station Name</th></tr>'
                 for s in rb_stations:
                     station_id = s['stationuuid']
                     station_name = s['name']
@@ -239,7 +239,7 @@ def cmd_rb_query(bot, user, text, command, parameter):
                 else:
                     log.debug('Result too long stage II')
                     msg = tr('rb_query_result') + ' (shortened L2)'
-                    msg += '!rbplay ID - Station Name'
+                    msg += 'ID - Station Name'
                     for s in rb_stations:
                         station_id = s['stationuuid']
                         station_name = s['name'][:12]
@@ -365,7 +365,7 @@ def cmd_list_file(bot, user, text, command, parameter):
         count = 0
         for index, file in enumerate(files):
             if parameter:
-                match = re.search(re.escape(parameter), file['path'], re.IGNORECASE)  # 字面量,同 !filematch
+                match = re.search(re.escape(parameter), file['path'], re.IGNORECASE)  # 字面量,同 /filematch
                 if not match:
                     continue
 

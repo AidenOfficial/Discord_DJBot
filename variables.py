@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     import database
     import web_users
 
-bot: 'bot.core.MumbleBot' = None
+bot: 'bot.core.DJBot' = None
 playlist: 'media.playlist.BasePlaylist' = None
 cache: 'media.cache.MusicCache' = None
 cleaner: 'bot.cleanup.CacheCleaner' = None

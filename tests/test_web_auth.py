@@ -2,6 +2,7 @@
 """interface.check_auth:auth_method=password 时的 Basic Auth 校验。"""
 import configparser
 import os
+import types
 import sys
 
 import pytest
@@ -69,7 +70,9 @@ def test_token_page_when_no_token(interface, monkeypatch):
     constants.load_lang('zh_CN')
     monkeypatch.setattr(var, 'language', 'zh_CN')
     var.config.set('webinterface', 'auth_method', 'token')
-    var.config.set('bot', 'username', 'dj<bot>')
+    fake_bot = types.SimpleNamespace(link=types.SimpleNamespace(bot_name='dj<bot>'),
+                                     command_name=lambda key: 'web')
+    monkeypatch.setattr(var, 'bot', fake_bot)
     interface.bad_access_count.clear()
     try:
         rv = interface.web.test_client().get('/api/status')
@@ -79,7 +82,7 @@ def test_token_page_when_no_token(interface, monkeypatch):
     assert rv.status_code == 200
     assert '需要登录令牌' in body
     assert 'dj&lt;bot&gt;' in body  # 机器人名字转义
-    assert '"!web"' in body or '!web' in body
+    assert '/web' in body
     assert 'name="token"' in body
 
 

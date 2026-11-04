@@ -2,7 +2,7 @@
 # coding=utf-8
 """端到端冒烟测试 —— 验证 Spotify / Bilibili 下载链路与运行环境是否正常。
 
-这个脚本**不连接 Mumble 服务器**,只验证"拿到音频文件"为止的全部链路
+这个脚本**不连接 Discord**,只验证"拿到音频文件"为止的全部链路
 (这正是最容易因为 spotdl / Deno / yt-dlp / B 站反爬而出问题的部分),
 所以可以在 NAS 上、机器人正常运行的同时单独跑。
 
@@ -49,7 +49,7 @@ def section(title):
 
 
 def bootstrap_config():
-    """像 mumbleBot.py 那样加载分层配置,设置 var.config。"""
+    """像 djbot.py 那样加载分层配置,设置 var.config。"""
     import variables as var
     config = configparser.ConfigParser(interpolation=None, allow_no_value=True)
     read = config.read(
@@ -109,11 +109,22 @@ def check_imports():
             record("media.spotify 模块可用", "PASS")
         elif avail is False:
             record("media.spotify 模块可用", "FAIL",
-                   "命令层能启动但 !spotify 会被禁用(缺 spotdl?)")
+                   "命令层能启动但 /spotify 会被禁用(缺 spotdl?)")
         else:
             record("media.spotify 模块可用", "SKIP", "无 _spotify_available 标志")
     except Exception as e:
         record("import command", "FAIL", repr(e))
+    try:
+        # Discord 语音:libopus 能加载、DAVE(davey)和 PyNaCl 都装好了,否则进得了频道也发不出声音
+        import discord
+        import davey  # noqa: F401
+        import nacl  # noqa: F401
+        from bot import discord_link  # noqa: F401
+        loaded = discord.opus.is_loaded() or discord.opus._load_default()
+        record("discord.py 语音(libopus / DAVE / PyNaCl)", "PASS" if loaded else "FAIL",
+               f"discord.py {discord.__version__}" + ("" if loaded else ",找不到 libopus"))
+    except Exception as e:
+        record("discord.py 语音(libopus / DAVE / PyNaCl)", "FAIL", repr(e))
     try:
         # 听歌识曲的指纹在本地算(Rust 轮子),不联网也能验证镜像里装好了
         from media import recognize
@@ -259,7 +270,7 @@ def _probe(path, name):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Mumble 机器人下载链路冒烟测试")
+    ap = argparse.ArgumentParser(description="Discord 机器人下载链路冒烟测试")
     ap.add_argument("--only", choices=["tools", "imports", "bili", "spotify"],
                     action="append", help="只跑指定测试(可多次)")
     ap.add_argument("--full", action="store_true",

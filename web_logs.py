@@ -115,7 +115,7 @@ def create_blueprint(requires_auth):
         result = buffer.query(min_level=level, q=q, limit=10 ** 6)
         state = buffer.state()
         header = [
-            f"Mumble-DJBot logs · exported {time.strftime('%Y-%m-%d %H:%M:%S %z')}",
+            f"Discord-DJBot logs · exported {time.strftime('%Y-%m-%d %H:%M:%S %z')}",
             *_environment_lines(),
             f"current run: {state['run']} (started {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(state['started_at']))})"
             f" · bot log level: {state['level']}",

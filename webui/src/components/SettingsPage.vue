@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
-  fetchChannels, joinChannel, saveChannelSettings, type ChannelNode, type ChannelOverview, type FollowMode,
+  fetchChannels, joinChannel, leaveChannel, saveChannelSettings, type ChannelNode, type ChannelOverview,
+  type FollowMode,
 } from '../api'
 import ChannelTreeNode from './ChannelTreeNode.vue'
 import LogsPanel from './LogsPanel.vue'
@@ -48,7 +49,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => clearInterval(timer))
 
-function findPath(node: ChannelNode | null, id: number | null): string {
+function findPath(node: ChannelNode | null, id: string | null): string {
   if (!node || id === null) return ''
   if (node.id === id) return node.path.length ? node.path.join(' / ') : node.name
   for (const c of node.children) {
@@ -140,9 +141,27 @@ const modeHint = computed(() => {
       <div class="mt-5 rounded-2xl p-5" :style="{ background: 'var(--c-surface)', boxShadow: 'var(--shadow-1)' }">
         <h2 class="text-sm font-semibold uppercase tracking-wider" :style="{ color: 'var(--c-text-muted)' }">{{ t('set.channel') }}</h2>
         <p class="mt-2 text-sm">
-          <template v-for="(p, i) in tParts('set.nowIn', { cur: currentName || '—', def: defaultName || t('set.root') })" :key="i"><b
+          <template v-for="(p, i) in tParts('set.nowIn', { cur: currentName || t('set.notInVoice'), def: defaultName || t('set.noDefault') })" :key="i"><b
             v-if="p.param">{{ p.text }}</b><template v-else>{{ p.text }}</template></template>
         </p>
+        <div class="mt-2 flex flex-wrap gap-2">
+          <button
+            v-if="data.current_channel_id"
+            class="cursor-pointer rounded-full border-0 px-3 py-1 text-xs"
+            :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
+            :disabled="busy"
+            :title="t('set.leaveTitle')"
+            @click="apply(leaveChannel(), t('set.left'))"
+          ><Icon icon="right-from-bracket" class="mr-1" />{{ t('set.leave') }}</button>
+          <button
+            v-if="data.settings.default_path.length"
+            class="cursor-pointer rounded-full border-0 px-3 py-1 text-xs"
+            :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
+            :disabled="busy"
+            :title="t('set.clearDefaultTitle')"
+            @click="apply(saveChannelSettings({ default_channel_id: null }), t('set.defaultCleared'))"
+          ><Icon icon="xmark" class="mr-1" />{{ t('set.clearDefault') }}</button>
+        </div>
 
         <div class="mt-4 grid grid-cols-3 gap-1 rounded-2xl p-1 sm:inline-grid sm:rounded-full" :style="{ background: 'var(--c-surface-2)' }">
           <button
@@ -236,8 +255,8 @@ const modeHint = computed(() => {
             :current-id="data.current_channel_id"
             :default-id="data.settings.default_channel_id"
             :busy="busy"
-            @move="(id: number) => apply(joinChannel(id), t(data?.settings.follow === 'off' ? 'set.moving' : 'set.movingFollow'))"
-            @set-default="(id: number) => apply(saveChannelSettings({ default_channel_id: id }), t('set.defaultSaved'))"
+            @move="(id: string) => apply(joinChannel(id), t(data?.settings.follow === 'off' ? 'set.moving' : 'set.movingFollow'))"
+            @set-default="(id: string) => apply(saveChannelSettings({ default_channel_id: id }), t('set.defaultSaved'))"
           />
         </ul>
         <p v-else class="px-2 py-4 text-sm" :style="{ color: 'var(--c-text-muted)' }">{{ t('set.notConnected') }}</p>

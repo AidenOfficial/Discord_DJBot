@@ -3,40 +3,51 @@ import { computed } from 'vue'
 import type { ChannelNode } from '../api'
 import { t } from '../i18n'
 
-// 递归渲染一个频道及其子频道
+// 递归渲染服务器 → 分类 → 语音频道。只有 bot 能进的语音频道才有"移到这里 / 设为默认"按钮。
 const props = defineProps<{
   node: ChannelNode
-  currentId: number | null
-  defaultId: number | null
+  currentId: string | null
+  defaultId: string | null
   busy: boolean
   depth?: number
 }>()
-const emit = defineEmits<{ move: [id: number]; setDefault: [id: number] }>()
+const emit = defineEmits<{ move: [id: string]; setDefault: [id: string] }>()
 
 const depth = computed(() => props.depth ?? 0)
 const isHere = computed(() => props.node.id === props.currentId)
 const isDefault = computed(() => props.node.id === props.defaultId)
+const isVoice = computed(() => props.node.kind === 'voice' || props.node.kind === 'stage')
+const canUse = computed(() => props.node.kind === 'voice' && props.node.joinable)
 // 本频道里的真人数(不含 bot)
 const people = computed(() => props.node.users.filter((u) => !u.is_me && !u.is_bot).length)
+const icon = computed(() => ({
+  guild: 'server', category: 'folder', voice: 'volume-high', stage: 'microphone',
+}[props.node.kind] ?? 'hashtag'))
+// 分类名在 Discord 里是小号大写字母
+const isCategory = computed(() => props.node.kind === 'category')
 </script>
 
 <template>
   <li>
     <div
-      class="group flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl px-2.5 py-2"
+      class="group flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl px-2.5"
+      :class="isCategory ? 'pt-3 pb-1' : 'py-2'"
       :style="isHere ? { background: 'var(--c-accent-soft)' } : {}"
     >
-      <span class="flex min-w-0 items-center gap-1.5 text-sm font-medium"
-            :style="{ color: isHere ? 'var(--c-accent)' : 'var(--c-text)' }">
-        <Icon :icon="depth === 0 ? 'server' : 'hashtag'" class="w-3.5 shrink-0 text-xs opacity-60" aria-hidden="true" />
+      <span class="flex min-w-0 items-center gap-1.5"
+            :class="isCategory ? 'text-[11px] font-semibold uppercase tracking-wider' : 'text-sm font-medium'"
+            :style="{ color: isHere ? 'var(--c-accent)' : (isCategory ? 'var(--c-text-muted)' : (isVoice && !node.joinable ? 'var(--c-text-faint)' : 'var(--c-text)')) }">
+        <Icon :icon="icon" class="w-3.5 shrink-0 text-xs opacity-60" aria-hidden="true" />
         <span class="truncate">{{ node.name }}</span>
       </span>
       <span v-if="isDefault" class="rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
             :style="{ background: 'var(--c-surface-2)', color: 'var(--c-accent)' }" :title="t('ch.defaultTitle')"><Icon icon="star" class="mr-0.5" />{{ t('ch.default') }}</span>
-      <span v-if="node.temporary" class="text-[10px]" :style="{ color: 'var(--c-text-faint)' }">{{ t('ch.temporary') }}</span>
+      <span v-if="node.afk" class="text-[10px]" :style="{ color: 'var(--c-text-faint)' }" :title="t('ch.afkTitle')"><Icon icon="moon" class="mr-0.5" />{{ t('ch.afk') }}</span>
+      <span v-if="isVoice && !node.joinable" class="text-[10px]" :style="{ color: 'var(--c-text-faint)' }"
+            :title="t(node.kind === 'stage' ? 'ch.stageTitle' : 'ch.noAccessTitle')"><Icon icon="lock" class="mr-0.5" />{{ t(node.kind === 'stage' ? 'ch.stage' : 'ch.noAccess') }}</span>
       <span v-if="people" class="text-[11px] tabular-nums" :style="{ color: 'var(--c-text-faint)' }">{{ people }} <Icon icon="user" class="text-[10px]" /></span>
 
-      <span class="ml-auto flex shrink-0 gap-1 opacity-70 transition-opacity group-hover:opacity-100">
+      <span v-if="canUse" class="ml-auto flex shrink-0 gap-1 opacity-70 transition-opacity group-hover:opacity-100">
         <button
           v-if="!isHere"
           class="cursor-pointer rounded-md border-0 px-2 py-0.5 text-[11px]"
@@ -69,6 +80,7 @@ const people = computed(() => props.node.users.filter((u) => !u.is_me && !u.is_b
           <span class="flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-semibold"
                 :style="{ background: u.is_me ? 'rgba(255,255,255,0.25)' : 'var(--c-border)' }">
             <Icon v-if="u.is_me" icon="music" />
+            <Icon v-else-if="u.is_bot_account" icon="robot" />
             <template v-else>{{ u.name.charAt(0).toUpperCase() }}</template>
           </span>
           {{ u.name }}
@@ -78,7 +90,9 @@ const people = computed(() => props.node.users.filter((u) => !u.is_me && !u.is_b
       </div>
     </div>
 
-    <ul v-if="node.children.length" class="ml-4 border-l pl-2" :style="{ borderColor: 'var(--c-border)' }">
+    <ul v-if="node.children.length"
+        :class="depth === 0 ? '' : 'ml-4 border-l pl-2'"
+        :style="{ borderColor: 'var(--c-border)' }">
       <ChannelTreeNode
         v-for="child in node.children"
         :key="child.id"
@@ -87,8 +101,8 @@ const people = computed(() => props.node.users.filter((u) => !u.is_me && !u.is_b
         :default-id="defaultId"
         :busy="busy"
         :depth="depth + 1"
-        @move="(id: number) => emit('move', id)"
-        @set-default="(id: number) => emit('setDefault', id)"
+        @move="(id: string) => emit('move', id)"
+        @set-default="(id: string) => emit('setDefault', id)"
       />
     </ul>
   </li>

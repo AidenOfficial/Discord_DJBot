@@ -1,5 +1,5 @@
 # 构建多架构镜像并推送到 GHCR(ghcr.io/<owner>/<repo>)。
-#   push master      → :edge、:sha-<短 commit>
+#   push main        → :edge、:sha-<短 commit>
 #   push tag v1.2.3  → :1.2.3、:1.2、:latest、:sha-<短 commit>
 # 每个镜像附带 SBOM + 构建来源证明(provenance),推送后用 Trivy 扫描漏洞,
 # 结果进仓库 Security → Code scanning。
@@ -10,7 +10,7 @@ name: Docker publish
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     tags: ["v*.*.*"]
   pull_request:
     paths:
@@ -62,7 +62,7 @@ jobs:
 
       - name: Image name (lowercase)
         id: image
-        # GHCR 要求小写,而仓库名 AidenOfficial/Mumble-DJBot 含大写
+        # GHCR 要求小写,而仓库名 AidenOfficial/Discord_DJBot 含大写
         run: echo "name=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
       - name: Dependency refresh key
@@ -86,16 +86,16 @@ jobs:
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
-            type=edge,branch=master
+            type=edge,branch=main
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
-          # latest 只跟正式版 tag 走(semver 且非预发布),master 上的提交只更新 edge
+          # latest 只跟正式版 tag 走(semver 且非预发布),main 上的提交只更新 edge
           flavor: |
             latest=auto
           labels: |
-            org.opencontainers.image.title=Mumble DJBot
-            org.opencontainers.image.description=Mumble music bot with a web UI
+            org.opencontainers.image.title=Discord DJBot
+            org.opencontainers.image.description=Discord music bot with a web UI
 
       - name: Build & push by digest
         id: build
@@ -174,16 +174,16 @@ jobs:
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
-            type=edge,branch=master
+            type=edge,branch=main
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
-          # latest 只跟正式版 tag 走(semver 且非预发布),master 上的提交只更新 edge
+          # latest 只跟正式版 tag 走(semver 且非预发布),main 上的提交只更新 edge
           flavor: |
             latest=auto
           labels: |
-            org.opencontainers.image.title=Mumble DJBot
-            org.opencontainers.image.description=Mumble music bot with a web UI
+            org.opencontainers.image.title=Discord DJBot
+            org.opencontainers.image.description=Discord music bot with a web UI
 
       - name: Create & push manifest list
         id: push

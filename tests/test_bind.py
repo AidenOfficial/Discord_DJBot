@@ -1,4 +1,4 @@
-"""Mumble 账号 <-> Web 身份绑定,以及聊天里的 !mylist / !fav。"""
+"""Discord 账号 <-> Web 身份绑定,以及 /mylist / /fav。"""
 import configparser
 import os
 import sys
@@ -15,15 +15,15 @@ import web_users  # noqa: E402
 from commands import personal  # noqa: E402
 
 
-class FakeMumbleUser:
-    def __init__(self, name, user_id=None, cert_hash=None):
-        self.name, self.user_id, self.cert_hash = name, user_id, cert_hash
+class FakeDiscordUser:
+    def __init__(self, name, user_id):
+        self.name, self.user_id = name, user_id
 
 
 class FakeBot:
     def __init__(self, users):
-        self.mumble = mock.Mock()
-        self.mumble.users = users
+        self.link = mock.Mock()
+        self.link.users = users
         self.sent = []
         self.downloads = 0
 
@@ -35,8 +35,10 @@ class FakeBot:
 
 
 class Text:
-    def __init__(self, actor):
-        self.actor = actor
+    """CommandContext 的替身:actor = Discord user id,name = 显示名。"""
+    def __init__(self, user):
+        self.actor = user.user_id
+        self.name = user.name
 
 
 class Base(unittest.TestCase):
@@ -45,11 +47,10 @@ class Base(unittest.TestCase):
         self._saved = (var.user_db, var.playlist, var.config)
         var.user_db = web_users.UserDatabase(os.path.join(self.tmp.name, 's.db'))
         var.config = configparser.ConfigParser()
-        var.config.read_dict({'commands': {'command_symbol': '!:！', 'bind': 'bind'}})
         constants.load_lang('zh_CN')
         personal._failures.clear()
-        self.users = {1: FakeMumbleUser('Aiden', user_id=7), 2: FakeMumbleUser('guest', cert_hash='abc'),
-                      3: FakeMumbleUser('Mallory', user_id=9)}
+        self.users = {1: FakeDiscordUser('Aiden', 7), 2: FakeDiscordUser('guest', 8),
+                      3: FakeDiscordUser('Mallory', 9)}
         self.bot = FakeBot(self.users)
         self.db = var.user_db
         self.db.touch('aiden@x.com', 'aiden@x.com')
@@ -58,8 +59,11 @@ class Base(unittest.TestCase):
         var.user_db, var.playlist, var.config = self._saved
         self.tmp.cleanup()
 
+    def text(self, actor):
+        return Text(self.users[actor])
+
     def bind(self, actor, code):
-        personal.cmd_bind(self.bot, self.users[actor].name, Text(actor), 'bind', code)
+        personal.cmd_bind(self.bot, self.users[actor].name, self.text(actor), 'bind', code)
         return self.bot.sent[-1]
 
 
@@ -67,9 +71,9 @@ class BindTest(Base):
     def test_bind_sets_alias_and_is_one_time(self):
         code, _ = self.db.create_bind_code('aiden@x.com')
         self.assertIn('aiden@x.com', self.bind(1, code))
-        self.assertEqual(self.db.identity_for_mumble('uid:7'), 'aiden@x.com')
-        self.assertEqual(self.db.get_alias('aiden@x.com'), 'Aiden')    # 没别名时用 Mumble 名
-        self.assertEqual(self.db.mumble_link_for('aiden@x.com')['mumble_name'], 'Aiden')
+        self.assertEqual(self.db.identity_for_discord('discord:7'), 'aiden@x.com')
+        self.assertEqual(self.db.get_alias('aiden@x.com'), 'Aiden')    # 没别名时用 Discord 显示名
+        self.assertEqual(self.db.discord_link_for('aiden@x.com')['discord_name'], 'Aiden')
         self.assertIn('不对', self.bind(3, code))                        # 码只能用一次
 
     def test_existing_alias_kept(self):
@@ -88,17 +92,17 @@ class BindTest(Base):
             self.bind(3, '000000')
         code, _ = self.db.create_bind_code('aiden@x.com')
         self.assertIn('10 分钟', self.bind(3, code))                      # 正确的码也被拒
-        self.assertIsNone(self.db.identity_for_mumble('uid:9'))
+        self.assertIsNone(self.db.identity_for_discord('discord:9'))
 
     def test_rebind_moves_link_and_unbind(self):
         code, _ = self.db.create_bind_code('aiden@x.com')
         self.bind(1, code)
         code, _ = self.db.create_bind_code('aiden@x.com')
-        self.bind(2, code)                                                # 换一个 Mumble 账号
-        self.assertIsNone(self.db.identity_for_mumble('uid:7'))
-        self.assertEqual(self.db.identity_for_mumble('cert:abc'), 'aiden@x.com')
-        personal.cmd_unbind(self.bot, 'guest', Text(2), 'unbind', '')
-        self.assertIsNone(self.db.identity_for_mumble('cert:abc'))
+        self.bind(2, code)                                                # 换一个 Discord 账号
+        self.assertIsNone(self.db.identity_for_discord('discord:7'))
+        self.assertEqual(self.db.identity_for_discord('discord:8'), 'aiden@x.com')
+        personal.cmd_unbind(self.bot, 'guest', self.text(2), 'unbind', '')
+        self.assertIsNone(self.db.identity_for_discord('discord:8'))
 
     def test_requester_names_merge(self):
         code, _ = self.db.create_bind_code('aiden@x.com')
@@ -111,19 +115,19 @@ class BindTest(Base):
         self.bind(1, code)
         self.db.set_alias('aiden@x.com', 'DJ A')
         web_users._requester_names['db'] = None  # 跳过缓存
-        # 聊天点歌:绑定了显示 Web 昵称,没绑定显示 Mumble 名;网页点歌本来就是显示名
+        # Discord 点歌:绑定了显示 Web 昵称,没绑定显示 Discord 名;网页点歌本来就是显示名
         self.assertEqual(web_users.requester_display_name('Aiden'), 'DJ A')
         self.assertEqual(web_users.requester_display_name('Mallory'), 'Mallory')
         self.assertEqual(web_users.requester_display_name('Guest'), 'Guest')
         self.assertEqual(web_users.requester_display_name(''), '')
 
-    def test_mumble_rename_followed_on_next_command(self):
-        from bot.core import MumbleBot
+    def test_discord_rename_followed_on_next_command(self):
+        from bot.core import DJBot
         code, _ = self.db.create_bind_code('aiden@x.com')
         self.bind(1, code)
         self.users[1].name = 'Aiden2'
-        MumbleBot._refresh_mumble_link(self.bot, Text(1))
-        self.assertEqual(self.db.mumble_link_for('aiden@x.com')['mumble_name'], 'Aiden2')
+        DJBot._refresh_discord_link(self.bot, self.text(1))
+        self.assertEqual(self.db.discord_link_for('aiden@x.com')['discord_name'], 'Aiden2')
         self.assertEqual(self.db.requester_display_names(), {'Aiden2': 'Aiden'})
 
 
@@ -138,17 +142,17 @@ class PlaylistCommandTest(Base):
         var.playlist = mock.MagicMock()
 
     def test_unbound_user_gets_instructions(self):
-        personal.cmd_my_playlist(self.bot, 'Mallory', Text(3), 'mylist', '')
-        self.assertIn('!bind', self.bot.sent[-1])
+        personal.cmd_my_playlist(self.bot, 'Mallory', self.text(3), 'mylist', '')
+        self.assertIn('/bind', self.bot.sent[-1])
 
     def test_list_and_queue(self):
-        personal.cmd_my_playlist(self.bot, 'Aiden', Text(1), 'mylist', '')
+        personal.cmd_my_playlist(self.bot, 'Aiden', self.text(1), 'mylist', '')
         self.assertIn('深夜作业', self.bot.sent[-1])
         built = []
         with mock.patch('web_users.wrapper_from_entry',
                         side_effect=lambda e, u: built.append((e['title'], u)) or mock.Mock(group=None)):
-            personal.cmd_my_playlist(self.bot, 'Aiden', Text(1), 'mylist', '1')
-            personal.cmd_my_playlist(self.bot, 'Aiden', Text(1), 'mylist', '深夜 shuffle')
+            personal.cmd_my_playlist(self.bot, 'Aiden', self.text(1), 'mylist', '1')
+            personal.cmd_my_playlist(self.bot, 'Aiden', self.text(1), 'mylist', '深夜 shuffle')
         self.assertEqual(built[:3], [('S0', 'Aiden'), ('S1', 'Aiden'), ('S2', 'Aiden')])
         self.assertEqual(var.playlist.extend.call_count, 2)
         # 整张歌单入队时打成一组,网页队列里折叠显示
@@ -156,7 +160,7 @@ class PlaylistCommandTest(Base):
         self.assertEqual({w.group['key'] for w in queued}, {queued[0].group['key']})
         self.assertEqual(queued[0].group['name'], '深夜作业')
         self.assertEqual(self.bot.downloads, 2)
-        personal.cmd_my_playlist(self.bot, 'Aiden', Text(1), 'mylist', '不存在')
+        personal.cmd_my_playlist(self.bot, 'Aiden', self.text(1), 'mylist', '不存在')
         self.assertIn('不存在', self.bot.sent[-1])
 
     def test_fav_creates_default_playlist(self):
@@ -167,12 +171,12 @@ class PlaylistCommandTest(Base):
         current.format_title.return_value = 'Now'
         var.playlist.__len__.return_value = 1
         var.playlist.current_item.return_value = current
-        personal.cmd_favorite(self.bot, 'Aiden', Text(1), 'fav', '')
-        personal.cmd_favorite(self.bot, 'Aiden', Text(1), 'fav', '')
+        personal.cmd_favorite(self.bot, 'Aiden', self.text(1), 'fav', '')
+        personal.cmd_favorite(self.bot, 'Aiden', self.text(1), 'fav', '')
         names = [p['name'] for p in self.db.list_playlists('aiden@x.com')]
         self.assertIn('Favorites', names)
         self.assertIn('已经在', self.bot.sent[-1])
-        personal.cmd_favorite(self.bot, 'Aiden', Text(1), 'fav', '深夜作业')
+        personal.cmd_favorite(self.bot, 'Aiden', self.text(1), 'fav', '深夜作业')
         self.assertEqual(len(self.db.get_playlist('aiden@x.com', self.pid)['items']), 4)
 
 
@@ -182,17 +186,16 @@ class ApiTest(unittest.TestCase):
         base = WebBase('run')
         base.setUp()
         try:
-            var.config.read_dict({'commands': {'command_symbol': '!:！', 'bind': 'bind'}})
             c, h = base.client, base.as_user()
             self.assertEqual(c.post('/api/me/bind').status_code, 403)
             rv = c.post('/api/me/bind', headers=h).get_json()
             self.assertRegex(rv['code'], r'^\d{6}$')
-            self.assertEqual(rv['command'], f"!bind {rv['code']}")
+            self.assertEqual(rv['command'], f"/bind code:{rv['code']}")
             self.assertGreater(rv['expires_at'], time.time() + 500)
-            self.assertIsNone(c.get('/api/me', headers=h).get_json()['mumble'])
-            var.user_db.consume_bind_code(rv['code'], 'uid:1', 'Aiden')
-            self.assertEqual(c.get('/api/me', headers=h).get_json()['mumble']['mumble_name'], 'Aiden')
-            self.assertIsNone(c.delete('/api/me/bind', headers=h).get_json()['mumble'])
+            self.assertIsNone(c.get('/api/me', headers=h).get_json()['discord'])
+            var.user_db.consume_bind_code(rv['code'], 'discord:1', 'Aiden')
+            self.assertEqual(c.get('/api/me', headers=h).get_json()['discord']['discord_name'], 'Aiden')
+            self.assertIsNone(c.delete('/api/me/bind', headers=h).get_json()['discord'])
         finally:
             base.tearDown()
 

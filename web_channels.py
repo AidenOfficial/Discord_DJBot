@@ -1,4 +1,8 @@
-"""频道 API(/api/channels*):频道树、默认频道、跟随设置、立即移动。逻辑在 bot/channels.py。"""
+"""频道 API(/api/channels*):语音频道树、默认频道、跟随设置、立即移动 / 离开。逻辑在 bot/channels.py。
+
+Discord 的频道 / 用户 ID 是 64 位整数,超过 JavaScript Number 的安全范围(2^53),
+所以 JSON 里一律转成字符串;收到的也按字符串解析。
+"""
 
 import logging
 
@@ -15,18 +19,42 @@ def _payload():
     return request.get_json(silent=True) or request.form or {}
 
 
+def _sid(value):
+    return None if value is None else str(value)
+
+
+def _node(node):
+    """频道树节点里的 ID 转字符串。"""
+    if node is None:
+        return None
+    out = dict(node)
+    out['id'] = _sid(node['id'])
+    out['users'] = [dict(u, session=_sid(u['session'])) for u in node.get('users', [])]
+    out['children'] = [_node(c) for c in node.get('children', [])]
+    return out
+
+
+def _parse_id(raw):
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        abort(400)
+
+
 def overview():
     bot = var.bot
     settings = bot.channel_settings()
     tree = bot.channel_tree()
     humans = sorted({u.name for users in bot.humans_by_channel().values() for u in users},
                     key=str.lower)
+    default_id = bot.find_channel_by_path(settings['default']) if settings['default'] else None
     return {
-        'tree': tree,
-        'current_channel_id': bot.my_channel_id(),
+        'tree': _node(tree),
+        'server_name': getattr(bot.link, 'guild_name', '') or '',
+        'current_channel_id': _sid(bot.my_channel_id()),
         'settings': {
             'default_path': settings['default'],
-            'default_channel_id': bot.find_channel_by_path(settings['default']),
+            'default_channel_id': _sid(default_id),
             'follow': settings['follow'],
             'follow_user': settings['follow_user'],
             'return_home': settings['return_home'],
@@ -51,13 +79,14 @@ def create_blueprint(requires_auth):
         payload = _payload()
         changes = {}
         if 'default_channel_id' in payload:
-            try:
-                cid = int(payload['default_channel_id'])
-            except (TypeError, ValueError):
-                abort(400)
-            if cid not in var.bot.mumble.channels:
-                abort(404)
-            changes['default'] = var.bot.channel_path(cid)
+            raw = payload['default_channel_id']
+            if raw in (None, ''):
+                changes['default'] = []  # 不自动进频道
+            else:
+                cid = _parse_id(raw)
+                if not var.bot._joinable(cid):
+                    abort(404)
+                changes['default'] = var.bot.channel_path(cid)
         if 'follow' in payload:
             if payload['follow'] not in FOLLOW_MODES:
                 abort(400)
@@ -88,13 +117,21 @@ def create_blueprint(requires_auth):
     @api.route('/join', methods=['POST'])
     @requires_auth
     def channel_join():
-        try:
-            cid = int(_payload().get('channel_id'))
-        except (TypeError, ValueError):
-            abort(400)
-        if cid not in var.bot.mumble.channels:
+        cid = _parse_id(_payload().get('channel_id'))
+        if not var.bot._joinable(cid):
             abort(404)
-        var.bot.move_to_channel(cid, f"requested by {current_user_name()} on the web")
+        if not var.bot.move_to_channel(cid, f"requested by {current_user_name()} on the web") \
+                and var.bot.my_channel_id() != cid:
+            abort(502)
+        return jsonify(overview())
+
+    @api.route('/leave', methods=['POST'])
+    @requires_auth
+    def channel_leave():
+        if var.bot.my_channel_id() is not None:
+            log.info("web: %s asked the bot to leave the voice channel", current_user_name())
+            var.bot.pause()
+            var.bot.leave_voice()
         return jsonify(overview())
 
     return api

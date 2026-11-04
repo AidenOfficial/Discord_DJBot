@@ -1,4 +1,5 @@
 # coding=utf-8
+import html
 
 from constants import tr_cli as tr
 import util
@@ -8,28 +9,45 @@ from media.item import item_id_generators
 
 
 def cmd_joinme(bot, user, text, command, parameter):
-    if parameter:
-        # 带了访问令牌:先把它加到本次会话的令牌里,再进对方所在的(可能受限的)频道
-        bot.mumble.set_tokens(bot.mumble.tokens + [parameter])
-    bot.mumble.move(bot.mumble.users[text.actor].channel_id)
+    channel_id = getattr(text, 'voice_channel_id', None)
+    if channel_id is None:
+        bot.send_msg(tr('join_voice_first'), text)
+        return
+    if channel_id == bot.my_channel_id():
+        bot.send_msg(tr('already_here'), text)
+        return
+    if bot.move_to_channel(channel_id, f'/join by {user}'):
+        bot.send_msg(tr('joined_channel', channel=bot.channel_display_name(channel_id)), text)
+    else:
+        bot.send_msg(tr('cannot_join_voice'), text)
+
+
+def _option_user_name(text, parameter):
+    options = getattr(text, 'options', None) or {}
+    return options.get('user_name') or parameter
 
 
 def cmd_user_ban(bot, user, text, command, parameter):
+    # parameter 是 Discord user id(斜杠命令的 user 参数);值里记显示名,列表好认
     if parameter:
-        var.db.set("user_ban", parameter, None)
-        bot.send_msg(tr("user_ban_success", user=parameter), text)
+        name = _option_user_name(text, parameter)
+        var.db.set("user_ban", parameter, html.escape(name))
+        bot.send_msg(tr("user_ban_success", user=html.escape(name)), text)
     else:
         ban_list = "<ul>"
-        for i in var.db.items("url_ban"):
-            ban_list += "<li>" + i[0] + "</li>"
+        for uid, name in var.db.items("user_ban"):
+            ban_list += "<li>" + (name or '?') + f" ({uid})</li>"
         ban_list += "</ul>"
         bot.send_msg(tr("user_ban_list", list=ban_list), text)
 
 
 def cmd_user_unban(bot, user, text, command, parameter):
+    name = html.escape(_option_user_name(text, parameter))
     if parameter and var.db.has_option("user_ban", parameter):
         var.db.remove_option("user_ban", parameter)
-        bot.send_msg(tr("user_unban_success", user=parameter), text)
+        bot.send_msg(tr("user_unban_success", user=name), text)
+    else:
+        bot.send_msg(tr("user_not_banned", user=name), text)
 
 
 def cmd_url_ban(bot, user, text, command, parameter):
@@ -112,9 +130,10 @@ def cmd_url_unwhitelist(bot, user, text, command, parameter):
 
 
 def cmd_help(bot, user, text, command, parameter):
-    bot.send_msg(tr('help'), text)
-    if bot.is_admin(user):
-        bot.send_msg(tr('admin_help'), text)
+    from . import slash
+    from ._shared import send_multi_lines
+    lines = slash.help_lines(var.language, include_admin=bot.is_admin(text), config=var.config)
+    send_multi_lines(bot, [tr('help_header')] + lines, text)
 
 
 
@@ -124,7 +143,7 @@ def cmd_kill(bot, user, text, command, parameter):
 
 
 def cmd_update(bot, user, text, command, parameter):
-    if bot.is_admin(user):
+    if bot.is_admin(text):
         bot.send_msg(tr('start_updating'), text)
         bot.send_msg(util.upgrade_extractors(), text)
     else:
@@ -135,7 +154,3 @@ def cmd_update(bot, user, text, command, parameter):
 def cmd_version(bot, user, text, command, parameter):
     bot.send_msg(tr('report_version', version=bot.get_version()), text)
 
-
-# Just for debug use
-def cmd_real_time_rms(bot, user, text, command, parameter):
-    bot._display_rms = not bot._display_rms

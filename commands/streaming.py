@@ -55,7 +55,7 @@ def _enqueue_live(bot, user, url, title, text):
 
 
 def cmd_play_live(bot, user, text, command, parameter):
-    """!live <url | keywords> - queue a live audio stream (YouTube etc.).
+    """/live <url | keywords> - queue a live audio stream (YouTube etc.).
 
     With a URL the stream is queued directly (validated in the download
     thread). With keywords, a background thread searches YouTube for a
@@ -71,7 +71,7 @@ def cmd_play_live(bot, user, text, command, parameter):
         _enqueue_live(bot, user, url, '', text)
         return
 
-    # keyword search hits the network - never block the mumble loop thread
+    # keyword search hits the network - never block the command thread
     bot.send_msg(tr('live_searching', query=parameter), text)
 
     def search_and_enqueue():
@@ -119,7 +119,7 @@ def _spotify_feeder_loop(bot, user, url, cancel_event):
     fed = 0
     hard_failures = 0
     while fed < len(tracks):
-        if cancel_event.is_set() or bot.exit or not bot.mumble.alive:
+        if cancel_event.is_set() or bot.exit or not bot.link.alive:
             log.info("cmd: spotify feeder stopped (cancelled or bot exiting)")
             return
 

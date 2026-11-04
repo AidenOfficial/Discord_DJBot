@@ -108,7 +108,7 @@ def ids(pl):
 
 
 class FakeLink:
-    """MumbleLink 里播放循环用到的部分。"""
+    """DiscordLink 里播放循环用到的部分。"""
     alive = True
     audio_buffered = 0.0
     volume = 1.0
@@ -142,7 +142,7 @@ class Player(PlayerMixin):
     def __init__(self):
         self.log = logging.getLogger('test')
         self.stereo = True
-        self.mumble = FakeLink()
+        self.link = FakeLink()
         self.exit = False
         self.thread = None
         self.read_pcm_size = 0

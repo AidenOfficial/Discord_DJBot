@@ -9,4 +9,4 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: mumble-music:local
+    image: discord-music:local

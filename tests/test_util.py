@@ -1,5 +1,5 @@
 # coding=utf-8
-"""Unit tests for the pure helpers in util.py (no network, no Mumble)."""
+"""Unit tests for the pure helpers in util.py (no network, no Discord)."""
 import os
 import sys
 

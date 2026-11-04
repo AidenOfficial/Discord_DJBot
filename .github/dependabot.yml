@@ -3,7 +3,7 @@
 #
 # 刻意没有配置的生态:
 #   pip    —— requirements.txt 不锁版本(镜像构建 / 启动时总装最新的 yt-dlp、spotdl),
-#             pymumble-rev 是 git commit 依赖,Dependabot 都无法更新。
+#             Dependabot 没有可更新的锁定版本。
 #   docker —— 基础镜像固定在 python:3.12 / node:22(3.13 起没有 audioop),
 #             Dependabot 只会提议升到不能用的版本。
 version: 2

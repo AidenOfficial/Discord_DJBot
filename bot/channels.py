@@ -1,7 +1,8 @@
-"""频道:探测服务器频道树、默认频道(Web 可配置)、自动跟随用户。
+"""语音频道:服务器频道树、默认频道(Web 可配置)、自动跟随用户。
 
 设置存在 settings 数据库的 channel 段,优先于 configuration.ini 的 [server] channel:
-  default   默认频道路径(JSON 名字列表,根频道 = []);启动、!oust 时回到这里
+  default   默认语音频道路径(JSON 名字列表 [分类, 频道],不在分类里的频道就是 [频道];
+            [] = 不自动进频道,等有人 /play 或 /join);启动时进这里
   follow    跟随模式:off / auto / user
               auto  所在频道没人了(只剩 bot)就去找人:优先去最后离开的那位去的频道,
                     否则去人最多的频道
@@ -12,8 +13,12 @@
   idle_resume         自动暂停后有人回来就自动继续播放(1/0,默认 1)
 
 连接层的用户事件回调里只记录事件,真正的决策放到防抖定时器线程里做
-(人在频道间来回切时不会被带着乱跑)。self.mumble 是 bot.mumble_link.MumbleLink;
-本模块不 import 通信库,单测用假的 mumble 对象即可。
+(人在频道间来回切时不会被带着乱跑)。self.link 是 bot.discord_link.DiscordLink;
+本模块不 import 通信库,单测用假的 link 对象即可。
+
+Discord 的频道 dict 里多了 kind(guild / category / voice / stage)、joinable(bot 有权限进)、
+afk(服务器的 AFK 频道)。根节点 0 是服务器本身,分类和语音频道挂在下面;只有 joinable 的
+语音频道能进,跟随时也不会进 AFK 频道。
 """
 
 import json
@@ -84,13 +89,17 @@ class ChannelMixin:
     # ---- 频道树 -----------------------------------------------------------
 
     def _channels(self):
-        return dict(self.mumble.channels)
+        return dict(self.link.channels)
 
     def _users(self):
-        return list(self.mumble.users.values())
+        return list(self.link.users.values())
 
     def my_channel_id(self):
-        return self.mumble.my_channel_id
+        return self.link.my_channel_id
+
+    def channel_display_name(self, channel_id):
+        ch = self._channels().get(channel_id)
+        return ch.get('name', '?') if ch else '?'
 
     def channel_path(self, channel_id, channels=None):
         """根频道 -> [];其余返回从根往下的名字列表。"""
@@ -105,8 +114,11 @@ class ChannelMixin:
         return path
 
     def find_channel_by_path(self, path, channels=None):
-        """按名字逐级向下找,返回 channel_id;找不到返回 None。"""
+        """按名字逐级向下找,返回 channel_id;找不到返回 None。
+        也接受只有一个元素的频道 ID(配置文件里直接写 ID 最不容易错)。"""
         channels = channels or self._channels()
+        if len(path) == 1 and str(path[0]).isdigit() and int(path[0]) in channels:
+            return int(path[0])
         current = 0 if 0 in channels else None
         if current is None:
             return None
@@ -123,10 +135,20 @@ class ChannelMixin:
 
     def _is_ignored(self, user):
         """bot 自己和 when_nobody_in_channel_ignore 里列出的其他 bot 不算人。"""
-        myself = self.mumble.myself
+        myself = self.link.myself
         if myself is not None and user.session == myself.session:
             return True
+        if getattr(user, 'bot', False):
+            return True
         return user.name in getattr(self, 'bots', set())
+
+    def _joinable(self, channel_id, channels=None):
+        ch = (channels or self._channels()).get(channel_id)
+        return bool(ch) and ch.get('joinable', True) and ch.get('kind', 'voice') == 'voice'
+
+    def _follow_candidate(self, channel_id, channels):
+        ch = channels.get(channel_id)
+        return self._joinable(channel_id, channels) and not ch.get('afk')
 
     def humans_by_channel(self):
         counts = {}
@@ -140,7 +162,7 @@ class ChannelMixin:
         """给 Web 用的嵌套频道树快照。"""
         channels = self._channels()
         users = self._users()
-        myself = self.mumble.myself
+        myself = self.link.myself
         by_channel = {}
         for u in users:
             by_channel.setdefault(u.channel_id, []).append({
@@ -148,6 +170,7 @@ class ChannelMixin:
                 'name': u.name,
                 'is_me': myself is not None and u.session == myself.session,
                 'is_bot': self._is_ignored(u),
+                'is_bot_account': bool(getattr(u, 'bot', False)),
                 'muted': bool(getattr(u, 'self_mute', False) or getattr(u, 'mute', False)),
                 'deafened': bool(getattr(u, 'self_deaf', False) or getattr(u, 'deaf', False)),
             })
@@ -166,6 +189,9 @@ class ChannelMixin:
                 'name': ch.get('name') or ('Root' if cid == 0 else '?'),
                 'path': self.channel_path(cid, channels),
                 'temporary': bool(ch.get('temporary', False)),
+                'kind': ch.get('kind', 'voice'),
+                'joinable': self._joinable(cid, channels),
+                'afk': bool(ch.get('afk', False)),
                 'users': sorted(by_channel.get(cid, []), key=lambda u: u['name'].lower()),
                 'children': [node(k, depth + 1) for k in kids if depth < 32],
             }
@@ -177,15 +203,14 @@ class ChannelMixin:
     def move_to_channel(self, channel_id, reason=''):
         if channel_id is None or channel_id == self.my_channel_id():
             return False
-        if channel_id not in self.mumble.channels:
+        if not self._joinable(channel_id):
             return False
         log.info("channel: moving to %s%s", '/'.join(self.channel_path(channel_id)) or '(root)',
                  f" ({reason})" if reason else '')
-        self.mumble.move(channel_id)
-        return True
+        return self.link.move(channel_id)
 
     def join_channel(self):
-        """去默认频道(启动时、!oust 时调用)。"""
+        """去默认频道(启动时调用)。没配置默认频道就不动。"""
         path = self.channel_settings()['default']
         if not path:
             return
@@ -241,18 +266,22 @@ class ChannelMixin:
         settings = self.channel_settings()
         mode = settings['follow']
         mine = self.my_channel_id()
-        humans = self.humans_by_channel()
+        channels = self._channels()
+        humans = {cid: users for cid, users in self.humans_by_channel().items()
+                  if cid == mine or self._follow_candidate(cid, channels)}
 
         if mode == 'user':
             name = settings['follow_user']
             for users in humans.values():
                 for u in users:
-                    if u.name == name:
+                    if name in (u.name, getattr(u, 'username', None), str(u.session)):
                         return u.channel_id if u.channel_id != mine else None
             # 跟随对象不在线:退回到"空了就找人"的逻辑
         elif mode != 'auto':
             return None
 
+        if mine is None:
+            return None  # 不在语音里(还没人叫过 / 被 /leave 了):不主动进频道
         if humans.get(mine):
             return None  # 本频道还有人,不动
         if self._last_leaver and time.time() - self._last_leaver[0] < LAST_LEAVER_TTL:
@@ -261,8 +290,10 @@ class ChannelMixin:
                 return target
         if humans:
             # 人最多的频道;平手取 id 小的,结果稳定
-            return max(humans, key=lambda cid: (len(humans[cid]), -cid))
-        if settings['return_home'] and settings['default'] is not None:
+            others = {cid: users for cid, users in humans.items() if cid != mine}
+            if others:
+                return max(others, key=lambda cid: (len(others[cid]), -cid))
+        if settings['return_home'] and settings['default']:
             home = self.find_channel_by_path(settings['default'])
             if home is not None and home != mine:
                 return home
