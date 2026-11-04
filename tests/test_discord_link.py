@@ -321,3 +321,174 @@ class CommandTreeTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class FakeVoiceClient:
+    def __init__(self, connected=True, playing=False, player_alive=True, source=None, play_error=None):
+        self._connected = connected
+        self._playing = playing
+        self._player = types.SimpleNamespace(is_alive=lambda: player_alive) if playing else None
+        self.source = source
+        self.channel = types.SimpleNamespace(bitrate=8000)
+        self.play_error = play_error
+        self.plays = []
+        self.stops = 0
+
+    def is_connected(self):
+        return self._connected
+
+    def is_playing(self):
+        return self._playing
+
+    def stop(self):
+        self.stops += 1
+        self._playing = False
+        self._player = None
+
+    def play(self, source, **kw):
+        if self.play_error is not None:
+            raise self.play_error
+        self.plays.append(kw)
+        self._playing = True
+
+
+class PlayerRecoveryTest(unittest.TestCase):
+    """语音重连 / 网关重连 / 编码器出错后,播放不能卡死(播放线程会一直卡在写缓冲上)。"""
+
+    def setUp(self):
+        self.lt = LoopThread()
+        self.link = DiscordLink('token', guild_id=1)
+        self.link._loop = self.lt.loop
+        self.vc = None
+        self.link._guild = lambda: types.SimpleNamespace(voice_client=self.vc)
+        self.link._pcm.set_sink(lambda: None)
+        self.link._pcm.write(pcm(1))
+        self.link._pcm._playing = True
+
+    def tearDown(self):
+        self.lt.stop()
+
+    def start(self):
+        self.lt.loop.call_soon_threadsafe(self.link._start_player, 0)
+        time.sleep(0.1)
+
+    def test_dead_player_is_replaced(self):
+        # AudioPlayer 等语音重连超时后直接 return,不调 stop():is_playing() 仍是 True
+        self.vc = FakeVoiceClient(playing=True, player_alive=False, source=self.link._pcm)
+        self.start()
+        self.assertEqual(self.vc.stops, 1)
+        self.assertEqual(len(self.vc.plays), 1)
+        self.assertEqual(self.vc.plays[0]['bitrate'], 16)  # 频道 8 kbps:夹到 Opus 的下限
+
+    def test_play_error_does_not_wedge(self):
+        self.vc = FakeVoiceClient(play_error=discord.opus.OpusNotLoaded())
+        self.start()
+        self.assertFalse(self.link._pcm.playing)
+
+    def test_no_voice_client_disconnects_the_sink(self):
+        self.vc = None
+        self.start()
+        self.assertIsNone(self.link._pcm._sink)
+        self.assertEqual(self.link._pcm.buffered, 0)
+
+    def test_after_callback_clears_a_dead_player(self):
+        self.vc = FakeVoiceClient(playing=True, player_alive=False, source=self.link._pcm)
+        self.link._player_after(None)
+        time.sleep(0.1)
+        self.assertGreaterEqual(self.vc.stops, 1)
+
+
+class ReplyEdgeCaseTest(LinkTest):
+    def test_late_reply_after_thinking_was_dropped_uses_followup(self):
+        ctx = self.ctx()
+        with mock.patch.object(dl, 'FINISH_GRACE', 0.01):
+            self.link.finish(ctx)
+            time.sleep(0.15)
+        ctx.interaction.delete_original_response.assert_awaited_once()
+        self.link.reply(ctx, 'lyrics, ten seconds later')
+        ctx.interaction.edit_original_response.assert_not_called()
+        ctx.interaction.followup.send.assert_awaited_once()
+
+    def test_edit_not_found_falls_back_to_followup(self):
+        ctx = self.ctx()
+        response = types.SimpleNamespace(status=404, reason='Not Found')
+        ctx.interaction.edit_original_response.side_effect = discord.NotFound(response, 'Unknown Message')
+        self.link.reply(ctx, 'hello')
+        ctx.interaction.followup.send.assert_awaited_once()
+
+    def test_expired_private_reply_is_not_posted_publicly(self):
+        ctx = self.ctx(ephemeral=True)
+        ctx.created_at -= dl.INTERACTION_TTL + 1
+        channel = mock.MagicMock()
+        channel.send = mock.AsyncMock()
+        with mock.patch.object(self.link._client, 'get_channel', return_value=channel):
+            self.link.reply(ctx, 'https://web/?token=secret')
+        channel.send.assert_not_called()
+
+    def test_announcement_skips_channels_without_permission(self):
+        sent = []
+        allowed = types.SimpleNamespace(view_channel=True, send_messages=True)
+        denied = types.SimpleNamespace(view_channel=True, send_messages=False)
+
+        class Ch:
+            def __init__(self, cid, perms, forbidden=False):
+                self.cid, self.perms, self.forbidden = cid, perms, forbidden
+
+            def permissions_for(self, member):
+                return self.perms
+
+            async def send(self, content, **kw):
+                if self.forbidden:
+                    raise discord.Forbidden(types.SimpleNamespace(status=403, reason='Forbidden'), 'no')
+                sent.append(self.cid)
+
+        channels = {1: Ch(1, allowed, forbidden=True), 500: Ch(500, denied), 3: Ch(3, allowed)}
+        self.link.announce_channel_id = 1
+        self.link._last_command_channel = 500
+        self.link._users = {99: dl.User(session=99, name='bot', channel_id=3)}
+        self.link._me_id = 99
+        guild = types.SimpleNamespace(me=object(), voice_client=None)
+        with mock.patch.object(self.link, '_guild', return_value=guild), \
+                mock.patch.object(self.link._client, 'get_channel', side_effect=channels.get):
+            self.link.send_announcement('now playing')
+        self.assertEqual(sent, [3])  # 1 发不出去,500 没权限,落到语音频道的文字区
+
+    def test_precheck_failure_refuses(self):
+        from commands.slash import Spec, _d
+        spec = Spec('kill', 'kill', lambda *a: None, _d('x', 'x', 'x'), admin=True)
+        self.link.on_command = mock.Mock()
+
+        def boom(ctx):
+            raise RuntimeError('database is locked')
+
+        self.link.on_precheck = boom
+        interaction = fake_interaction()
+        self.run_coro(self.link._invoke(spec, interaction, {}))
+        interaction.response.send_message.assert_awaited_once()
+        interaction.response.defer.assert_not_called()
+        self.link.on_command.assert_not_called()
+
+
+class VoiceStateDiffTest(unittest.TestCase):
+    def test_changes_of_other_members_are_not_lost(self):
+        # 两条语音状态事件挤在一起:第一个处理函数重建的快照里已经有第二个人的变化
+        link = DiscordLink('token', guild_id=1)
+        link._me_id = 99
+        events = []
+        link.on_user_joined = lambda u: events.append(('joined', u.session))
+        link.on_user_left = lambda u: events.append(('left', u.session))
+        link.on_self_moved = lambda old, new: events.append(('self', old, new))
+        link._emit = lambda fn, *args: fn(*args)
+        link._users = {99: dl.User(session=99, name='bot', channel_id=5), 2: dl.User(session=2, name='b', channel_id=5)}
+        after = {1: dl.User(session=1, name='a', channel_id=5)}
+
+        def rebuild():
+            link._users = after
+
+        link._rebuild_users = rebuild
+        link._on_self_voice = lambda cid: None
+        member = types.SimpleNamespace(id=1, guild=types.SimpleNamespace(id=1))
+        asyncio.run(link.on_voice_state_update(member, None, None))
+        self.assertEqual(events[0], ('self', 5, None))  # bot 自己的变化先处理
+        self.assertIn(('joined', 1), events)
+        self.assertIn(('left', 2), events)

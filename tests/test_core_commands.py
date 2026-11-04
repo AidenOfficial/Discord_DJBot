@@ -140,6 +140,26 @@ class CoreTest(unittest.TestCase):
         self.bot.send_msg('there', self.ctx('queue'))
         self.assertEqual(self.bot.link.replies, [('announce', 'hi'), 'there'])
 
+    def test_admin_is_rechecked_when_the_command_runs(self):
+        # 预检查超时 / 出错时也不能让管理员命令跑起来
+        self.bot._handle_command(self.ctx('kill'))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.bot.link.replies, [constants.tr_cli('not_admin')])
+        self.bot._handle_command(self.ctx('kill', admin=True))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_banned_user_is_rechecked(self):
+        var.db.set('user_ban', '42', 'Aiden')
+        self.bot._handle_command(self.ctx('queue'))
+        self.assertEqual(self.calls, [])
+
+    def test_leave_outside_voice_does_not_suppress_the_kick_pause(self):
+        self.bot._leaving_until = 0.0
+        self.bot.link.leave_voice = mock.Mock()
+        self.bot.leave_voice()                 # 不在语音里:什么都不做
+        self.assertEqual(self.bot._leaving_until, 0.0)
+        self.bot.link.leave_voice.assert_not_called()
+
     def test_is_admin_by_id(self):
         var.config.set('bot', 'admin', '111;222')
         self.assertTrue(self.bot.is_admin('222'))

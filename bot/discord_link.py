@@ -18,6 +18,7 @@ bot 其余部分是线程模型,discord.py 是 asyncio:这里把 discord.py 放�
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import queue
 import threading
@@ -92,6 +93,7 @@ class CommandContext:
     created_at: float = field(default_factory=time.time)
     # 内部状态
     responded: bool = False         # 已经用 edit_original_response 回过
+    dropped: bool = False           # "思考中…" 已经删掉了,之后只能用 followup
     finished: bool = False
     _finish_handle: Any = None
 
@@ -318,6 +320,14 @@ class DiscordLink:
         self._client.event(self.on_guild_channel_delete)
         self._client.event(self.on_guild_channel_update)
         self._client.event(self.on_guild_update)
+        # 身份组权限变了,"能不能进这个频道"也跟着变
+        self._client.event(self.on_guild_role_create)
+        self._client.event(self.on_guild_role_update)
+        self._client.event(self.on_guild_role_delete)
+        # 预检查要在 Discord 的 3 秒内答复,不和自动补全 / aiohttp 的 DNS 查询抢默认线程池
+        self._precheck_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="Precheck")
+        self._autocomplete_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2,
+                                                                        thread_name_prefix="Autocomplete")
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
@@ -475,7 +485,16 @@ class DiscordLink:
         if guild is None and self.guild_id is not None:
             log.error("discord: server %s not found; is the bot invited to it?", self.guild_id)
         self._me_id = self._client.user.id if self._client.user else None
+        old_cid = self.my_channel_id
         self._rebuild()
+        new_cid = self.my_channel_id
+        if old_cid != new_cid:
+            # 网关重新 IDENTIFY 时 discord.py 会清掉 voice client:bot 已经不在语音里了,
+            # 断开音频输出(否则播放线程卡在写缓冲上),并让上层按"被断开"处理
+            log.warning("discord: voice connection lost after a gateway reconnect")
+            self._on_self_voice(new_cid)
+            if self.on_self_moved:
+                self._emit(self.on_self_moved, old_cid, new_cid)
         if guild is not None and not self._synced:
             try:
                 self._tree.copy_global_to(guild=guild)
@@ -490,27 +509,32 @@ class DiscordLink:
     async def on_voice_state_update(self, member, before, after):
         if member.guild.id != self.guild_id:
             return
-        old = self._users.get(member.id)
+        old_users = self._users
         self._rebuild_users()
-        new = self._users.get(member.id)
-        if member.id == self._me_id:
-            old_cid = old.channel_id if old else None
-            new_cid = new.channel_id if new else None
-            if old_cid != new_cid:
-                self._on_self_voice(new_cid)
-                if self.on_self_moved:
-                    self._emit(self.on_self_moved, old_cid, new_cid)
-        if old is None and new is not None:
-            if self.on_user_joined:
-                self._emit(self.on_user_joined, new)
-        elif old is not None and new is None:
-            if self.on_user_left:
-                self._emit(self.on_user_left, old)
-        elif old is not None and new is not None:
-            changed = frozenset(k for k in ('channel_id', 'self_mute', 'self_deaf', 'mute', 'deaf', 'name')
-                                if getattr(old, k) != getattr(new, k))
-            if changed and self.on_user_updated:
-                self._emit(self.on_user_updated, new, changed)
+        new_users = self._users
+        # 整份快照对比:几条事件挤在一起时,前一个处理函数重建的快照可能已经包含了后一条的变化,
+        # 只看 member.id 会漏掉事件。bot 自己的变化先处理。
+        ids = sorted(set(old_users) | set(new_users), key=lambda uid: uid != self._me_id)
+        for uid in ids:
+            old, new = old_users.get(uid), new_users.get(uid)
+            if uid == self._me_id:
+                old_cid = old.channel_id if old else None
+                new_cid = new.channel_id if new else None
+                if old_cid != new_cid:
+                    self._on_self_voice(new_cid)
+                    if self.on_self_moved:
+                        self._emit(self.on_self_moved, old_cid, new_cid)
+            if old is None and new is not None:
+                if self.on_user_joined:
+                    self._emit(self.on_user_joined, new)
+            elif old is not None and new is None:
+                if self.on_user_left:
+                    self._emit(self.on_user_left, old)
+            elif old is not None and new is not None and old != new:
+                changed = frozenset(k for k in ('channel_id', 'self_mute', 'self_deaf', 'mute', 'deaf', 'name')
+                                    if getattr(old, k) != getattr(new, k))
+                if changed and self.on_user_updated:
+                    self._emit(self.on_user_updated, new, changed)
 
     async def on_guild_channel_create(self, channel):
         if channel.guild.id == self.guild_id:
@@ -526,6 +550,18 @@ class DiscordLink:
 
     async def on_guild_update(self, before, after):
         if after.id == self.guild_id:
+            self._rebuild()
+
+    async def on_guild_role_create(self, role):
+        if role.guild.id == self.guild_id:
+            self._rebuild()
+
+    async def on_guild_role_update(self, before, after):
+        if after.guild.id == self.guild_id:
+            self._rebuild()
+
+    async def on_guild_role_delete(self, role):
+        if role.guild.id == self.guild_id:
             self._rebuild()
 
     # ---- 快照 --------------------------------------------------------------
@@ -657,7 +693,8 @@ class DiscordLink:
     async def _leave(self):
         guild = self._guild()
         if guild is not None and guild.voice_client is not None:
-            await guild.voice_client.disconnect(force=False)
+            # force=True:语音正在重连时 force=False 会提前返回,bot 留在频道里成了"幽灵"
+            await guild.voice_client.disconnect(force=True)
         self._on_self_voice(None)
 
     def _on_self_voice(self, channel_id):
@@ -675,29 +712,57 @@ class DiscordLink:
     def _start_player(self, attempt):
         guild = self._guild()
         vc = guild.voice_client if guild is not None else None
-        if vc is None or not vc.is_connected():
-            if attempt < 100 and vc is not None:
+        if vc is None:
+            # 根本没有语音连接(网关重连后被清掉等):断开音频输出,播放线程改为按实时速度丢弃
+            self._on_self_voice(None)
+            return
+        if not vc.is_connected():
+            if attempt < 100:
                 # 刚 connect / move_to,语音握手还没完成
                 self._loop.call_later(0.1, self._start_player, attempt + 1)
             else:
                 self._pcm.player_unavailable()
             return
         if vc.is_playing():
-            if vc.source is self._pcm and attempt < 20:
+            player = getattr(vc, '_player', None)
+            stale = player is not None and not player.is_alive()
+            if vc.source is self._pcm and not stale and attempt < 20:
                 # 上一个 AudioPlayer 正在退出(read 刚返回 b'')
                 self._loop.call_later(0.02, self._start_player, attempt + 1)
-            return
-        bitrate = self.bitrate or min(max(int((vc.channel.bitrate or 64000) / 1000), 64), 384)
+                return
+            # AudioPlayer 线程已经退出却还占着(语音重连超时会这样),或者等不到它退出:清掉重开
+            vc.stop()
+        bitrate = self.bitrate or int((vc.channel.bitrate or 64000) / 1000)
+        bitrate = min(max(bitrate, 16), 512)  # Opus 编码器只接受 16–512 kbps
         try:
-            vc.play(self._pcm, after=self._player_after, application='audio', bitrate=min(bitrate, 512),
+            vc.play(self._pcm, after=self._player_after, application='audio', bitrate=bitrate,
                     signal_type='music')
         except discord.ClientException:
-            self._loop.call_later(0.05, self._start_player, attempt + 1)
+            if attempt < 20:
+                self._loop.call_later(0.05, self._start_player, attempt + 1)
+            else:
+                self._pcm.player_unavailable()
+        except Exception:
+            # OpusNotLoaded(没装 libopus)等:不能让 _playing 一直是 True,否则播放线程卡死
+            log.exception("discord: could not start playback")
+            self._pcm.player_unavailable()
 
     def _player_after(self, error):
         if error is not None:
             log.warning("discord: audio player stopped with an error: %s", error)
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(self._clear_stale_player)
         self._pcm.player_stopped()
+
+    def _clear_stale_player(self):
+        """AudioPlayer 没走 stop() 就退出时(等语音重连超时),voice client 里还挂着它,
+        is_playing() 一直是 True,下次 play() 就开不了。"""
+        guild = self._guild()
+        vc = guild.voice_client if guild is not None else None
+        player = getattr(vc, '_player', None) if vc is not None else None
+        if player is not None and not player.is_alive():
+            vc.stop()
 
     # ---- 音频 --------------------------------------------------------------
 
@@ -754,6 +819,10 @@ class DiscordLink:
     async def _reply(self, ctx, content, ephemeral):
         interaction = ctx.interaction
         if interaction is None or ctx.expired():
+            if ephemeral:
+                # 只给本人看的内容(比如 /web 的登录链接)不能改发到公开频道
+                log.warning("discord: dropped a private reply to /%s: the interaction expired", ctx.command)
+                return
             channel = self._client.get_channel(ctx.channel_id) if ctx.channel_id else None
             if channel is not None:
                 await channel.send(content, suppress_embeds=True)
@@ -761,11 +830,14 @@ class DiscordLink:
         if ctx._finish_handle is not None:
             ctx._finish_handle.cancel()
             ctx._finish_handle = None
-        if not ctx.responded and ephemeral == ctx.ephemeral:
+        if not ctx.responded and not ctx.dropped and ephemeral == ctx.ephemeral:
             ctx.responded = True
-            await interaction.edit_original_response(content=content)
-        else:
-            await interaction.followup.send(content, ephemeral=ephemeral, suppress_embeds=True)
+            try:
+                await interaction.edit_original_response(content=content)
+                return
+            except discord.NotFound:
+                ctx.dropped = True  # "思考中…" 已经没了,改用 followup
+        await interaction.followup.send(content, ephemeral=ephemeral, suppress_embeds=True)
 
     def finish(self, ctx: CommandContext):
         """命令处理完。还没回复过就过一会儿删掉 "思考中…"(期间有回复就不删)。"""
@@ -785,6 +857,7 @@ class DiscordLink:
         ctx._finish_handle = None
         if ctx.responded or ctx.expired():
             return
+        ctx.dropped = True  # 之后的回复(后台线程)走 followup,不能再编辑已删掉的消息
         try:
             await ctx.interaction.delete_original_response()
         except discord.HTTPException:
@@ -801,18 +874,28 @@ class DiscordLink:
             log.warning("discord: could not send an announcement", exc_info=True)
 
     async def _announce(self, text):
-        channel = None
+        guild = self._guild()
+        me = guild.me if guild is not None else None
+        tried = set()
         for cid in (self.announce_channel_id, self._last_command_channel, self.my_channel_id):
-            if cid:
-                channel = self._client.get_channel(cid)
-                if channel is not None and hasattr(channel, 'send'):
-                    break
-                channel = None
-        if channel is None:
-            log.debug("discord: no channel to post announcements in")
-            return
-        for chunk in split_message(text):
-            await channel.send(chunk, suppress_embeds=True)
+            if not cid or cid in tried:
+                continue
+            tried.add(cid)
+            channel = self._client.get_channel(cid)
+            if channel is None or not hasattr(channel, 'send'):
+                continue
+            # 斜杠命令在 bot 没权限发言的频道里也能用(交互回复不受频道权限限制),公告却发不出去
+            if me is not None and hasattr(channel, 'permissions_for'):
+                perms = channel.permissions_for(me)
+                if not (perms.view_channel and perms.send_messages):
+                    continue
+            try:
+                for chunk in split_message(text):
+                    await channel.send(chunk, suppress_embeds=True)
+                return
+            except discord.Forbidden:
+                continue
+        log.debug("discord: no channel to post announcements in")
 
     def set_activity(self, text):
         """bot 的状态:"正在听 {text}";None 清除。"""
@@ -866,7 +949,8 @@ class DiscordLink:
             ctx = link._context(None, interaction, {})
             try:
                 results = await asyncio.wait_for(
-                    asyncio.get_running_loop().run_in_executor(None, handler, opt.autocomplete, ctx, current or ''),
+                    asyncio.get_running_loop().run_in_executor(link._autocomplete_pool, handler, opt.autocomplete,
+                                                               ctx, current or ''),
                     timeout=2.5)
             except Exception:
                 log.debug("discord: autocomplete %s failed", opt.autocomplete, exc_info=True)
@@ -879,7 +963,9 @@ class DiscordLink:
                     except (TypeError, ValueError):
                         continue
                 else:
-                    value = str(value)[:100]
+                    value = str(value)
+                    if len(value) > 100:
+                        continue  # Discord 的选项值最多 100 字符;截断后可能选中别的条目,干脆不列
                 choices.append(app_commands.Choice(name=str(label)[:100] or str(value), value=value))
             return choices
 
@@ -935,10 +1021,12 @@ class DiscordLink:
         if self.on_precheck is not None:
             try:
                 refusal = await asyncio.wait_for(
-                    asyncio.get_running_loop().run_in_executor(None, self.on_precheck, ctx), timeout=2.0)
+                    asyncio.get_running_loop().run_in_executor(self._precheck_pool, self.on_precheck, ctx),
+                    timeout=1.5)
             except Exception:
+                # 检查不了就拒绝(否则管理员命令 / 封禁会被绕过);命令本身在 bot 里还会再查一遍权限
                 log.exception("discord: precheck for /%s failed", spec.key)
-                refusal = None
+                refusal = "The bot is busy, please try again in a moment."
             if refusal:
                 await interaction.response.send_message(html_to_markdown(refusal)[:2000], ephemeral=True)
                 return
