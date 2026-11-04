@@ -4,7 +4,7 @@ name: CodeQL
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
   schedule:
     # 每周三跑一次,新增的查询规则也能覆盖到老代码

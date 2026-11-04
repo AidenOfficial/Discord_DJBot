@@ -6,7 +6,7 @@
 2. **Bilibili** —— `BV 号 → av 链接` 规范化、yt-dlp 取元数据不被 412、真实下载并能解码;
 3. **Spotify** —— 关键词 → Spotify 解析 → 从 YouTube 下载 → 文件能解码。
 
-脚本**不连接 Mumble 服务器**,只验证到"拿到可播放的音频文件"为止,所以可以在机器人
+脚本**不连接 Discord**,只验证到"拿到可播放的音频文件"为止,所以可以在机器人
 正常运行的同时单独跑,互不影响。它直接调用机器人自己的代码(`util.get_bilibili_url_from_input`、
 `media.spotify.download_tracks`),因此通过即代表对应功能可用。
 
@@ -51,7 +51,7 @@ docker compose run --rm --entrypoint venv/bin/python botamusique scripts/smoke_t
 | 现象 | 多半原因 |
 |------|----------|
 | `spotdl` FAIL:No module named spotdl | 镜像没装 spotdl(检查 `requirements.txt` 与构建日志) |
-| `deno` FAIL:未安装 | 镜像没装 Deno;`!spotify` 会下载失败(Dockerfile 应已安装) |
+| `deno` FAIL:未安装 | 镜像没装 Deno;`/spotify` 会下载失败(Dockerfile 应已安装) |
 | Spotify 真实下载返回空 | 凭据无效 / 被风控 / Deno 缺失 / 该曲在 YouTube 无匹配 |
 | B 站元数据 FAIL(412 或 deleted) | yt-dlp 过旧(`BAM_UPDATE_ON_START=1` 启动时会升级),或该视频已删除/需登录 cookie——换个视频再试 |
 | Spotify/B 站文件 ffprobe FAIL | 下到的文件损坏 / 编码异常,通常重试即可 |

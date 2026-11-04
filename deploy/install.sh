@@ -6,7 +6,7 @@
 #
 # 用途:
 #   在一台 ARM 架构(aarch64 / armv7 等)的 Ubuntu Linux 机器上,一键安装
-#   本 Mumble 音乐机器人(基于 botamusique,额外支持 Bilibili 与 Spotify 播放)
+#   本 Discord 音乐机器人(基于 botamusique,额外支持 Bilibili 与 Spotify 播放)
 #   所需的系统依赖与 Python 依赖,并准备好配置文件。
 #
 # 前提:
@@ -37,9 +37,9 @@ echo " 仓库目录: ${REPO_DIR}"
 echo " 系统架构: $(uname -m)"
 echo "=============================================================="
 
-# 简单校验:确认确实在仓库根目录(应存在 mumbleBot.py 与 requirements.txt)。
-if [[ ! -f "${REPO_DIR}/mumbleBot.py" || ! -f "${REPO_DIR}/requirements.txt" ]]; then
-    echo "错误:当前目录下找不到 mumbleBot.py / requirements.txt。" >&2
+# 简单校验:确认确实在仓库根目录(应存在 djbot.py 与 requirements.txt)。
+if [[ ! -f "${REPO_DIR}/djbot.py" || ! -f "${REPO_DIR}/requirements.txt" ]]; then
+    echo "错误:当前目录下找不到 djbot.py / requirements.txt。" >&2
     echo "请先 cd 到本仓库根目录,再运行 bash deploy/install.sh。" >&2
     exit 1
 fi
@@ -53,7 +53,7 @@ fi
 #   build-essential —— gcc/make 等编译工具链,部分 Python 依赖在 ARM 上无预编译
 #       wheel,需要本地编译。
 #   ffmpeg —— 音频转码核心;yt-dlp / spotdl 下载后用它转码,机器人推流也依赖它。
-#   libopus0 / opus-tools —— Opus 编解码库与工具;Mumble 语音传输使用 Opus 编码,
+#   libopus0 / opus-tools —— Opus 编解码库与工具;Discord 语音传输使用 Opus 编码,
 #       音频推流必须有它。
 #   libmagic1 —— 文件类型识别库,是 Python 依赖 python-magic 的底层依赖。
 #   libffi-dev —— 编译 cffi 等依赖所需。
@@ -154,8 +154,8 @@ else
         cp "${REPO_DIR}/configuration.example.ini" "${REPO_DIR}/configuration.ini"
         echo "已从 configuration.example.ini 生成 configuration.ini。"
         echo "请编辑 ${REPO_DIR}/configuration.ini,至少填写以下内容:"
-        echo "  - [server]  Mumble 服务器地址 host / port"
-        echo "  - [bot]     admin(管理员用户名)"
+        echo "  - [discord] bot token(或环境变量 DISCORD_TOKEN)、服务器 ID guild_id"
+        echo "  - [bot]     admin(管理员的 Discord 用户 ID)"
         echo "  - [spotify] client_id / client_secret(启用 Spotify 播放时需要)"
     else
         echo "警告:未找到 configuration.example.ini,无法自动生成 configuration.ini。" >&2
@@ -169,11 +169,11 @@ echo
 echo "=============================================================="
 echo " 安装完成!后续步骤:"
 echo
-echo "  1. 编辑配置文件并填写 Mumble 服务器、管理员、Spotify 等信息:"
+echo "  1. 编辑配置文件并填写 Discord token、服务器 ID、管理员、Spotify 等信息:"
 echo "       nano ${REPO_DIR}/configuration.ini"
 echo
-echo "  2. 手动测试启动(确认能连上 Mumble 服务器):"
-echo "       ${REPO_DIR}/venv/bin/python3 mumbleBot.py --config configuration.ini"
+echo "  2. 手动测试启动(确认能连上 Discord):"
+echo "       ${REPO_DIR}/venv/bin/python3 djbot.py --config configuration.ini"
 echo
 echo "  3. 设置开机自启:参考 deploy/ 目录下的 systemd 单元文件"
 echo "       - botamusique.service              主服务"

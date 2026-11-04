@@ -1,8 +1,8 @@
 # ============================================================================
-# botamusique Mumble 音乐机器人 —— systemd service 单元文件
+# Discord-DJBot 音乐机器人 —— systemd service 单元文件
 # ============================================================================
 #
-# 用途:让 botamusique(含 Bilibili/Spotify 扩展)作为系统服务长期运行,
+# 用途:让机器人作为系统服务长期运行,
 #       并在崩溃后自动重启、随系统开机自启。
 #
 # 约定的部署环境:
@@ -25,8 +25,8 @@
 # ============================================================================
 
 [Unit]
-Description=botamusique Mumble music bot (Bilibili/Spotify enabled)
-# 等待网络真正可用后再启动,避免开机时连不上 Mumble 服务器。
+Description=Discord-DJBot music bot
+# 等待网络真正可用后再启动,避免开机时连不上 Discord。
 After=network-online.target
 Wants=network-online.target
 # 限制崩溃重启风暴:300 秒内最多重启 5 次,超出后停止(systemctl reset-failed 可恢复)。
@@ -39,8 +39,11 @@ Type=simple
 User=botamusique
 # 工作目录设为安装路径,使相对路径(如 configuration.ini)能正确解析。
 WorkingDirectory=/opt/botamusique
+# 可选:token 放在 /opt/botamusique/.env(一行 DISCORD_TOKEN=...,chmod 600),不写进配置文件。
+# 前面的 '-' 表示文件不存在也照常启动。
+EnvironmentFile=-/opt/botamusique/.env
 # 使用虚拟环境内的 Python 启动机器人主程序。
-ExecStart=/opt/botamusique/venv/bin/python3 mumbleBot.py --config configuration.ini
+ExecStart=/opt/botamusique/venv/bin/python3 djbot.py --config configuration.ini
 # 自动重启:断线 / 连接失败时进程会以 0 退出,on-failure 不会触发,故用 always。
 Restart=always
 RestartSec=5

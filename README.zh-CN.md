@@ -1,11 +1,11 @@
 <div align="center">
-<img src="static/image/logo.png" alt="Mumble-DJBot logo" width="160px" />
-<h1>Mumble-DJBot</h1>
-<p>自托管的 <a href="https://www.mumble.info/">Mumble</a> 音乐机器人，支持聊天命令与 Web 界面控制。</p>
+<img src="static/image/logo.png" alt="Discord-DJBot logo" width="160px" />
+<h1>Discord-DJBot</h1>
+<p>自托管的 <a href="https://discord.com/">Discord</a> 语音频道音乐机器人，支持斜杠命令与 Web 界面控制。</p>
 
 <p>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
-<a href="https://github.com/AidenOfficial/Mumble-DJBot/actions/workflows/ci.yml"><img src="https://github.com/AidenOfficial/Mumble-DJBot/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI" /></a>
+<a href="https://github.com/AidenOfficial/Discord_DJBot/actions/workflows/ci.yml"><img src="https://github.com/AidenOfficial/Discord_DJBot/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
 <img src="https://img.shields.io/badge/python-3.12-blue.svg" alt="Python 3.12" />
 <img src="https://img.shields.io/badge/deploy-Docker-2496ED.svg" alt="Docker" />
 </p>
@@ -15,14 +15,18 @@
 
 ---
 
-Mumble-DJBot 可播放来自 YouTube、Bilibili、Spotify、直播、网络电台及本地曲库的音频。用户可通过聊天命令或浏览器中控制；控制台同时提供播放队列管理、个人歌单、缓存管理与播放统计。
+Discord-DJBot 进入 Discord 服务器的语音频道，播放来自 YouTube、Bilibili、Spotify、直播、网络电台及本地曲库的音频。用户用斜杠命令或浏览器控制台点歌；控制台同时提供播放队列管理、个人歌单、缓存管理与播放统计。
 
-本项目 fork 自 [azlux/botamusique](https://github.com/azlux/botamusique)（上游已归档）。在此基础上重写了 Web 界面，新增个人歌单、歌单导入、边下边播与频道跟随等功能，并以 Docker 配合 Cloudflare Tunnel / Cloudflare Access 作为推荐的部署方式。
+本项目是 [Mumble-DJBot](https://github.com/AidenOfficial/Mumble-DJBot) 的 Discord 移植版，后者 fork 自已归档的 [azlux/botamusique](https://github.com/azlux/botamusique)。播放引擎、下载链路和 Web 界面与 Mumble 版相同，只有连接层和命令入口是 Discord 专用的。
+
+> [!NOTE]
+> 目前一个 bot 实例只服务**一个 Discord 服务器**，在其他服务器里用命令会被拒绝。多服务器支持在计划中。
 
 ## 目录
 
 - [功能](#功能)
 - [环境要求](#环境要求)
+- [创建 Discord 应用](#创建-discord-应用)
 - [安装](#安装)
 - [Web 界面与远程访问](#web-界面与远程访问)
 - [安全注意事项](#安全注意事项)
@@ -42,93 +46,105 @@ Mumble-DJBot 可播放来自 YouTube、Bilibili、Spotify、直播、网络电�
 
 ### 播放
 
-- **边下边播：** 长视频缓冲约 30 秒音频后即开始播放，其余部分在后台继续下载。实测 50 分钟的 Bilibili 视频从点歌到开始播放约需 6 秒。
+- **边下边播：** 长视频缓冲约 30 秒音频后即开始播放，其余部分在后台继续下载。
 - **跳过非音乐片段：** 自动跳过 [SponsorBlock] 与 [BilibiliSponsorBlock] 社区标注的片段，如片头口播、赞助推广等。
-- 支持队列预下载、响度标准化（`loudnorm`）、有人发言时自动降低音量（ducking）以及立体声输出。
-- 提供五种播放模式：顺序、循环、单曲循环、随机、自动（从曲库中随机选曲）。
+- 支持队列预下载、响度标准化（`loudnorm`）、平滑的音量调节以及立体声 Opus 输出。
+- 五种播放模式：顺序、循环、单曲循环、随机、自动（从曲库中随机选曲）。
+- 语音连接使用 Discord 强制要求的端到端加密（DAVE）。
 
-### 频道管理
+### 斜杠命令
 
-- Web 界面实时显示服务器的频道树，可在其中设置默认频道或移动机器人。
-- 跟随模式：频道无人时跟随最后离开的用户，或始终跟随指定用户。
-- 频道持续无人达到设定时长（默认 5 分钟）后自动暂停，有人返回时自动恢复。
+- 每条命令都有类型化的参数和英文、简体中文、日文说明（按用户的 Discord 语言显示），队列序号、歌单、曲库文件、预设电台和标签都能自动补全。
+- `/play` 可以填歌名、链接或队列序号；bot 不在语音频道时会先进入你所在的频道。
+- 报错和私人命令（`/bind`、`/help`、`/web` 等）只有你自己看得到；「正在播放」之类的公告发到你指定的频道。
+
+### 语音频道
+
+- Web 界面按分类显示服务器的语音频道和其中的成员，可以在里面移动 bot 或设置默认频道。
+- 跟随模式：频道没人时跟随最后离开的人，或始终跟随指定成员。AFK 频道和其他 bot 不计入。
+- 频道持续无人达到设定时长（默认 5 分钟）后自动暂停，有人回来时自动继续；bot 被人踢出语音时也会暂停。
 
 ### Web 界面
 
-控制台位于 `/`。
-
-- **Now Playing：** 高清专辑封面和正式歌名（按视频标题和 YouTube 简介里的「Music」卡片去网易云 / iTunes / Deezer 匹配；都对不上时截一段音频交给 Shazam 识别；最后才用视频封面）、可拖动的播放进度；准备面板显示当前所处阶段及预计开始播放的时间。
+- **Now Playing：** 高清专辑封面和正式歌名（去网易云 / iTunes / Deezer 匹配，对不上时用 Shazam 识别）、可拖动的播放进度、显示预计开始时间的准备面板。
 - **队列：** 支持拖拽排序，并可统一搜索 YouTube 与 Bilibili。
-- **曲库：** 支持浏览与分片上传，单文件默认上限 4 GB，可断点续传；视频文件仅保留音轨。
-- **缓存：** 显示存储占用与播放次数；常听的曲目可固定或转存至曲库；达到容量上限时优先淘汰最久未使用的条目。
-- **统计：** 显示最常播放曲目、点歌最多的用户、最活跃的时段以及最常被跳过的曲目。
+- **曲库：** 支持浏览与分片上传，单文件默认上限 4 GB，可断点续传；视频文件只保留音轨。
+- **缓存：** 显示存储占用与播放次数，常听的曲目可固定或转存至曲库。
+- **统计：** 最常播放的曲目、点歌最多的用户、最活跃的时段以及最常被跳过的曲目。
 
 ### 个人歌单
 
 - 以 Cloudflare Access 传递的登录邮箱识别用户，用户可设置显示别名。
-- 每位用户拥有独立歌单，可立即播放、随机播放或追加到队列。整张歌单入队后在队列中折叠为一项显示，不会淹没队列。
-- 任意歌曲旁的心形按钮可一键加入「我喜欢的音乐」（与聊天命令 `!fav` 使用同一张歌单）。
-- 可从 YouTube、网易云音乐、QQ 音乐与 Spotify 导入歌单。后三者的曲目会自动匹配到 YouTube 音源，匹配时同时处理简体与繁体标题。
-- 可通过一次性绑定码（`!bind`）将 Mumble 账号与 Web 身份关联。关联后可在聊天中使用 `!mylist`、`!fav` 管理个人歌单。
+- 每位用户拥有独立歌单，可立即播放、随机播放或追加到队列。
+- 可从 YouTube、网易云音乐、QQ 音乐与 Spotify 导入歌单。
+- 可通过一次性绑定码（`/bind`）把 Discord 账号与 Web 身份关联，之后在 Discord 里用 `/mylist`、`/fav` 使用个人歌单。
 
 ### 可靠性
 
 - 主循环停滞超过 120 秒时，看门狗会让进程退出并重启；心跳文件可用于容器健康检查。
-- 下载失败时自动断点续传并重试；单首曲目出错不影响整个进程。
+- discord.py 会自动重连网关和语音；下载失败时自动断点续传并重试。
 
 ## 环境要求
 
-- 机器人可连接的 Mumble 服务器（Murmur）。
-- **Docker 部署（推荐）：** Docker Engine 与 Docker Compose。所有运行时依赖均已包含在镜像中。
-- **直接部署：** Python 3.12、FFmpeg 与 Opus 编解码器，详见 [`deploy/DEPLOY.md`](deploy/DEPLOY.md)。
-- **可选：** Spotify API 凭据，仅 `!spotify` 命令需要。
+- 一个你能添加 bot 的 Discord 服务器（需要「管理服务器」权限）。
+- **Docker 部署（推荐）：** Docker Engine 与 Docker Compose，所有运行时依赖都已打包进镜像。
+- **裸机部署：** Python 3.12、FFmpeg 与 libopus，参见 [`deploy/DEPLOY.md`](deploy/DEPLOY.md)。
+- **可选：** Spotify API 凭据，仅 `/spotify` 命令需要（网页上导入 100 首以内的 Spotify 歌单不需要）。
 - **可选：** Cloudflare 账号，用于远程访问 Web 界面。
+
+## 创建 Discord 应用
+
+1. 打开 [Discord Developer Portal](https://discord.com/developers/applications)，点 **New Application** 新建应用。
+2. 在 **Bot** 页点 **Reset Token** 并复制 token。token 等同于密码，拿到它的人就能控制这个 bot。不需要任何特权 Intent，*Presence*、*Server Members*、*Message Content* 都保持关闭。
+3. 在 **OAuth2 → URL Generator** 里勾选 scope `bot` 和 `applications.commands`，权限勾选 *View Channels*、*Send Messages*、*Connect*、*Speak*，打开生成的链接把 bot 加进服务器。等价的链接是：
+
+   ```text
+   https://discord.com/oauth2/authorize?client_id=<应用 ID>&scope=bot+applications.commands&permissions=3149824
+   ```
+
+4. 在 Discord 里打开 **设置 → 高级 → 开发者模式**，右键服务器图标选 **复制服务器 ID**，填到 `[discord] guild_id`。
+
+bot 每次启动时都会把斜杠命令注册到这个服务器，命令立即可用。
 
 ## 安装
 
 ### 1. 克隆仓库
 
 ```bash
-git clone https://github.com/AidenOfficial/Mumble-DJBot.git
-cd Mumble-DJBot
+git clone https://github.com/AidenOfficial/Discord_DJBot.git
+cd Discord_DJBot
 ```
 
-### 2. 创建配置文件
+### 2. 创建配置文件和 token 文件
 
 ```bash
 cp configuration.example.ini configuration.ini
+echo 'DISCORD_TOKEN=<你的 bot token>' > .env
 ```
 
 > [!IMPORTANT]
-> 启动容器前必须先创建 `configuration.ini`，否则 Docker 会在该路径创建一个目录，导致机器人无法读取配置。
+> 启动容器之前必须先创建 `configuration.ini`，否则 Docker 会以同名目录代替该文件，导致机器人无法读取配置。`.env` 已写在 `.gitignore` 里，不要把 token 提交到 Git。
 
-最小配置示例如下。未填写的选项从 `configuration.default.ini` 读取默认值，请勿修改该文件。
+最小配置如下。未填写的项会回退到 `configuration.default.ini` 中的默认值，该文件不应修改。
 
 ```ini
-[server]
-host = mumble.example.com
-port = 64738
-; password = <服务器密码>
-channel = Music              ; 多级频道以斜杠分隔，如 Games/Squad
+[discord]
+guild_id = 123456789012345678     ; 服务器 ID
+; channel = Music                 ; 启动时进入的语音频道(频道名、分类/频道名,或频道 ID)
+; announce_channel = 234567890123456789  ; "正在播放"等公告发到的文字频道
 
 [bot]
-username = MusicBot
-admin = YourMumbleName       ; 多个管理员以分号分隔
-language = zh_CN             ; 可选 en_US、zh_CN、ja_JP
+admin = 345678901234567890        ; 管理员的用户 ID 或身份组 ID,逗号分隔;服务器管理员自动算
+language = zh_CN                  ; en_US、zh_CN 或 ja_JP
 
 [webinterface]
 enabled = True
-listening_addr = 0.0.0.0     ; 容器内必须监听所有地址，由 Compose 网络隔离
-
-[spotify]
-; 仅 !spotify 命令需要。导入 100 首以内的 Spotify 歌单无需凭据。
-client_id =
-client_secret =
+listening_addr = 0.0.0.0          ; 容器内必须如此设置,由 Compose 网络隔离
 ```
 
 ### 3. 拉取镜像并启动
 
-镜像由 GitHub Actions 构建并发布到 `ghcr.io/aidenofficial/mumble-djbot`（公开；`edge` 跟随 `master`），部署机上无需构建。如需从源码构建，参见 `docker-compose.build.yml`。
+镜像由 GitHub Actions 构建并发布到 `ghcr.io/aidenofficial/discord_djbot`（`edge` 跟随 `main`）。如需从源码构建，参见 `docker-compose.build.yml`。
 
 ```bash
 docker compose pull
@@ -136,90 +152,92 @@ docker compose up -d
 docker compose logs -f
 ```
 
-机器人以普通客户端身份连接服务器，无需映射任何端口。启动后进入机器人所在频道发送 `!help`，即可确认其已正常运行。
+bot 主动连出到 Discord，无需映射任何端口。日志里出现 `synced NN slash commands` 后，在服务器里输入 `/` 就能看到命令；进一个语音频道，试试 `/play 歌名`。
 
-### 4. 保持解析组件为最新版本
+### 4. 保持解析器为最新版本
 
-容器每次启动时都会升级 yt-dlp 与 spotDL（`BAM_UPDATE_ON_START=1`）。YouTube 与 Bilibili 改版频繁，建议每天重启一次容器，例如添加以下 cron 任务：
+容器每次启动时会自动升级 yt-dlp 与 spotDL（`BAM_UPDATE_ON_START=1`）。YouTube 与 Bilibili 改版频繁，建议每天重启一次容器，例如使用 cron：
 
 ```cron
-0 5 * * * docker restart mumble-music
+0 5 * * * docker restart discord-music
 ```
 
-NAS 部署、cookies 配置与日常运维说明见 [`deploy/DOCKER.md`](deploy/DOCKER.md)。
+NAS 部署、cookies 配置与日常维护参见 [`deploy/DOCKER.md`](deploy/DOCKER.md)。
 
 ## Web 界面与远程访问
 
-推荐通过 Cloudflare Tunnel 配合 Cloudflare Access 对外提供 Web 界面。身份验证由 Cloudflare 负责，8181 端口始终不对外开放。
+推荐通过 Cloudflare Tunnel 配合 Cloudflare Access 发布 Web 界面：由 Cloudflare 负责身份验证，8181 端口无需对外暴露。
 
-1. 在 Cloudflare Zero Trust 控制台创建 Tunnel，并将 Public hostname 的回源地址设为 `http://botamusique:8181`。
-2. 为同一域名创建 Access 应用，并配置允许访问的邮箱策略。
-3. 写入 Tunnel token 并启动 `tunnel` profile：
+1. 在 Cloudflare Zero Trust 控制台中创建 Tunnel，将 Public Hostname 指向 `http://botamusique:8181`。
+2. 为同一域名创建 Access Application，并通过策略指定允许访问的邮箱。
+3. 把 Tunnel token 加进 `.env`，启动 `tunnel` profile：
 
    ```bash
-   echo 'CLOUDFLARE_TUNNEL_TOKEN=<token>' > .env
+   echo 'CLOUDFLARE_TUNNEL_TOKEN=<token>' >> .env
    docker compose --profile tunnel up -d
    ```
 
-详细步骤见 [`deploy/WEBUI.md`](deploy/WEBUI.md)。
+详细步骤参见 [`deploy/WEBUI.md`](deploy/WEBUI.md)。
 
 ## 安全注意事项
 
 > [!WARNING]
-> 默认配置 `auth_method = none` 下，应用本身不进行任何身份验证，完全依赖 Cloudflare Access。
+> 默认的 `auth_method = none` 表示应用本身不进行身份验证，完全依赖 Cloudflare Access。
 
-- **请勿将 8181 端口暴露至公网或不受信任的网络。**
-- **建议启用 Access JWT 校验：** 在 `[webinterface]` 中设置 `access_team_domain` 与 `access_aud`。启用后，机器人会拒绝所有不带有效 Access 令牌的请求，绕过 Tunnel 的访问无法冒充其他用户。
-- **使用 `auth_method = token` 时，务必将 `flask_secret` 改为足够长的随机值**，该值用于签名会话 Cookie。
-- **请在 Mumble 服务器上注册管理员账号。** 目前管理员按显示名识别；未注册的用户名可能在管理员离线时被他人占用。
+- **bot token 要保密。** 一旦泄露，立即到 Developer Portal 重置。
+- **不要将 8181 端口暴露**到公网或不可信网络。
+- **启用 Access JWT 校验**：在 `[webinterface]` 中配置 `access_team_domain` 与 `access_aud`，绕过 Tunnel 的请求就无法冒充用户。
+- 如改用 `auth_method = token`，**务必修改 `flask_secret`** 为足够长的随机字符串，因为它用于签名会话 Cookie。
+- 管理员和封禁都按 Discord 用户 ID / 身份组 ID 认，改昵称冒充不了。
 
 ## 使用
 
-### 聊天命令
+### 斜杠命令
 
-命令以 `!` 开头，也可使用全角 `！`。只要前缀不产生歧义即可识别，例如 `!sk` 等同于 `!skip`。命令名可在 `[commands]` 中修改。发送 `!help` 可查看完整命令列表。
+在服务器里输入 `/` 就能浏览所有命令和参数，`/help` 按 bot 的语言列出全部命令。命令名可在 `[commands]` 段中修改。
 
 | 命令 | 说明 |
 |---|---|
-| `!url <链接>` / `!bili <BV 号或链接>` | 添加 YouTube / Bilibili 视频的音频 |
-| `!yplay <关键词>` / `!ysearch <关键词>` | 添加 YouTube 首个搜索结果 / 列出搜索结果 |
-| `!spotify <链接或关键词>` | 添加 Spotify 单曲或歌单，或搜索 Spotify |
-| `!playlist <链接>` | 添加整个播放列表 |
-| `!live <链接>` / `!radio <名称或链接>` | 播放直播或网络电台 |
-| `!file <路径>` / `!filematch <关键词>` | 从本地曲库添加曲目 |
-| `!play [序号]` / `!pause` / `!skip` / `!stop` | 播放控制 |
-| `!queue` / `!np` / `!rm <序号>` | 查看队列 / 查看当前曲目 / 删除曲目 |
-| `!mode <1–5>` | 顺序、循环、随机、自动、单曲循环 |
-| `!repeat [次数]` | 将当前曲目再加入队列若干次（最多 20 次） |
-| `!volume <0–100>` / `!duck on\|off` | 设置音量 / 开关 ducking |
-| `!joinme` / `!oust` | 让机器人移动到你所在的频道 / 停止播放并返回默认频道 |
-| `!bind <绑定码>` / `!mylist [歌单] [shuffle]` / `!fav [歌单]` | 个人歌单（绑定码在 Web 界面生成） |
-| `!web` | 显示 Web 界面地址 |
+| `/play [query]` | 按歌名或链接点歌、继续播放，或（填数字）播放队列里的那一首 |
+| `/url` / `/bili` / `/spotify` / `/playlist` | 添加链接、B 站视频、Spotify 链接或搜索、整个播放列表 |
+| `/ysearch` → `/pick` | 搜索 YouTube，再按序号挑选 |
+| `/live` / `/radio` / `/rbquery` / `/rbplay` | 直播与网络电台 |
+| `/file` / `/filematch` / `/search` / `/tag` | 本地曲库 |
+| `/pause` / `/skip` / `/stop` / `/last` | 播放控制 |
+| `/queue` / `/np` / `/remove` / `/shuffle` / `/repeat` / `/clear` | 队列 |
+| `/mode` / `/volume` | 播放模式与音量 |
+| `/join` / `/leave` | 进入你所在的语音频道 / 停止并离开 |
+| `/bind` / `/mylist` / `/fav` | 个人歌单（绑定码在 Web 界面中生成） |
+| `/lyrics` / `/web` / `/help` / `/version` | 其他 |
 
-`[bot] admin` 中列出的管理员还可使用 `!kill`、`!update`、`!urlban`、`!userban`、`!maxvolume`、`!webuseradd` 等命令。
+管理员（`[bot] admin` 里列出的用户或身份组，加上有「管理员」或「管理服务器」权限的成员，可用 `[discord] admin_by_permission = False` 关掉后者）还可以使用 `/kill`、`/update`、`/urlban`、`/userban`、`/maxvolume`、`/rescan` 以及 Web 用户相关命令。
+
+默认只有和 bot 在同一个语音频道的人能控制播放（见 `[bot] allow_other_channel_message`）。
 
 ## 配置
 
-全部选项及说明见 [`configuration.example.ini`](configuration.example.ini)。常用选项如下：
+[`configuration.example.ini`](configuration.example.ini) 说明了所有配置项。较常调整的有：
 
-| 选项 | 默认值 | 说明 |
+| 配置项 | 默认值 | 说明 |
 |---|---|---|
-| `[bot] stream_while_downloading` | `True` | 长曲目下载完成前即开始播放（仅对时长不少于 `stream_min_duration` 秒的曲目生效） |
+| `[discord] guild_id` | （第一个服务器） | bot 服务的服务器 |
+| `[discord] channel` | （无） | 启动时进入的语音频道；Web 设置页里设置过的以 Web 为准 |
+| `[discord] announce_channel` | （最近发命令的频道） | 公告发到的文字频道 |
+| `[discord] bitrate` | `0` | Opus 码率（kbps），`0` 跟随语音频道的码率 |
+| `[bot] stream_while_downloading` | `True` | 长曲目下载完成前即开始播放 |
 | `[bot] tmp_folder_max_size` | `4096` | 下载缓存上限（MB），超出时优先淘汰最久未使用的条目 |
 | `[bot] max_track_duration` | `0` | 单曲时长上限（分钟），`0` 表示不限制 |
-| `[bot] sponsorblock` | `True` | 跳过非音乐片段，类别由 `sponsorblock_categories` 指定 |
-| `[bot] when_nobody_in_channel` | `nothing` | 频道无人时立即执行的操作（`pause`、`stop`）；一般建议改用 Web 设置中的延时自动暂停 |
+| `[bot] sponsorblock` | `True` | 跳过非音乐片段 |
 | `[bot] playback_mode` | `one-shot` | 启动时的播放模式 |
-| `[webinterface] max_upload_file_size` | `4G` | 单个上传文件的大小上限 |
-| `[youtube_dl] cookie_file` | *（空）* | Netscape 格式的 cookies，用于 Bilibili 大会员内容或已登录的 YouTube 访问 |
+| `[youtube_dl] cookie_file` | （空） | Netscape 格式的 cookies，用于 Bilibili 大会员内容或已登录的 YouTube |
 
-默认频道、跟随模式与无人自动暂停在 Web 界面的 Settings 页中设置，无需写入 INI 文件。
+token 也可以（推荐）用环境变量 `DISCORD_TOKEN` 传入；命令行的 `--guild` / `--channel` 优先于 INI 文件。
 
 ## 开发
 
 ### 运行测试
 
-测试不需要 Mumble 服务器，但和 bot 本身一样需要系统装有 libopus。
+测试不连接 Discord。
 
 ```bash
 python3.12 -m venv venv
@@ -227,58 +245,50 @@ venv/bin/pip install -r requirements.txt pytest
 venv/bin/python -m pytest tests
 ```
 
-需使用 Python 3.12：pymumble-rev 要求 Python 3.12 及以上，而 Python 3.13 移除了 `audioop` 模块。如需使用 3.13，请额外安装 `audioop-lts`。
+Docker 镜像用的是 Python 3.12；在 3.13 及以上，`requirements.txt` 会自动装上 `audioop-lts`。
 
 ### 构建 Web 界面
 
-控制台源码位于 `webui/`，基于 Vue 3、TypeScript、Vite 与 Tailwind CSS 4。
+控制台源码位于 `webui/`，使用 Vue 3、TypeScript、Vite 与 Tailwind CSS 4 构建。
 
 ```bash
 cd webui
 npm ci
-npm run dev     # 开发服务器，/api 代理至 127.0.0.1:8181
-npm run build   # 生产构建输出至 webui/dist
+npm run dev     # 开发服务器，/api 代理到 127.0.0.1:8181
+npm run build   # 生产构建输出到 webui/dist
 ```
 
-为便于没有 Node.js 的环境部署，`webui/dist` 会随仓库提交；构建 Docker 镜像时也会重新生成。修改前端后，请一并提交更新后的构建产物。
+`webui/dist` 已提交到仓库，以便没有 Node.js 的环境直接部署。修改前端时，请将更新后的构建产物一并提交。
 
 ### 冒烟测试
 
-`scripts/smoke_test.py` 可在不连接 Mumble 的情况下，检查运行环境以及 Bilibili、Spotify 的下载链路，详见 [`deploy/VERIFY.md`](deploy/VERIFY.md)。
+`scripts/smoke_test.py` 在不连接 Discord 的情况下检查运行环境（FFmpeg、libopus、DAVE、spotDL、Deno）以及 Bilibili 与 Spotify 的下载链路，参见 [`deploy/VERIFY.md`](deploy/VERIFY.md)。
 
 ### 持续集成
 
-GitHub Actions 工作流位于 `.github/workflows/`：
-
-| 工作流 | 触发 | 内容 |
+| Workflow | 触发条件 | 内容 |
 |---|---|---|
-| `ci.yml` | 推送到 `master`、PR、每周 | Ruff、ShellCheck、Hadolint、actionlint；在 Python 3.12 与 3.13 上运行测试；构建 Web 界面，并检查提交的 `webui/dist` 与源码一致；构建 Docker 镜像并运行离线冒烟测试。分支保护只需要求 `CI OK` 这一项检查。 |
-| `docker-publish.yml` | 推送到 `master`、`v*` tag | 在 x86 / arm 原生 runner 上并行构建 `linux/amd64` 与 `linux/arm64` 镜像并推送到 `ghcr.io/aidenofficial/mumble-djbot`（`master` 对应 `edge`；发版 tag 对应 `X.Y.Z`、`X.Y` 与 `latest`），附带 SBOM 和构建来源证明，随后用 Trivy 扫描。改动镜像相关文件的 PR 只构建、不推送。 |
-| `release.yml` | `v*` tag | 创建 GitHub Release，更新说明按 PR 标签分类。 |
-| `codeql.yml` | 推送、PR、每周 | 对 Python、TypeScript 和工作流代码做 CodeQL 分析。 |
-| `dependency-review.yml` | PR | 拦截新增的含高危漏洞或 AGPL/SSPL 许可证的依赖。 |
-| `pr-triage.yml` | PR | 按改动路径给 PR 打标签，并检查标题是否符合 Conventional Commits。 |
-| `stale.yml` | 每天 | 标记并关闭长期无动静的 issue 与 PR。 |
-
-Dependabot（`.github/dependabot.yml`）负责更新锁定的 Actions 版本和 Web 界面的 npm 依赖。发版时推送形如 `v1.2.3` 的 tag 即可。
+| `ci.yml` | 推送到 `main`、PR、每周 | Ruff、ShellCheck、Hadolint、actionlint；在 Python 3.12 与 3.13 上运行测试；构建 Web 界面并检查 `webui/dist` 是否最新；构建 Docker 镜像并运行离线冒烟测试。分支保护只需要求 `CI OK`。 |
+| `docker-publish.yml` | 推送到 `main`、`v*` tag | 构建 `linux/amd64` 与 `linux/arm64` 镜像，推送到 `ghcr.io/aidenofficial/discord_djbot`，附带 SBOM、构建来源证明和 Trivy 扫描。 |
+| `release.yml` | `v*` tag | 创建 GitHub Release，按标签分组生成发布说明。 |
+| `codeql.yml`、`dependency-review.yml`、`pr-triage.yml`、`stale.yml` | 各不相同 | 代码扫描、依赖审查、PR 标签与例行清理。 |
 
 ### 项目结构
 
 | 路径 | 内容 |
 |---|---|
-| `mumbleBot.py`, `bot/` | 程序入口；连接管理、播放主循环（`player.py`）、频道跟随（`channels.py`）、缓存与清理 |
-| `media/` | 各类音源（URL、Bilibili、Spotify、直播、电台、本地文件）、播放队列、SponsorBlock |
-| `commands/` | 聊天命令处理 |
-| `interface.py`, `web_*.py`, `templates/` | Flask 应用：鉴权与 `/api/*` 接口 |
-| `playlist_import.py` | 歌单导入与 YouTube 匹配 |
+| `djbot.py`、`bot/` | 程序入口；Discord 连接（`discord_link.py`）、HTML 转 Markdown（`discord_format.py`）、命令分发（`core.py`）、播放主循环（`player.py`）、语音频道跟随（`channels.py`）、缓存与清理 |
+| `commands/` | 斜杠命令表（`slash.py`）、自动补全和命令处理 |
+| `media/` | 各类音源、播放队列、SponsorBlock、封面、歌词 |
+| `interface.py`、`web_*.py`、`templates/` | Flask 应用：身份验证与 `/api/*` 接口 |
 | `webui/` | Web 界面源码与构建产物 |
-| `lang/` | 聊天消息与帮助文本（英文、简体中文、日文） |
+| `lang/` | bot 消息（英文、简体中文、日文） |
 | `deploy/` | 部署文档与 systemd 单元文件 |
 | `tests/` | 单元测试 |
 
 ## 致谢
 
-本项目基于 Azlux 及 @TerryGeng、@mertkutay 等贡献者开发的 [botamusique](https://github.com/azlux/botamusique)，并使用了 [pymumble-rev](https://github.com/AidenOfficial/PyMumble)（我们自己维护的 Mumble 客户端库，受 [pymumble](https://codeberg.org/pymumble/pymumble) 启发重写）、[yt-dlp]、[spotDL]、[SponsorBlock]、[BilibiliSponsorBlock] 与 [OpenCC](https://github.com/BYVoid/OpenCC)。
+本项目经由 [Mumble-DJBot](https://github.com/AidenOfficial/Mumble-DJBot) 基于 Azlux 及 @TerryGeng、@mertkutay 等贡献者开发的 [botamusique](https://github.com/azlux/botamusique)，并使用了 [discord.py](https://github.com/Rapptz/discord.py)、[yt-dlp]、[spotDL]、[SponsorBlock]、[BilibiliSponsorBlock] 与 [OpenCC](https://github.com/BYVoid/OpenCC)。
 
 ## 许可证
 

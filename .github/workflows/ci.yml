@@ -4,7 +4,7 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
   workflow_dispatch:
   # 每周一跑一次:requirements.txt 没锁版本,yt-dlp / spotdl 等上游
@@ -17,7 +17,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  # PR 上新推送会取消旧的运行;master 上的每次提交都跑完
+  # PR 上新推送会取消旧的运行;main 上的每次提交都跑完
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -86,7 +86,7 @@ jobs:
           persist-credentials: false
 
       - name: Install system libraries
-        # 与镜像一致:libopus(pymumble-rev)、libmagic(python-magic)、ffmpeg
+        # 与镜像一致:libopus(discord.py 语音)、libmagic(python-magic)、ffmpeg
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends libopus0 libmagic1 ffmpeg
@@ -185,7 +185,7 @@ jobs:
           platforms: linux/amd64
           load: true
           push: false
-          tags: mumble-music:ci
+          tags: discord-music:ci
           # 只在本机 load 做冒烟,不需要证明;docker exporter 也不支持 attestation
           provenance: false
           build-args: DEPS_REFRESH=${{ steps.deps.outputs.key }}
@@ -199,12 +199,12 @@ jobs:
         # 只跑不联网的两项:外部工具齐全(spotdl/deno/yt-dlp/ffmpeg)+ 机器人模块能导入。
         # B 站 / Spotify 链路依赖外网和凭据,不放进 CI。
         run: >-
-          docker run --rm --entrypoint venv/bin/python mumble-music:ci
+          docker run --rm --entrypoint venv/bin/python discord-music:ci
           scripts/smoke_test.py --only tools --only imports
 
       - name: Entrypoint shell sanity
         # entrypoint.sh 遇到 bash/sh 会直接 exec,顺带验证脚本没有 CRLF / 语法问题
-        run: docker run --rm mumble-music:ci bash -c 'bash -n /botamusique/entrypoint.sh && echo ok'
+        run: docker run --rm discord-music:ci bash -c 'bash -n /botamusique/entrypoint.sh && echo ok'
 
   # 汇总检查:分支保护只需要要求这一个
   ci-ok:

@@ -1,4 +1,4 @@
-# Mumble 音乐机器人 — 绿联 NAS / Docker 部署文档
+# Discord 音乐机器人 — 绿联 NAS / Docker 部署文档
 
 本文档把机器人以 **Docker 容器**方式部署到**绿联 NAS(UGOS Pro)**。
 同样适用于任何装了 Docker 的机器。命令块可直接复制粘贴(`<...>` 替换成你自己的值)。
@@ -28,10 +28,10 @@ Debian 镜像**里:
 - [ ] 一台绿联 NAS,UGOS Pro 系统,在「应用中心」装好 **Docker** 应用
       (这个应用是绿联打包的,安装它不会动主机系统)。
 - [ ] 能用 **SSH 以 root 登录** NAS(UGOS「控制面板」里开启 SSH/终端机)。
-- [ ] **Mumble 服务器信息**:host、端口(默认 `64738`)、密码(若有)、频道名。
+- [ ] **Discord bot token** 和**服务器 ID**:按 README 的「创建 Discord 应用」一节创建应用、把 bot 邀请进服务器。
 - [ ] **Spotify API 凭据**(client_id / client_secret),获取方法见 `DEPLOY.md`
       的「获取 Spotify API 凭据」小节。
-- [ ] 你自己的 **Mumble 用户名**(会设为机器人管理员)。
+- [ ] 你自己的 **Discord 用户 ID**(开发者模式下右键自己 → 复制用户 ID),设为 bot 管理员。服务器管理员默认也是。
 
 > 绿联 DXP 系列基本是 x86_64 架构。Docker 会自动选用匹配架构的基础镜像,
 > 本方案的 `Dockerfile` 不分架构,ARM / x86 都能直接构建。
@@ -40,19 +40,16 @@ Debian 镜像**里:
 
 ## 三、第 1 步:把代码放到 NAS
 
-在你的 Windows 机器上(PowerShell),把整个项目目录拷到 NAS:
-
-```powershell
-scp -r "E:\Claude\Mumble-Music" root@<NAS的IP>:/volume1/docker/
-```
-
-(也可以用绿联的文件管理 / SMB 共享,把整个文件夹直接拖进 NAS 的某个共享目录。)
-
-之后所有命令都在 **SSH 登录 NAS 后、在项目目录里**执行:
+SSH 登录 NAS 后:
 
 ```bash
-cd /volume1/docker/Mumble-Music
+cd /volume1/docker
+git clone https://github.com/AidenOfficial/Discord_DJBot.git
+cd Discord_DJBot
 ```
+
+(NAS 上没有 git 的话,在电脑上下载仓库的 ZIP,用绿联的文件管理 / SMB 共享拷进去也行。
+其实只需要 `docker-compose.yml`、`configuration.example.ini` 两个文件,镜像里有其余的一切。)
 
 > 路径按你的实际存放位置调整。下文统一用 `<项目目录>` 指代它。
 
@@ -69,21 +66,28 @@ cp configuration.example.ini configuration.ini
 nano configuration.ini
 ```
 
+token 不写进 `configuration.ini`,而是放进同目录的 `.env`(compose 会读它,已在 `.gitignore` 里):
+
+```bash
+echo 'DISCORD_TOKEN=<你的 bot token>' > .env
+chmod 600 .env
+```
+
 最小配置(其余选项会自动从 `configuration.default.ini` 取默认值):
 
 ```ini
-[server]
-host = <你的 Mumble 服务器地址>
-port = 64738
-; 服务器需要密码就取消下一行分号并填写,不需要就保持注释
-;password = <连接密码>
-; 机器人要加入的频道名;多级频道用斜杠,如 Games/Squad
-channel = <频道名>
+[discord]
+; 服务器 ID
+guild_id = <服务器 ID>
+; 启动时进入的语音频道:频道名、"分类名/频道名" 或频道 ID;不填就等有人 /play 或 /join
+;channel = <语音频道>
+; "正在播放" 之类的公告发到哪个文字频道(频道 ID);不填就发到最近有人用命令的频道
+;announce_channel = <文字频道 ID>
 
 [bot]
-username = MusicBot
-; 管理员 Mumble 用户名,多个用分号隔开
-admin = <你的 Mumble 用户名>
+; 管理员的 Discord 用户 ID 或身份组 ID,多个用逗号隔开
+admin = <你的 Discord 用户 ID>
+language = zh_CN
 
 [spotify]
 client_id = <你的 Spotify Client ID>
@@ -96,8 +100,8 @@ client_secret = <你的 Spotify Client Secret>
 
 ## 五、第 3 步:拉取镜像并启动
 
-镜像由 GitHub Actions 自动构建并发布到 `ghcr.io/aidenofficial/mumble-djbot`
-(`master` 每次推送更新 `edge` 标签,公开可拉取,无需登录),NAS 上不用再构建。
+镜像由 GitHub Actions 自动构建并发布到 `ghcr.io/aidenofficial/discord_djbot`
+(`main` 每次推送更新 `edge` 标签),NAS 上不用再构建。
 
 ```bash
 cd <项目目录>
@@ -106,11 +110,11 @@ docker compose up -d      # 后台启动
 docker compose logs -f    # 查看实时日志
 ```
 
-想固定某个发布版本,在 `<项目目录>/.env` 写 `BAM_IMAGE=ghcr.io/aidenofficial/mumble-djbot:1.2.3`。
+想固定某个发布版本,在 `<项目目录>/.env` 写 `BAM_IMAGE=ghcr.io/aidenofficial/discord_djbot:1.2.3`。
 从本地源码构建见 `docker-compose.build.yml` 开头的说明。
 
-日志里应能看到连接成功、加入频道。然后用你自己的 Mumble 客户端进同一个频道,
-发文字命令测试:`!help`、`!bili <B站链接>`、`!spotify <歌名>`、`!queue`、`!skip`。
+日志里出现 `logged in as ...` 和 `synced NN slash commands` 就说明连上了。然后自己进一个语音频道,
+在服务器里试:`/help`、`/play query:<歌名>`、`/bili video:<B站链接>`、`/queue`、`/skip`。
 
 (`Ctrl+C` 只是退出"看日志",不会停掉容器。)
 
@@ -128,10 +132,10 @@ B 站 / YouTube 经常改版,yt-dlp 必须保持最新。容器已设 `BAM_UPDAT
 SSH 里执行 `crontab -e`,加一行(每天凌晨 5 点重启):
 
 ```cron
-0 5 * * * docker restart mumble-music
+0 5 * * * docker restart discord-music
 ```
 
-或用 UGOS「控制面板 → 计划任务」新建一个每天执行 `docker restart mumble-music`
+或用 UGOS「控制面板 → 计划任务」新建一个每天执行 `docker restart discord-music`
 的定时任务。
 
 部署到此结束。机器人已在后台常驻,崩溃自动重启,并每天自动更新。
@@ -149,7 +153,7 @@ SSH 里执行 `crontab -e`,加一行(每天凌晨 5 点重启):
 | 改完 `configuration.ini` 生效 | `docker compose restart` |
 | 更新到最新版 | `docker compose pull && docker compose up -d` |
 | 用本地源码构建 | `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build` |
-| 进容器内部排查 | `docker exec -it mumble-music bash` |
+| 进容器内部排查 | `docker exec -it discord-music bash` |
 
 **数据持久化**:`configuration.ini`、`data/`(状态数据库、Web 用户别名与个人歌单)、
 `music_folder/`(本地音乐 + Web 上传)、`cache/`(YouTube / B 站下载缓存)、
@@ -171,15 +175,22 @@ SSH 里执行 `crontab -e`,加一行(每天凌晨 5 点重启):
 - `entrypoint.sh` 换行符问题。`Dockerfile` 已用 `sed` 自动修复,正常不会遇到;
   若仍出现,`docker compose pull` 重新拉取镜像。
 
-**机器人连不上 Mumble 服务器**
-- 核对 `[server]` 的 host / port / password。容器默认 bridge 网络,
-  主动连出没有限制,一般无需额外网络配置。
+**机器人连不上 Discord / 日志报 `Improper token has been passed`**
+- `.env` 里的 `DISCORD_TOKEN` 不对或已被重置:到 Developer Portal → Bot → Reset Token 重新生成,
+  改好 `.env` 后 `docker compose up -d`(只 restart 不会重新读 `.env`)。
 
-**`!bili` 报下载失败**
-- 多半是 B 站改版导致 yt-dlp 暂时失效。`docker restart mumble-music`
+**输入 `/` 看不到 bot 的命令**
+- 邀请 bot 时没勾 `applications.commands` scope:用 README 里的邀请链接重新邀请一次。
+- `guild_id` 填的不是这个服务器;日志里 `synced NN slash commands to <服务器名>` 会写同步到了哪。
+
+**bot 进不了语音频道**
+- bot 在那个频道没有「连接」「说话」权限;舞台频道不支持。
+
+**`/bili` 报下载失败**
+- 多半是 B 站改版导致 yt-dlp 暂时失效。`docker restart discord-music`
   会触发自动升级。大会员 / 番剧内容需要 cookies,见下。
 
-**`!spotify` 失败**
+**`/spotify` 失败**
 - 检查 `[spotify]` 的 client_id / client_secret 是否填对。
 - 住宅 IP 下 spotdl 抓 YouTube 一般**不需要 cookies** —— 这正是搬到家里 NAS
   的意义。若极少数情况下仍被 YouTube 要求登录验证,再来加 cookies 支持。
@@ -194,7 +205,7 @@ SSH 里执行 `crontab -e`,加一行(每天凌晨 5 点重启):
 - `docker compose logs --since 24h botamusique | grep -E "CRITICAL|Traceback|ERROR" -A 20`
   能看到最近一天的异常栈。`playback loop stalled` 表示主循环被卡住、看门狗主动重启;
   `unhandled exception in thread` 表示某个工作线程出错(新版只记录、不再整个退出)。
-- `docker inspect -f '{{.RestartCount}} {{.State.ExitCode}}' mumble-music` 看重启次数与上次退出码
+- `docker inspect -f '{{.RestartCount}} {{.State.ExitCode}}' discord-music` 看重启次数与上次退出码
   (137 = 被 OOM 或 docker kill,1 = 程序主动退出)。
 
 **机器人在频道里但没声音 / 想看详细日志**
@@ -205,5 +216,5 @@ SSH 里执行 `crontab -e`,加一行(每天凌晨 5 点重启):
 
 ## 九、命令速查
 
-机器人的聊天命令(`!bili`、`!spotify`、`!queue`、`!skip`、`!volume`、`!duck` 等)
-与 `DEPLOY.md` 的「命令速查」一节完全相同,直接参见 `DEPLOY.md` 第八节。
+在服务器里输入 `/` 就能看到全部命令和参数说明,`/help` 列出全部命令;
+常用命令见 `DEPLOY.md` 第八节。

@@ -108,7 +108,7 @@ def ids(pl):
 
 
 class FakeLink:
-    """MumbleLink 里播放循环用到的部分。"""
+    """DiscordLink 里播放循环用到的部分。"""
     alive = True
     audio_buffered = 0.0
     volume = 1.0

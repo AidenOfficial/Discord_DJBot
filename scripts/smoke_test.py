@@ -115,6 +115,17 @@ def check_imports():
     except Exception as e:
         record("import command", "FAIL", repr(e))
     try:
+        # Discord 语音:libopus 能加载、DAVE(davey)和 PyNaCl 都装好了,否则进得了频道也发不出声音
+        import discord
+        import davey  # noqa: F401
+        import nacl  # noqa: F401
+        from bot import discord_link  # noqa: F401
+        loaded = discord.opus.is_loaded() or discord.opus._load_default()
+        record("discord.py 语音(libopus / DAVE / PyNaCl)", "PASS" if loaded else "FAIL",
+               f"discord.py {discord.__version__}" + ("" if loaded else ",找不到 libopus"))
+    except Exception as e:
+        record("discord.py 语音(libopus / DAVE / PyNaCl)", "FAIL", repr(e))
+    try:
         # 听歌识曲的指纹在本地算(Rust 轮子),不联网也能验证镜像里装好了
         from media import recognize
         wav = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=12",

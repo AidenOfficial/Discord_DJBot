@@ -101,6 +101,20 @@ class PCMStreamTest(unittest.TestCase):
         self.assertEqual(set(samples(s.read())), {5000})
 
 
+class OpusTest(unittest.TestCase):
+    def test_frames_encode_with_discord_opus(self):
+        # read() 的帧大小必须正好是 discord.py 编码器要的 20 ms 立体声
+        if not (discord.opus.is_loaded() or discord.opus._load_default()):
+            self.skipTest('libopus not installed')
+        s = PCMStream()
+        s.set_sink(lambda: None)
+        s.write(pcm(3000, 2))
+        encoder = discord.opus.Encoder()
+        packet = encoder.encode(s.read(), encoder.SAMPLES_PER_FRAME)
+        self.assertGreater(len(packet), 0)
+        self.assertEqual(dl.FRAME_BYTES, encoder.FRAME_SIZE)
+
+
 class LoopThread:
     """在后台线程跑一个事件循环,模拟 discord.py 的线程。"""
 

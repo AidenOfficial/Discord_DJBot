@@ -21,40 +21,17 @@ if [ -n "$BAM_MUSIC_DB" ]; then
     command+=( "--music-db" "$BAM_MUSIC_DB" )
 fi
 
-if [ -n "$BAM_MUMBLE_SERVER" ]; then
-    command+=( "--server" "$BAM_MUMBLE_SERVER")
-fi
-
-if [ -n "$BAM_MUMBLE_PASSWORD" ]; then
-    command+=( "--password" "$BAM_MUMBLE_PASSWORD" )
-fi
-
-if [ -n "$BAM_MUMBLE_PORT" ]; then
-    command+=( "--port" "$BAM_MUMBLE_PORT" )
-fi
-
-if [ -n "$BAM_USER" ]; then
-    command+=( "--user" "$BAM_USER" )
-fi
-
-if [ -n "$BAM_TOKENS" ]; then
-    command+=( "--tokens" "$BAM_TOKENS" )
+# Discord token 建议用环境变量 DISCORD_TOKEN 传(bot 直接读取,不出现在进程参数里)
+if [ -n "$BAM_GUILD" ]; then
+    command+=( "--guild" "$BAM_GUILD" )
 fi
 
 if [ -n "$BAM_CHANNEL" ]; then
     command+=( "--channel" "$BAM_CHANNEL" )
 fi
 
-if [ -n "$BAM_CERTIFICATE" ]; then
-    command+=( "--cert" "$BAM_CERTIFICATE" )
-fi
-
 if [ -n "$BAM_VERBOSE" ]; then
     command+=( "--verbose" )
-fi
-
-if [ -n "$BAM_BANDWIDTH" ]; then
-    command+=( "--bandwidth" "$BAM_BANDWIDTH")
 fi
 
 if [ -n "$BAM_CONFIG_file" ]; then

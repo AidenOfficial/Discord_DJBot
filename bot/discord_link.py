@@ -197,6 +197,12 @@ class PCMStream(discord.AudioSource):
                 self._playing = False
                 log.exception("discord: could not start the audio player")
 
+    def player_unavailable(self):
+        """暂时没法开播(语音还没连好):标记为没在播,下次 write 时再试(不立刻重试,免得空转)。"""
+        with self._cond:
+            self._playing = False
+            self._cond.notify_all()
+
     def player_stopped(self):
         """AudioPlayer 意外结束(after 回调):允许下次写入时重新启动。"""
         with self._cond:
@@ -532,8 +538,12 @@ class DiscordLink:
         guild = self._guild()
         users = {}
         if guild is not None:
+            connected = guild.voice_client is not None
             for vc in list(guild.voice_channels) + list(guild.stage_channels):
                 for uid, state in list(vc.voice_states.items()):
+                    if uid == self._me_id and not connected:
+                        # 上次进程留下的语音状态(重启后 Discord 还会挂一会儿):其实没连着,不算在频道里
+                        continue
                     member = guild.get_member(uid)
                     if member is None:
                         continue
@@ -670,7 +680,7 @@ class DiscordLink:
                 # 刚 connect / move_to,语音握手还没完成
                 self._loop.call_later(0.1, self._start_player, attempt + 1)
             else:
-                self._pcm.player_stopped()
+                self._pcm.player_unavailable()
             return
         if vc.is_playing():
             if vc.source is self._pcm and attempt < 20:

@@ -49,4 +49,4 @@ WORKDIR /botamusique
 RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh
 
 ENTRYPOINT [ "/botamusique/entrypoint.sh" ]
-CMD ["venv/bin/python", "mumbleBot.py"]
+CMD ["venv/bin/python", "djbot.py"]
