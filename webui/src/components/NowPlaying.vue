@@ -124,6 +124,13 @@ const sourceLabel = computed(() => typeLabel(current.value?.type ?? ''))
 
 <template>
   <section class="mx-auto flex w-full max-w-3xl flex-col items-center gap-6 px-4 py-8 sm:py-14">
+    <!-- bot 不在语音频道里:播放进度照走,但没人听得到 -->
+    <p
+      v-if="status && !status.voice_channel"
+      class="w-full rounded-xl px-3 py-2 text-sm"
+      :style="{ background: 'var(--c-accent-soft)', color: 'var(--c-text)' }"
+      role="status"
+    ><Icon icon="triangle-exclamation" class="mr-1.5" :style="{ color: 'var(--c-accent)' }" />{{ t('np.notInVoice') }}</p>
     <!-- artwork -->
     <div
       class="relative aspect-square w-56 overflow-hidden sm:w-72"

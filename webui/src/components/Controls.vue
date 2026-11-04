@@ -71,12 +71,6 @@ const MODES = ['one-shot', 'repeat', 'single', 'random', 'autoplay']
       <span class="w-8 text-right text-xs tabular-nums" :style="{ color: 'var(--c-text-muted)' }">
         {{ Math.round(volume * 100) }}
       </span>
-      <span
-        v-if="status?.ducking"
-        class="shrink-0 rounded-full px-2 py-0.5 text-xs whitespace-nowrap"
-        :style="{ background: 'var(--c-accent-soft)', color: 'var(--c-accent)' }"
-        :title="t('ctl.duckHint')"
-      >{{ t('ctl.duck') }}</span>
     </div>
 
     <!-- mode -->

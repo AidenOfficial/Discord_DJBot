@@ -14,7 +14,7 @@ export interface CurrentItem {
   album: string
   /** 曲库里的正式歌名(匹配到专辑封面时才有),视频标题里的歌手/MV 标注都去掉了 */
   track: string
-  /** 点歌人:网页点的是 Web 昵称(没有就邮箱前缀 / Guest),聊天点的绑定了是 Web 昵称、否则是 Mumble 名 */
+  /** 点歌人:网页点的是 Web 昵称(没有就邮箱前缀 / Guest),Discord 点的绑定了是 Web 昵称、否则是 Discord 名 */
   requester: string
   /** SponsorBlock 会跳过的片段 [开始, 结束](秒),只有当前曲有 */
   skip_segments?: [number, number][]
@@ -77,7 +77,8 @@ export interface BotStatus {
   play: boolean
   mode: string
   volume: number
-  ducking: boolean
+  /** bot 所在的语音频道;null = 不在语音里 */
+  voice_channel: { id: string; name: string } | null
   playhead: number
   queue_length: number
   current_index: number
@@ -151,7 +152,7 @@ export interface Me {
   source: 'cloudflare' | 'cloudflare-jwt' | 'web-user' | 'anonymous'
   can_have_playlists: boolean
   jwt_verified?: boolean
-  mumble: { mumble_name: string; linked_at: number } | null
+  discord: { discord_name: string; linked_at: number } | null
   can_view_logs: boolean
 }
 
@@ -361,20 +362,28 @@ export function formatBytes(n: number): string {
 
 // ---- 频道 / 跟随 ---------------------------------------------------------
 
+// Discord 的 ID 超过 JS 安全整数范围,API 里都是字符串
+
 export interface ChannelUser {
-  session: number
+  session: string
   name: string
   is_me: boolean
   is_bot: boolean
+  is_bot_account?: boolean
   muted: boolean
   deafened: boolean
 }
 
+export type ChannelKind = 'guild' | 'category' | 'voice' | 'stage'
+
 export interface ChannelNode {
-  id: number
+  id: string
   name: string
   path: string[]
   temporary: boolean
+  kind: ChannelKind
+  joinable: boolean
+  afk: boolean
   users: ChannelUser[]
   children: ChannelNode[]
 }
@@ -383,10 +392,11 @@ export type FollowMode = 'off' | 'auto' | 'user'
 
 export interface ChannelOverview {
   tree: ChannelNode | null
-  current_channel_id: number | null
+  server_name: string
+  current_channel_id: string | null
   settings: {
     default_path: string[]
-    default_channel_id: number | null
+    default_channel_id: string | null
     follow: FollowMode
     follow_user: string
     return_home: boolean
@@ -398,17 +408,18 @@ export interface ChannelOverview {
 
 export const fetchChannels = () => getJson<ChannelOverview>('/api/channels')
 export const saveChannelSettings = (body: Partial<{
-  default_channel_id: number; follow: FollowMode; follow_user: string; return_home: boolean
+  default_channel_id: string | null; follow: FollowMode; follow_user: string; return_home: boolean
   idle_pause_minutes: number; idle_resume: boolean
 }>) => send<ChannelOverview>('POST', '/api/channels/settings', body)
-export const joinChannel = (channel_id: number) =>
+export const joinChannel = (channel_id: string) =>
   send<ChannelOverview>('POST', '/api/channels/join', { channel_id })
+export const leaveChannel = () => send<ChannelOverview>('POST', '/api/channels/leave')
 
-// ---- Mumble 绑定 ---------------------------------------------------------
+// ---- Discord 绑定 --------------------------------------------------------
 
 export const createBindCode = () =>
   send<{ code: string; expires_at: number; command: string }>('POST', '/api/me/bind')
-export const unbindMumble = () => send<Me>('DELETE', '/api/me/bind')
+export const unbindDiscord = () => send<Me>('DELETE', '/api/me/bind')
 
 // ---- 导入歌单 -----------------------------------------------------------
 
