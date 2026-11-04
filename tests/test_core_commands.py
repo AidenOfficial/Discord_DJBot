@@ -147,5 +147,14 @@ class CoreTest(unittest.TestCase):
         self.assertTrue(self.bot.is_admin(self.ctx('queue', admin=True)))
 
 
+
+def test_play_routes_spotify_by_hostname():
+    from commands.playback import _is_spotify_host
+    assert _is_spotify_host('https://open.spotify.com/track/abc')
+    assert _is_spotify_host('https://spotify.com/x')
+    assert not _is_spotify_host('https://evil.example/?u=open.spotify.com')
+    assert not _is_spotify_host('https://notspotify.com/track/abc')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -2,6 +2,7 @@
 import html
 import logging
 import threading
+from urllib.parse import urlparse
 
 from constants import tr_cli as tr
 import util
@@ -29,11 +30,17 @@ MODE_ALIASES = {
 
 
 
+def _is_spotify_host(url):
+    """按主机名认 Spotify 链接(不能用子串:https://x.com/?spotify.com 不是 Spotify)。"""
+    host = (urlparse(url).hostname or '').lower()
+    return host == 'spotify.com' or host.endswith('.spotify.com')
+
+
 def _play_query(bot, user, text, command, query):
     """/play 后面跟的不是队列序号:按内容分给对应的点歌命令。"""
     from . import sources, streaming
     url = util.get_url_from_input(query)
-    if url and 'spotify.com' in url:
+    if url and _is_spotify_host(url):
         return streaming.cmd_play_spotify(bot, user, text, command, query)
     if not url and util.get_bilibili_url_from_input(query):
         return streaming.cmd_play_bilibili(bot, user, text, command, query)
