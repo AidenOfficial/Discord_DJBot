@@ -1,5 +1,7 @@
 // Thin typed client for the bot's JSON API (web_api.py).
 
+import { guildHeaders } from './guild'
+
 export interface CurrentItem {
   id: string
   index: number
@@ -97,14 +99,21 @@ export interface QueueResponse {
 // APIs live one level up. Relative paths keep reverse-proxy prefixes working.
 const BASE = '..'
 
+/** fetch + 当前标签页选中的服务器(X-DJ-Guild)。所有 API 请求都走这里。 */
+export function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers)
+  for (const [k, v] of Object.entries(guildHeaders())) headers.set(k, v)
+  return fetch(input, { ...init, headers })
+}
+
 async function getJson<T>(path: string): Promise<T> {
-  const rv = await fetch(`${BASE}${path}`, { headers: { Accept: 'application/json' } })
+  const rv = await apiFetch(`${BASE}${path}`, { headers: { Accept: 'application/json' } })
   if (!rv.ok) throw new Error(`${path} -> ${rv.status}`)
   return rv.json()
 }
 
 async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const rv = await fetch(`${BASE}${path}`, {
+  const rv = await apiFetch(`${BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify(body),
@@ -149,18 +158,84 @@ export interface Me {
   email: string | null
   alias: string
   display_name: string
-  source: 'cloudflare' | 'cloudflare-jwt' | 'web-user' | 'anonymous'
+  source: 'discord' | 'cloudflare' | 'cloudflare-jwt' | 'web-user' | 'anonymous'
   can_have_playlists: boolean
   jwt_verified?: boolean
   discord: { discord_name: string; linked_at: number } | null
   can_view_logs: boolean
+  /** 用 Discord 登录时才有 */
+  discord_id?: string | null
+  discord_username?: string | null
+  discord_avatar?: string | null
+  /** 服务器配置了 Discord 登录(可以显示"用 Discord 登录") */
+  discord_login_available?: boolean
 }
 
 export const fetchMe = () => getJson<Me>('/api/me')
 
+/** Discord 登录入口(站内相对地址,和 API 一样在上一级) */
+export const DISCORD_LOGIN_URL = `${BASE}/auth/discord/login`
+
+export async function logout(): Promise<void> {
+  const rv = await apiFetch(`${BASE}/auth/logout`, { method: 'POST', headers: { Accept: 'application/json' } })
+  if (!rv.ok) throw new Error(String(rv.status))
+}
+
+// ---- 服务器(多服务器) ---------------------------------------------------
+
+export interface GuildInfo {
+  id: string
+  name: string
+  /** 图标地址;没有图标是 null */
+  icon: string | null
+  /** 能改这个服务器的设置(公告频道、最大音量、封禁、频道设置) */
+  can_manage: boolean
+  /** 后端这次请求实际用的服务器 */
+  selected: boolean
+}
+
+export interface GuildList {
+  guilds: GuildInfo[]
+  /** bot 主人:统计页可以看全部服务器 */
+  owner: boolean
+  /** false = 旧的单服务器模式 */
+  multi: boolean
+}
+
+export const fetchGuilds = () => getJson<GuildList>('/api/guilds')
+
+export interface GuildSettings {
+  guild_id: string
+  announce_channel: string | null
+  /** 可选的文字频道;后端拿不到时是空数组(只能填 ID) */
+  text_channels: { id: string; name: string }[]
+  /** 0-100 */
+  max_volume: number
+  default_max_volume: number
+}
+
+export interface BanRule {
+  value: string
+  note: string
+  created_by: string
+  created_at: number
+}
+
+export type BanKind = 'user_ban' | 'url_ban'
+export type GuildBans = Record<BanKind, BanRule[]>
+
+export const fetchGuildSettings = () => getJson<GuildSettings>('/api/guild/settings')
+export const saveGuildSettings = (body: Partial<{ announce_channel: string | null; max_volume: number }>) =>
+  send<GuildSettings>('POST', '/api/guild/settings', body)
+export const fetchGuildBans = () => getJson<GuildBans>('/api/guild/bans')
+export const addGuildBan = (kind: BanKind, value: string, note = '') =>
+  send<GuildBans>('POST', '/api/guild/bans', { kind, value, note })
+export const removeGuildBan = (kind: BanKind, value: string) =>
+  send<GuildBans>('DELETE', '/api/guild/bans', { kind, value })
+
 /** 409 = 别名已被占用,400 = 含非法字符/过长 */
 export async function saveAlias(alias: string): Promise<Me> {
-  const rv = await fetch(`${BASE}/api/me`, {
+  const rv = await apiFetch(`${BASE}/api/me`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({ alias }),
@@ -217,7 +292,7 @@ export type PlaylistSource =
   | { source: 'url'; url: string; title?: string; duration?: number; provider?: string; id?: string }
 
 async function send<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const rv = await fetch(`${BASE}${path}`, {
+  const rv = await apiFetch(`${BASE}${path}`, {
     method,
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -339,7 +414,7 @@ export const fetchCache = () => getJson<{ summary: CacheSummary; entries: CacheE
 export const pinCache = (id: string, pinned: boolean) =>
   send<{ id: string; pinned: boolean }>('POST', '/api/cache/pin', { id, pinned })
 export async function deleteCache(id: string, force = false): Promise<number> {
-  const rv = await fetch(`${BASE}/api/cache/delete`, {
+  const rv = await apiFetch(`${BASE}/api/cache/delete`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id, force }),
@@ -404,6 +479,8 @@ export interface ChannelOverview {
     idle_resume: boolean
   }
   online_users: string[]
+  /** false = 只能移动 / 离开,不能改设置(要能管理这个服务器) */
+  can_edit_settings?: boolean
 }
 
 export const fetchChannels = () => getJson<ChannelOverview>('/api/channels')
@@ -439,7 +516,7 @@ export interface ImportJob {
 }
 
 export async function startImport(url: string, playlistId?: number): Promise<string> {
-  const rv = await fetch(`${BASE}/api/playlists/import`, {
+  const rv = await apiFetch(`${BASE}/api/playlists/import`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(playlistId ? { url, playlist_id: playlistId } : { url }),
@@ -489,7 +566,7 @@ export function reportClientError(message: string, stack?: string) {
   const now = Date.now()
   if (key === lastReport.key && now - lastReport.at < 10000) return
   lastReport = { key, at: now }
-  fetch(`${BASE}/api/logs/client`, {
+  apiFetch(`${BASE}/api/logs/client`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message, stack: stack ?? '', url: location.href }),

@@ -74,7 +74,7 @@ Discord-DJBot 进入 Discord 服务器的语音频道，播放来自 YouTube、B
 
 ### 个人歌单
 
-- 以 Cloudflare Access 传递的登录邮箱识别用户，用户可设置显示别名。
+- 以 Cloudflare Access 传递的登录邮箱识别用户，或在[用 Discord 登录](#用-discord-登录)后以 Discord 账号识别；用户可设置显示别名。
 - 每位用户拥有独立歌单，可立即播放、随机播放或追加到队列。
 - 可从 YouTube、网易云音乐、QQ 音乐与 Spotify 导入歌单。
 - 可通过一次性绑定码（`/bind`）把 Discord 账号与 Web 身份关联，之后在 Discord 里用 `/mylist`、`/fav` 使用个人歌单。
@@ -181,6 +181,26 @@ NAS 部署、cookies 配置与日常维护参见 [`deploy/DOCKER.md`](deploy/DOC
 
 详细步骤参见 [`deploy/WEBUI.md`](deploy/WEBUI.md)。
 
+### 用 Discord 登录
+
+Web 界面也可以用 Discord 账号登录（OAuth2，scope 为 `identify guilds`）。已经用 `/bind` 绑定过的人，登录后沿用原来的歌单和收藏；其他人会得到一个挂在 Discord 账号上的新 Web 身份，不再需要 `/bind`。
+
+1. 在 [Developer Portal](https://discord.com/developers/applications) 打开你的应用 → **OAuth2**，添加 Redirect：`<public_url>/auth/discord/callback`（例如 `https://music.example.com/auth/discord/callback`）。
+2. 把 **Client ID** 和 **Client Secret** 填进 `configuration.ini`：
+
+   ```ini
+   [webinterface]
+   auth_method = discord        ; 强制用 Discord 登录（也可以保持 token/none，把它当作可选登录方式）
+   discord_client_id = <client id>
+   discord_client_secret =      ; 也可以改在 .env 里设置 DISCORD_CLIENT_SECRET
+   public_url = https://music.example.com
+   ```
+
+3. 重启 bot。`auth_method = discord` 时，未登录的页面会跳转到 Discord，`/api/*` 返回 401，并且只放行和 bot 在同一个服务器里的账号。`auth_method = token` 时，令牌页会多一个“用 Discord 登录”按钮。
+
+> [!CAUTION]
+> Client Secret 是凭据，绝不能提交到 git。环境变量 `DISCORD_CLIENT_SECRET` 优先于 ini 里的值。
+
 ## 安全注意事项
 
 > [!WARNING]
@@ -189,7 +209,7 @@ NAS 部署、cookies 配置与日常维护参见 [`deploy/DOCKER.md`](deploy/DOC
 - **bot token 要保密。** 一旦泄露，立即到 Developer Portal 重置。
 - **不要将 8181 端口暴露**到公网或不可信网络。
 - **启用 Access JWT 校验**：在 `[webinterface]` 中配置 `access_team_domain` 与 `access_aud`，绕过 Tunnel 的请求就无法冒充用户。
-- 如改用 `auth_method = token`，**务必修改 `flask_secret`** 为足够长的随机字符串，因为它用于签名会话 Cookie。
+- **`flask_secret` 用于签名会话 Cookie**（`token` 和 `discord` 登录都靠它）。不配置时会随机生成一次并存进 settings 数据库；如果自己配置，请用足够长的随机字符串。
 - 管理员和封禁都按 Discord 用户 ID / 身份组 ID 认，改昵称冒充不了。
 
 ## 使用

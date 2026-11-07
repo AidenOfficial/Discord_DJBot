@@ -22,6 +22,8 @@ services:
     environment:
       # Discord bot token:写在同目录的 .env 里(DISCORD_TOKEN=...,.env 已 gitignore),不要写进这个文件。
       DISCORD_TOKEN: ${DISCORD_TOKEN:?set DISCORD_TOKEN in .env}
+      # 可选:Web 界面"用 Discord 登录"的 OAuth2 Client Secret,同样只写在 .env 里
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
       # 每次容器启动时把 yt-dlp / spotdl 升级到最新版(B 站 / YouTube 经常改版)。
       BAM_UPDATE_ON_START: "1"
       # 把状态数据库放进挂载目录,容器删除重建也不丢失。

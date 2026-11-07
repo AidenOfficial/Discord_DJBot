@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { postQueue as _pq, thumbnailUrl as _tn } from '../api'
+import { apiFetch, postQueue as _pq, thumbnailUrl as _tn } from '../api'
 import { formatTime, useStatus } from '../composables/useStatus'
 import AddToPlaylist from './AddToPlaylist.vue'
 import FavButton from './FavButton.vue'
@@ -45,7 +45,7 @@ async function search() {
   const mySeq = ++seq
   loading.value = true
   try {
-    const rv = await fetch(`../api/search?q=${encodeURIComponent(q)}`)
+    const rv = await apiFetch(`../api/search?q=${encodeURIComponent(q)}`)
     if (!rv.ok) throw new Error(String(rv.status))
     const data = await rv.json()
     if (mySeq !== seq) return // stale response
@@ -67,7 +67,7 @@ async function add(r: SearchResult) {
   const key = `${r.source}:${r.id}`
   added.value[key] = 'pending'
   try {
-    const rv = await fetch('../api/search/add', {
+    const rv = await apiFetch('../api/search/add', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ source: r.source, id: r.id, url: r.url }),

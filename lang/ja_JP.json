@@ -135,6 +135,14 @@
         "token": "トークン",
         "token_required": "トークンが必要です",
         "token_required_message": "このページは{name}のウェブインタフェイスです。\n設定によって、ログオンするにはトークンが必要になります。<br />\nDiscord で \"{command}\" を使ってトークンを取得してください。",
-        "submit": "送信"
+        "submit": "送信",
+        "login_with_discord": "Discord でログイン",
+        "logout": "ログアウト",
+        "logged_out": "ログアウトしました",
+        "logged_out_message": "ウェブインタフェイスからログアウトしました。",
+        "discord_login_failed": "Discord ログインに失敗しました",
+        "discord_login_failed_message": "ログインを完了できませんでした(キャンセル、期限切れ、または Discord が応答しませんでした)。もう一度お試しください。",
+        "discord_not_member": "アクセスできません",
+        "discord_not_member_message": "この Discord アカウントは、この bot が参加しているサーバーにいません。サーバーに参加するか、別のアカウントでログインしてください。"
     }
 }

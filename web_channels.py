@@ -1,5 +1,7 @@
 """频道 API(/api/channels*):语音频道树、默认频道、跟随设置、立即移动 / 离开。逻辑在 bot/channels.py。
 
+改设置要能管理这个服务器(多服务器时);移动 / 离开是普通操作,能操作这个服务器就行。
+
 Discord 的频道 / 用户 ID 是 64 位整数,超过 JavaScript Number 的安全范围(2^53),
 所以 JSON 里一律转成字符串;收到的也按字符串解析。
 """
@@ -62,7 +64,13 @@ def overview():
             'idle_resume': settings['idle_resume'],
         },
         'online_users': humans,
+        'can_edit_settings': can_edit_settings(),
     }
+
+
+def can_edit_settings():
+    """改频道设置要能管理这个服务器;单服务器旧模式(没有 Hub)照旧谁都能改。"""
+    return web_context.hub() is None or web_context.can_manage()
 
 
 def create_blueprint(requires_auth):
@@ -76,6 +84,8 @@ def create_blueprint(requires_auth):
     @api.route('/settings', methods=['POST'])
     @requires_auth
     def channel_settings():
+        if not can_edit_settings():
+            web_context.require_manage()
         payload = _payload()
         changes = {}
         if 'default_channel_id' in payload:

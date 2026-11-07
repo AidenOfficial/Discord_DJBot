@@ -5,8 +5,9 @@ POST /api/logs/debug           {enabled: bool} 临时开 / 关调试日志(30 �
 GET  /api/logs/download        导出为纯文本(带版本 / 环境信息),方便贴进 issue
 POST /api/logs/client          前端未捕获的 JS 错误上报,记为 bot.webui
 
-可见范围:[webinterface] log_viewers 为空时所有能打开 Web UI 的人都能看
-(与设置页其他功能同一信任边界);填了就只有列出的身份(邮箱或 user:<用户名>)能看。
+可见范围:[webinterface] log_viewers 填了就只有列出的身份(邮箱或 user:<用户名>)能看;
+为空时单服务器旧模式下所有能打开 Web UI 的人都能看(与设置页其他功能同一信任边界),
+多服务器(有 Hub)时日志里有所有服务器的东西,只有 bot 主人能看。
 """
 
 import logging
@@ -38,7 +39,7 @@ def _viewers():
 def can_view():
     viewers = _viewers()
     if not viewers:
-        return True
+        return web_context.hub() is None or web_context.is_owner()
     key = current_identity().key
     return bool(key) and key.lower() in viewers
 

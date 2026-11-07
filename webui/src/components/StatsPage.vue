@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { apiFetch } from '../api'
+import { useGuilds } from '../composables/useGuilds'
 import { formatTime } from '../composables/useStatus'
 import { t, typeLabel } from '../i18n'
 
@@ -20,15 +22,30 @@ interface Stats {
 const stats = ref<Stats | null>(null)
 const error = ref(false)
 
-onMounted(async () => {
+// 统计哪个服务器:默认跟着顶栏选的;bot 主人还能选"全部服务器"(all)
+const { guilds, owner, multi, selectedGuild } = useGuilds()
+const scope = ref<string>(selectedGuild.value)
+watch(selectedGuild, (id) => { if (scope.value !== 'all') scope.value = id })
+const showScope = computed(() => multi.value && (owner.value || guilds.value.length > 1))
+
+let seq = 0
+async function load() {
+  const mySeq = ++seq
+  stats.value = null
+  error.value = false
   try {
-    const rv = await fetch('../api/stats')
+    const query = scope.value ? `?guild=${encodeURIComponent(scope.value)}` : ''
+    const rv = await apiFetch(`../api/stats${query}`)
     if (!rv.ok) throw new Error(String(rv.status))
-    stats.value = await rv.json()
+    const data = await rv.json()
+    if (mySeq === seq) stats.value = data
   } catch {
-    error.value = true
+    if (mySeq === seq) error.value = true
   }
-})
+}
+
+onMounted(load)
+watch(scope, load)
 
 // Categorical palette for source identity - validated (dataviz six checks)
 // for both surfaces; light mode relies on the visible labels for relief.
@@ -63,6 +80,18 @@ const HOUR_LABELS = [0, 6, 12, 18]
 
 <template>
   <section class="mx-auto w-full max-w-3xl px-4 py-8">
+    <div v-if="showScope" class="mb-5 flex items-center justify-end gap-2 text-sm">
+      <label for="stats-scope" :style="{ color: 'var(--c-text-muted)' }">{{ t('stats.scope') }}</label>
+      <select
+        id="stats-scope"
+        v-model="scope"
+        class="max-w-[14rem] cursor-pointer rounded-full border px-3 py-1.5 text-sm outline-none"
+        :style="{ background: 'var(--c-bg)', borderColor: 'var(--c-border)', color: 'var(--c-text)' }"
+      >
+        <option v-if="owner" value="all">{{ t('stats.allServers') }}</option>
+        <option v-for="g in guilds" :key="g.id" :value="g.id">{{ g.name }}</option>
+      </select>
+    </div>
     <p v-if="error" class="text-center text-sm" :style="{ color: 'var(--c-text-muted)' }">
       {{ t('stats.unavailable') }}
     </p>

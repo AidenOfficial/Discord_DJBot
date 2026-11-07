@@ -5,6 +5,7 @@ import { formatTime, useStatus } from '../composables/useStatus'
 import AddToPlaylist from './AddToPlaylist.vue'
 import QueueRow from './QueueRow.vue'
 import { t } from '../i18n'
+import { selectedGuild } from '../guild'
 
 const { status, applyStatus } = useStatus()
 
@@ -102,16 +103,25 @@ function onDragEnd() {
 }
 
 async function reload() {
+  const guild = selectedGuild.value
   try {
     const q = await fetchQueue()
-    items.value = q.items
+    if (guild === selectedGuild.value) items.value = q.items  // 途中换了服务器:丢掉
   } catch {
     /* the status poll already surfaces connectivity errors */
   }
 }
 
-// refresh whenever the playlist version changes (covers external edits too)
-watch(() => status.value?.version, reload, { immediate: true })
+// 换服务器时旧队列立刻清掉,展开状态也不带过去
+watch(selectedGuild, () => {
+  items.value = []
+  expanded.value = new Set()
+  showAll.value = new Set()
+})
+
+// refresh whenever (guild, playlist version) changes (covers external edits too);
+// 不同服务器的队列版本号可能碰巧相同,所以服务器也算在内
+watch(() => [selectedGuild.value, status.value?.version] as const, reload, { immediate: true })
 
 let timer: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
