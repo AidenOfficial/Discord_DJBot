@@ -96,11 +96,13 @@ It is the Discord port of [Mumble-DJBot](https://github.com/AidenOfficial/Mumble
 
 1. Open the [Discord Developer Portal](https://discord.com/developers/applications) and create a **New Application**.
 2. Under **Bot**, click **Reset Token** and copy the token. Treat it like a password: anyone with it controls the bot. No privileged gateway intents are needed; leave *Presence*, *Server Members* and *Message Content* off.
-3. Under **OAuth2 → URL Generator**, select the scopes `bot` and `applications.commands`, and the bot permissions *View Channels*, *Send Messages*, *Connect* and *Speak*. Open the generated URL and add the bot to your server. The equivalent URL is:
+3. Under **OAuth2 → URL Generator**, select the scopes `bot` and `applications.commands`, and the bot permissions *View Channels*, *Send Messages*, *Embed Links*, *Attach Files*, *Read Message History*, *Connect*, *Speak* and *Set Voice Channel Status*. Open the generated URL and add the bot to your server. The equivalent URL is:
 
    ```text
-   https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot+applications.commands&permissions=3149824
+   https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot+applications.commands&permissions=281474979974144
    ```
+
+   *Embed Links*, *Attach Files* and *Read Message History* are for the now-playing panel (cover art, progress bar, buttons); *Set Voice Channel Status* shows the current song under the voice channel. If the bot is already in your server, open the new URL once more to grant them.
 
 4. In Discord, enable **Settings → Advanced → Developer Mode**, then right-click your server icon and choose **Copy Server ID**. You will put it in `[discord] guild_id`.
 

@@ -96,11 +96,13 @@ Discord-DJBot 进入 Discord 服务器的语音频道，播放来自 YouTube、B
 
 1. 打开 [Discord Developer Portal](https://discord.com/developers/applications)，点 **New Application** 新建应用。
 2. 在 **Bot** 页点 **Reset Token** 并复制 token。token 等同于密码，拿到它的人就能控制这个 bot。不需要任何特权 Intent，*Presence*、*Server Members*、*Message Content* 都保持关闭。
-3. 在 **OAuth2 → URL Generator** 里勾选 scope `bot` 和 `applications.commands`，权限勾选 *View Channels*、*Send Messages*、*Connect*、*Speak*，打开生成的链接把 bot 加进服务器。等价的链接是：
+3. 在 **OAuth2 → URL Generator** 里勾选 scope `bot` 和 `applications.commands`，权限勾选 *View Channels*、*Send Messages*、*Embed Links*、*Attach Files*、*Read Message History*、*Connect*、*Speak*、*Set Voice Channel Status*，打开生成的链接把 bot 加进服务器。等价的链接是：
 
    ```text
-   https://discord.com/oauth2/authorize?client_id=<应用 ID>&scope=bot+applications.commands&permissions=3149824
+   https://discord.com/oauth2/authorize?client_id=<应用 ID>&scope=bot+applications.commands&permissions=281474979974144
    ```
+
+   *Embed Links*、*Attach Files*、*Read Message History* 是「正在播放」面板要用的（封面、进度条、按钮）；*Set Voice Channel Status* 用来在语音频道名下面显示正在放的歌。bot 已经在服务器里的话，再打开一次新链接授权即可。
 
 4. 在 Discord 里打开 **设置 → 高级 → 开发者模式**，右键服务器图标选 **复制服务器 ID**，填到 `[discord] guild_id`。
 
