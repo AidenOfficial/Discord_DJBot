@@ -27,6 +27,7 @@ from urllib.parse import urlencode
 
 import requests
 from flask import Blueprint, has_request_context, jsonify, redirect, render_template, request, session
+from flask import g as request_globals
 
 import variables as var
 
@@ -159,6 +160,11 @@ def _token_request(data):
 
 def exchange_code(code):
     return _token_request({'grant_type': 'authorization_code', 'code': code, 'redirect_uri': redirect_uri()})
+
+
+def exchange_activity_code(code):
+    """Embedded App SDK 的 authorize() 拿到的 code:授权时没有 redirect_uri,换令牌时也不能带。"""
+    return _token_request({'grant_type': 'authorization_code', 'code': code})
 
 
 def refresh_access_token(refresh_token):
@@ -357,6 +363,10 @@ def session_user():
     关掉 Discord 登录(删了 client id/secret)后旧会话一律不认。"""
     if not has_request_context() or not configured():
         return None
+    # Activity 的 Bearer 令牌(web_activity.check_bearer 校验过才会有)
+    bearer_user = getattr(request_globals, 'activity_user', None)
+    if bearer_user:
+        return bearer_user
     user = session.get(SESSION_USER)
     if not user or not user.get('id'):
         return None
