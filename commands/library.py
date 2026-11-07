@@ -5,7 +5,7 @@ import variables as var
 from database import SettingsDatabase, MusicDatabase
 from media.item import dict_to_item, dicts_to_items
 from media.cache import get_cached_wrapper_from_scrap, get_cached_wrapper_by_id, get_cached_wrappers_by_tags, \
-    get_cached_wrapper
+    get_cached_wrapper, discard_everywhere
 
 from . import _shared
 from ._shared import (log, ITEMS_PER_PAGE, send_multi_lines,
@@ -276,7 +276,7 @@ def cmd_delete_from_library(bot, user, text, command, parameter):
                     log.info("cmd: remove from library: " + music_wrapper.format_debug_string())
                     msgs.append("<li>[{}] <b>{}</b></li>".format(music_wrapper.item().type, music_wrapper.item().title))
                     bot.drop_from_queue(music_dict['id'])
-                    var.cache.free_and_delete(music_dict['id'])
+                    discard_everywhere(music_dict['id'], done=bot.playlist)
                     count += 1
             else:
                 bot.send_msg(tr('bad_parameter', command=command), text)
@@ -298,7 +298,7 @@ def cmd_delete_from_library(bot, user, text, command, parameter):
                 bot.send_msg(tr('file_deleted', item=music_wrapper.format_song_string()), text)
                 log.info("cmd: remove from library: " + music_wrapper.format_debug_string())
                 bot.drop_from_queue(music_dict['id'])
-                var.cache.free_and_delete(music_dict['id'])
+                discard_everywhere(music_dict['id'], done=bot.playlist)
                 return
 
     bot.send_msg(tr('bad_parameter', command=command), text)

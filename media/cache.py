@@ -104,14 +104,19 @@ class MusicCache(dict):
                 del self[item.id]
             self.db.delete_music(Condition().and_equal("id", item.id))
 
+    # 缓存是所有会话共用的:一个队列不要某首了,别的队列可能还排着它,
+    # 只有没有任何队列引用时才真的移出缓存
     def free(self, id):
-        if id in self:
+        if id in self and id not in queued_ids():
             self.log.debug("library: cache freed for item: %s" % self[id].format_debug_string())
-            del self[id]
+            self.pop(id, None)
 
     def free_all(self):
-        self.log.debug("library: all cache freed")
-        self.clear()
+        """移出所有没有队列引用的条目。"""
+        queued = queued_ids()
+        for id in [id for id in list(self) if id not in queued]:
+            self.pop(id, None)
+        self.log.debug("library: unqueued cache freed")
 
     def build_dir_cache(self):
         self.dir_lock.acquire()
@@ -136,6 +141,36 @@ class MusicCache(dict):
 
         self.db.manage_special_tags()
         self.dir_lock.release()
+
+
+def queued_ids():
+    """所有会话的队列里还排着的条目 id。"""
+    ids = set()
+    for playlist in var.all_playlists():
+        ids.update(wrapper.id for wrapper in list(playlist))
+    return ids
+
+
+def drop_everywhere(item_id, done=None):
+    """把这首从每个会话的队列里移出(done = 调用方已经自己处理过的队列)。
+
+    有会话的队列交给会话的 drop_from_queue(由它决定删掉当前曲后指针怎么走),否则直接 remove_by_id。"""
+    for playlist in var.all_playlists():
+        if playlist is done:
+            continue
+        session = getattr(playlist, 'session', None)
+        drop = getattr(session, 'drop_from_queue', None)
+        if drop is not None and getattr(session, 'playlist', None) is playlist:
+            drop(item_id)
+        else:
+            playlist.remove_by_id(item_id)
+
+
+def discard_everywhere(item_id, done=None):
+    """播放 / 下载 / 校验失败、被封禁、从曲库删除:先移出所有队列,再删文件、缓存和库记录。
+    只删缓存不管别的队列的话,那边排着的 wrapper 就成了悬空引用(ItemNotCachedError)。"""
+    drop_everywhere(item_id, done=done)
+    var.cache.free_and_delete(item_id)
 
 
 class CachedItemWrapper:

@@ -52,12 +52,6 @@ class DJBot(PlayerMixin, ChannelMixin):
         self.last_ffmpeg_err = ""
         self._ffmpeg_stderr_lines = collections.deque(maxlen=20)
 
-        # Single-instance guard so the same item never spawns two concurrent
-        # download / progress-reporter threads (which would double every
-        # download message in chat).
-        self._active_downloads = set()
-        self._download_lock = threading.Lock()
-
         # Liveness tracking for the watchdog and the (Docker) healthcheck.
         self.last_loop_at = time.time()
         self._last_heartbeat_write = 0.0

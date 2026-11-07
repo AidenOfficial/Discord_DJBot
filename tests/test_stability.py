@@ -5,7 +5,6 @@ import logging
 import os
 import sys
 import tempfile
-import threading
 import unittest
 from unittest import mock
 
@@ -13,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import constants  # noqa: E402
 import variables as var  # noqa: E402
+from bot import downloads  # noqa: E402
 from bot.player import PlayerMixin  # noqa: E402
 
 
@@ -65,8 +65,6 @@ class Player(PlayerMixin):
         self.last_ffmpeg_err = ''
         import collections
         self._ffmpeg_stderr_lines = collections.deque(maxlen=20)
-        self._active_downloads = set()
-        self._download_lock = threading.Lock()
         self.wait_for_ready = True  # 下载线程跑的是主循环正在等的那首
         self.messages = []
 
@@ -129,10 +127,10 @@ class DownloadThreadTest(Base):
         wrapper = FakeWrapper()
         wrapper.validate = mock.Mock(side_effect=TypeError("'>' not supported"))
         var.playlist = mock.Mock()
-        player._active_downloads.add(wrapper.id)
+        downloads.begin(wrapper.id)
         self.assertFalse(player._download(wrapper))
         var.playlist.remove_by_id.assert_called_once_with(wrapper.id, rewind=False)
-        self.assertNotIn(wrapper.id, player._active_downloads)
+        self.assertFalse(downloads.is_active(wrapper.id))
         self.assertEqual(len(player.messages), 1)
 
     def test_unexpected_prepare_error_marks_failed(self):

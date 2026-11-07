@@ -40,6 +40,9 @@ item_id_generators['url'] = url_item_id_generator
 
 
 class URLItem(BaseItem):
+    # prepare() 里"有没有人在下载"的检查和登记要一步完成
+    _claim_lock = threading.Lock()
+
     def __init__(self, url, from_dict=None):
         self.validating_lock = threading.Lock()
         if from_dict is None:
@@ -73,6 +76,7 @@ class URLItem(BaseItem):
             self.shazam = from_dict.get('shazam')  # 旧记录没有(None):见 artwork._done
 
         self.downloading = False
+        self._preparing = False  # prepare() 已认领(可能还在校验,downloading 尚未置位)
         # Fraction in [0.0, 1.0] of the current download, updated by the
         # yt-dlp progress hook so other threads can report progress.
         self.progress = 0.0
@@ -169,11 +173,18 @@ class URLItem(BaseItem):
         # 或上一次下载失败留下 failed 时,AssertionError 会直接打死下载线程。
         if self.is_ready():
             return True
-        if self.downloading:
-            return True  # 另一个线程正在下载,主循环会轮询 is_ready()
-        if self.ready != 'validated':
-            self.validate()
-        return self._download()
+        with URLItem._claim_lock:
+            # 以前先查 downloading、过了校验才在 _download() 里置位,
+            # 两个线程能同时通过检查,对同一个文件各下一遍
+            if self.downloading or getattr(self, '_preparing', False):
+                return True  # 另一个线程正在下载,主循环会轮询 is_ready()
+            self._preparing = True
+        try:
+            if self.ready != 'validated':
+                self.validate()
+            return self._download()
+        finally:
+            self._preparing = False
 
     # 各阶段最近的典型耗时(指数平均),用来在拿不到下载速度时估算"还要多久"
     typical_secs = {'fetching_info': 4.5, 'starting': 1.0}
