@@ -207,7 +207,7 @@ def specs():
                           autocomplete='queue'),
                       Opt('tags', _d('Tags separated by ",", or * for all', '标签(用 "," 分隔),* 表示全部',
                                      'タグ(「,」区切り)、* で全部'), required=True, autocomplete='tag'))),
-        Spec('delete_from_library', 'delete', library.cmd_delete_from_library, group='library',
+        Spec('delete_from_library', 'delete', library.cmd_delete_from_library, group='library', owner_only=True,
              desc=_d('Delete items of the last search results from the library', '把上次搜索结果里的条目从曲库删除',
                      '直前の検索結果の項目をライブラリから削除'),
              options=(Opt('indexes', _d('Numbers separated by spaces', '序号,空格分隔', '番号(スペース区切り)'),

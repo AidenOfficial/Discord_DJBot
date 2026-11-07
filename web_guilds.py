@@ -153,14 +153,20 @@ def create_blueprint(requires_auth):
         if 'announce_channel' in payload:
             raw = payload['announce_channel']
             if raw in (None, ''):
-                store.delete(gid, 'announce_channel')
-                changed['announce_channel'] = None
+                raw = None
             else:
                 raw = str(raw).strip()
                 if not raw.isdigit() or len(raw) > 20:
                     abort(400)
+            # 经过会话:存进库,并让正在运行的 GuildLink 立刻改用新频道
+            setter = getattr(session, 'set_announce_channel', None)
+            if setter is not None:
+                setter(raw)
+            elif raw is None:
+                store.delete(gid, 'announce_channel')
+            else:
                 store.set(gid, 'announce_channel', raw)
-                changed['announce_channel'] = raw
+            changed['announce_channel'] = raw
         if 'max_volume' in payload:
             try:
                 percent = int(payload['max_volume'])

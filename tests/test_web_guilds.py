@@ -37,7 +37,13 @@ class FakeSession:
         self.volume_helper = FakeVolume()
         self.volume_helper.plain_volume_set = 0.9
         self.saved_channels = []
+        self.announce_calls = []
         self.link = types.SimpleNamespace(guild_name=NAMES[guild_id], bot_name='dj')
+
+    def set_announce_channel(self, channel_id):
+        # 真的 DJBot 存库并让 GuildLink 立刻换频道
+        self.announce_calls.append(channel_id)
+        var.store.set(self.guild_id, 'announce_channel', channel_id or '')
 
     @property
     def store(self):
@@ -350,6 +356,8 @@ def test_guild_settings_roundtrip(env):
     assert env.hub._sessions[HOME].volume_helper.plain_volume_set == 0.4
     data = env.client.post('/api/guild/settings', json={'announce_channel': None}, headers=h).get_json()
     assert data['announce_channel'] is None
+    # 经过会话设置,正在运行的服务器立刻生效(不只是写库)
+    assert env.hub._sessions[HOME].announce_calls == ['5550001', None]
     for bad in ({'max_volume': 101}, {'max_volume': 'x'}, {'announce_channel': 'general'}, {}):
         assert env.client.post('/api/guild/settings', json=bad, headers=h).status_code == 400
 
@@ -385,6 +393,14 @@ def test_channel_settings_need_manage(env):
     assert rv.status_code == 200
     assert rv.get_json()['can_edit_settings'] is True
     assert env.hub._sessions[HOME].saved_channels == [{'follow': 'auto'}]
+
+
+def test_cache_is_owner_only_with_hub(env):
+    # 缓存是所有服务器共用的:服务器管理员也不能看 / 删别的服务器的歌
+    oauth_login(env)
+    assert env.client.get('/api/cache').status_code == 403
+    assert env.client.post('/api/cache/cleanup', json={'mode': 'limit'}).status_code == 403
+    assert env.client.post('/api/cache/delete', json={'id': 'x'}).status_code == 403
 
 
 def test_logs_owner_only_with_hub(env):

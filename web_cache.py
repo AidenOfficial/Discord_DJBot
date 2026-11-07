@@ -21,18 +21,27 @@ def _item_id():
     return item_id
 
 
+def _owner_only():
+    """缓存是所有服务器共用的:多服务器时只有 bot 主人能看、能改(单服务器旧模式照旧)。"""
+    import web_context
+    if web_context.hub() is not None and not web_context.is_owner():
+        abort(403)
+
+
 def create_blueprint(requires_auth):
     api = Blueprint('cache', __name__, url_prefix='/api/cache')
 
     @api.route('', methods=['GET'])
     @requires_auth
     def cache_overview():
+        _owner_only()
         entries = cache_store.list_entries()
         return jsonify({'summary': cache_store.summary(entries), 'entries': entries})
 
     @api.route('/pin', methods=['POST'])
     @requires_auth
     def cache_pin():
+        _owner_only()
         item_id = _item_id()
         pinned = bool(_payload().get('pinned', True))
         cache_store.set_pinned(item_id, pinned)
@@ -42,6 +51,7 @@ def create_blueprint(requires_auth):
     @api.route('/delete', methods=['POST'])
     @requires_auth
     def cache_delete():
+        _owner_only()
         item_id = _item_id()
         freed = cache_store.delete_entry(item_id, force=bool(_payload().get('force')))
         if freed is None:
@@ -52,6 +62,7 @@ def create_blueprint(requires_auth):
     @api.route('/cleanup', methods=['POST'])
     @requires_auth
     def cache_cleanup():
+        _owner_only()
         """mode: limit(压到容量上限) / expired(跑一次按天数过期的清理) / unpinned(清空未固定的)"""
         import variables as var
 
@@ -74,6 +85,7 @@ def create_blueprint(requires_auth):
     @api.route('/save', methods=['POST'])
     @requires_auth
     def cache_save():
+        _owner_only()
         item_id = _item_id()
         try:
             rel = cache_store.save_to_library(item_id)

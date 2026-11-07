@@ -103,7 +103,7 @@ def test_permission_levels():
     by_key = {spec.key: spec for spec in slash.specs()}
     owner = {'drop_database', 'rescan', 'update', 'kill', 'add_webinterface_user', 'remove_webinterface_user',
              'list_webinterface_user', 'global_ban', 'global_unban', 'global_ban_list', 'url_whitelist',
-             'url_unwhitelist'}
+             'url_unwhitelist', 'delete_from_library'}
     server_admin = {'max_volume', 'user_ban', 'user_unban', 'url_ban', 'url_unban', 'ban_list'}
     assert {k for k, s in by_key.items() if s.owner_only} == owner
     assert {k for k, s in by_key.items() if s.admin} == server_admin
