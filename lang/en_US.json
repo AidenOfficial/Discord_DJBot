@@ -100,6 +100,7 @@
         "prep_buffering_eta": "buffering, starts in about {eta}s",
         "prep_connecting": "connecting to the download",
         "prep_fetching": "fetching video info",
+        "presence_servers": "{count} servers",
         "queue_contents": "Items on the playlist:",
         "queue_empty": "Playlist is empty!",
         "radio": "Radio",

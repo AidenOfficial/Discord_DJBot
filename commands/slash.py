@@ -1,7 +1,7 @@
 # coding=utf-8
 """斜杠命令表:每条命令的名字、参数、权限和三种语言的说明。
 
-这一层与 Discord 无关(只是数据),DiscordLink 据此生成 app_commands,/help 据此生成帮助。
+这一层与 Discord 无关(只是数据),DiscordClient 据此生成 app_commands,/help 据此生成帮助。
 命令处理函数还是旧的 handler(bot, user, text, command, parameter) 签名:各参数的值按
 这里声明的顺序用空格拼成 parameter 字符串传进去,所以原有的解析逻辑不用改。
 
@@ -334,7 +334,7 @@ GROUP_TITLES = {
 
 
 def help_lines(language, include_admin=False, config=None):
-    """/help 的内容(HTML,交给 DiscordLink 转 Markdown)。按分组列出命令和参数。"""
+    """/help 的内容(HTML,交给 GuildLink 转 Markdown)。按分组列出命令和参数。"""
     import html
     groups = {}
     for name, spec in configured_specs(config):

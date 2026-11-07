@@ -4,6 +4,7 @@ import configparser
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -178,6 +179,23 @@ class CoreTest(unittest.TestCase):
         self.assertTrue(self.bot.is_admin('222'))
         self.assertFalse(self.bot.is_admin('333'))
         self.assertTrue(self.bot.is_admin(self.ctx('queue', admin=True)))
+
+    def test_commands_run_in_order_on_the_shared_pool(self):
+        from bot.executor import KeyedExecutor
+        b = self.bot
+        b.bind_guild(777)
+        b.executor = KeyedExecutor(max_workers=4, name='T')
+        finished = []
+        b.link.finish = lambda ctx: finished.append(ctx.argument)
+        for arg in ('a', 'b', 'c'):
+            b.command_received(self.ctx('queue', arg))
+        b.command_received(self.ctx('skip'))            # 出错的命令也要 finish,不能卡住后面的
+        b.command_received(self.ctx('queue', 'd'))
+        deadline = time.time() + 2
+        while len(finished) < 5 and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertEqual([c[2] for c in self.calls], ['a', 'b', 'c', 'd'])
+        self.assertEqual(finished, ['a', 'b', 'c', '', 'd'])
 
 
 

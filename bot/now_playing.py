@@ -5,9 +5,9 @@ bot 的 Discord 状态(Rich Presence)显示不了进度条和封面:bot 账号�
 所以改在公告频道放一条 embed 面板(封面、歌名、歌手、专辑、进度条、控制按钮),
 再把"🎵 歌名 — 歌手"写进 bot 所在语音频道的频道状态,频道列表里就能看到在放什么。
 
-不 hook 播放器的每条分支:后台线程每秒看一眼播放状态(和 Web 播放页轮询 /api/status 一样),
-状态有变化就更新;播放中每 PROGRESS_EVERY 秒刷新一次进度条。本模块不 import discord.py,
-只产出普通的 dict,由 DiscordLink 转成 embed / 按钮。
+不 hook 播放器的每条分支:一个共用的后台线程(NowPlayingTicker)每秒看一眼每个会话的播放状态
+(和 Web 播放页轮询 /api/status 一样),状态有变化就更新;播放中每 PROGRESS_EVERY 秒刷新一次进度条。
+本模块不 import discord.py,只产出普通的 dict,由 GuildLink 转成 embed / 按钮。
 """
 
 import base64
@@ -158,7 +158,7 @@ def voice_status(snap):
 
 
 def build_panel(snap):
-    """snapshot -> 面板内容(DiscordLink.panel_show 用)。不含封面字节,由调用方按需加上。"""
+    """snapshot -> 面板内容(GuildLink.panel_show 用)。不含封面字节,由调用方按需加上。"""
     status = snap['status']
     if snap['live']:
         progress = f"🔴 {tr('np_live')} · `{fmt_time(snap['position'])}`"
@@ -243,17 +243,121 @@ def cover_color(data):
 #   后台更新
 # =========================================================================
 
+class NowPlayingTicker:
+    """所有会话共用一个线程:每秒给每个会话的 NowPlaying 跑一次 tick()。
+
+    poke(np) 让那一个会话 POKE_DELAY 秒后马上刷新(按了面板按钮),其余的照常每秒一次。
+    给了 executor(KeyedExecutor)时 tick 交给线程池按会话串行执行:某个服务器的 Discord 接口慢,
+    不会拖住别的服务器的面板;上一次还没跑完的会话这一秒跳过。
+    """
+
+    def __init__(self, executor=None):
+        self.executor = executor
+        self._lock = threading.Lock()
+        self._players = []
+        self._poked = set()
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._thread = None
+
+    def add(self, player):
+        with self._lock:
+            if player not in self._players:
+                self._players.append(player)
+            start = self._thread is None
+            if start:
+                # 每个线程自己的停止标志:stop() 之后马上再 add() 也不会有两个线程同时跑
+                self._stop = threading.Event()
+                self._thread = threading.Thread(target=self._run, args=(self._stop,), name="NowPlayingTicker",
+                                                daemon=True)
+        if start:
+            self._thread.start()
+
+    def remove(self, player):
+        with self._lock:
+            if player in self._players:
+                self._players.remove(player)
+            self._poked.discard(player)
+
+    @property
+    def players(self):
+        with self._lock:
+            return list(self._players)
+
+    def poke(self, player=None):
+        """player 为 None:全部马上刷新一次。"""
+        with self._lock:
+            self._poked.update([player] if player is not None else self._players)
+        self._wake.set()
+
+    def stop(self):
+        with self._lock:
+            self._stop.set()
+            self._thread = None
+        self._wake.set()
+
+    def _run(self, stop):
+        next_round = time.time() + TICK
+        while not stop.is_set():
+            woke = self._wake.wait(max(0.0, next_round - time.time()))
+            if stop.is_set():
+                return
+            if woke:
+                self._wake.clear()
+                time.sleep(POKE_DELAY)  # 命令在线程池里执行,给它一点时间生效
+                with self._lock:
+                    targets, self._poked = list(self._poked), set()
+                if time.time() < next_round:
+                    self._tick(targets)
+                    continue
+            self._tick(self.players)
+            next_round = time.time() + TICK
+
+    def _tick(self, players):
+        for player in players:
+            executor = self.executor
+            if executor is None:
+                player.safe_tick()
+                continue
+            key = self._key(player)
+            if executor.pending(key):
+                continue
+            try:
+                executor.submit(key, player.safe_tick)
+            except RuntimeError:
+                return  # 线程池已关闭(正在退出)
+
+    @staticmethod
+    def _key(player):
+        # 线程池里的 key;线程名里会带上它,日志看得出是哪个服务器
+        guild_id = getattr(getattr(player, 'bot', None), 'guild_id', None)
+        return (guild_id or id(player), 'np')
+
+
+_default_ticker = None
+_default_lock = threading.Lock()
+
+
+def default_ticker():
+    """没指定 ticker 时共用的那个(Hub 会换成带线程池的)。"""
+    global _default_ticker
+    with _default_lock:
+        if _default_ticker is None:
+            _default_ticker = NowPlayingTicker()
+        return _default_ticker
+
+
 class NowPlaying:
-    """每秒看一眼播放状态,更新面板和语音频道状态。所有 link 调用都在本线程里,不阻塞播放。"""
+    """更新一个会话的面板和语音频道状态。自己不开线程:NowPlayingTicker 每秒调一次 tick(),
+    所有 link 调用都在 ticker(或线程池)里,不阻塞播放。"""
 
     def __init__(self, bot, link, panel=True, voice=True):
         self.bot = bot
         self.link = link
         self.panel_enabled = panel
         self.voice_enabled = voice
-        self._stop = threading.Event()
-        self._wake = threading.Event()
-        self._thread = None
+        self._ticker = None
+        self._failures = 0
         # 面板
         self._shown = False         # 面板上是一首正在进行的歌(不是"播放结束")
         self._track = None          # 面板上那首的 id
@@ -270,36 +374,32 @@ class NowPlaying:
 
     # ---- 生命周期 ----
 
-    def start(self):
+    def start(self, ticker=None):
         if not (self.panel_enabled or self.voice_enabled):
             return
         self._adopt_panel()
-        self._thread = threading.Thread(target=self._run, name="NowPlaying", daemon=True)
-        self._thread.start()
+        self._ticker = ticker or default_ticker()
+        self._ticker.add(self)
 
     def stop(self):
-        self._stop.set()
-        self._wake.set()
+        ticker, self._ticker = self._ticker, None
+        if ticker is not None:
+            ticker.remove(self)
 
     def poke(self):
         """面板按钮刚按过:马上刷新一次,不等下一秒。"""
-        self._wake.set()
+        ticker = self._ticker
+        if ticker is not None:
+            ticker.poke(self)
 
-    def _run(self):
-        failures = 0
-        while True:
-            if self._wake.wait(TICK):
-                self._wake.clear()
-                time.sleep(POKE_DELAY)  # 命令在分发线程里执行,给它一点时间生效
-            if self._stop.is_set():
-                return
-            try:
-                self.tick()
-                failures = 0
-            except Exception:
-                failures += 1
-                if failures in (1, 60) or failures % 600 == 0:
-                    log.exception("now playing: update failed")
+    def safe_tick(self):
+        try:
+            self.tick()
+            self._failures = 0
+        except Exception:
+            self._failures += 1
+            if self._failures in (1, 60) or self._failures % 600 == 0:
+                log.exception("now playing: update failed (%s)", getattr(self.bot, 'guild_id', ''))
 
     # ---- 一次检查 ----
 

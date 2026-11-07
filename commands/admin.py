@@ -143,7 +143,10 @@ def cmd_help(bot, user, text, command, parameter):
 
 def cmd_kill(bot, user, text, command, parameter):
     bot.pause()
-    bot.exit = True
+    if var.hub is not None:
+        var.hub.stop()  # 整个进程退出:所有服务器的播放循环都停
+    else:
+        bot.exit = True
 
 
 def cmd_update(bot, user, text, command, parameter):

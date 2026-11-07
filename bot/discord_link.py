@@ -1,19 +1,22 @@
 """Discord 连接适配层:整个 bot 只有这个模块 import discord.py。
 
 bot 其余部分是线程模型,discord.py 是 asyncio:这里把 discord.py 放在自己的线程 + 事件循环里跑,
-对外暴露同步接口(和 Mumble 版的 MumbleLink 基本一致,播放 / 频道逻辑几乎不用改):
+对外暴露同步接口。分两层:
 
-  - 状态快照:users(user_id -> User)、myself、my_channel_id、channels(channel_id -> dict)
-  - 命令:reply / finish(回复斜杠命令)、send_announcement(发到公告频道)、move / leave_voice
-  - "正在播放":panel_show / panel_end(公告频道里的 embed 面板 + 按钮)、set_voice_status(语音频道状态)
-  - 音频:write_audio(阻塞到缓冲有空位)、audio_buffered、clear_audio、cut_audio、volume
-  - 回调:on_command / on_precheck / on_autocomplete / on_user_joined / on_user_updated / on_user_left
+  DiscordClient(每个进程一个):登录、事件循环线程、斜杠命令树、持久面板按钮;交互和网关事件
+      按 guild_id 转给对应的 GuildLink。
+  GuildLink(每个服务器一个,接口和 Mumble 版的 MumbleLink 基本一致,播放 / 频道逻辑几乎不用改):
+    - 状态快照:users(user_id -> User)、myself、my_channel_id、channels(channel_id -> dict)
+    - 命令:reply / finish(回复斜杠命令)、send_announcement(发到公告频道)、move / leave_voice
+    - "正在播放":panel_show / panel_end(公告频道里的 embed 面板 + 按钮)、set_voice_status(语音频道状态)
+    - 音频:write_audio(阻塞到缓冲有空位)、audio_buffered、clear_audio、cut_audio、volume
+    - 回调:on_command / on_precheck / on_autocomplete / on_user_joined / on_user_updated / on_user_left
 
-回调在本模块的分发线程里依次调用(不是事件循环线程);on_precheck / on_autocomplete 要在
-3 秒内给 Discord 答复,在线程池里同步执行,应当很快返回。
+回调在共享线程池(bot.executor.KeyedExecutor)里按 (guild_id, 'evt') 依次调用,不在事件循环线程里;
+on_precheck / on_autocomplete 要在 3 秒内给 Discord 答复,在各自的小线程池里同步执行,应当很快返回。
 
-单服务器模式:只服务一个 guild(配置的 guild_id,没配就用 bot 加入的第一个),其他服务器里的
-命令直接拒绝。斜杠命令同步到这个 guild(即时生效,不用等全局命令的缓存)。
+现在还是只服务主服务器(配置的 guild_id,没配就用 bot 加入的第一个):斜杠命令只同步到这个服务器,
+其他服务器里的交互礼貌拒绝。
 """
 
 from __future__ import annotations
@@ -21,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
-import queue
 import threading
 import time
 from dataclasses import dataclass, field
@@ -293,19 +295,26 @@ def _desc(text_by_locale, default_locale='en'):
 
 
 # =========================================================================
-#   连接
+#   共享连接:一个进程一个
 # =========================================================================
 
-class DiscordLink:
-    def __init__(self, token, guild_id=None, announce_channel_id=None, admin_ids=(),
-                 admin_permission=True, self_deaf=True, bitrate=0, language='en_US', debug=False):
+#: 交互来自还没准备好的服务器时的回复
+STARTING_REPLY = "The bot is still starting, try again in a moment."
+#: C1 只服务主服务器:别的服务器里的交互
+HOME_ONLY_REPLY = "This bot only works in its home server for now."
+
+
+class DiscordClient:
+    """整个进程共用的 Discord 连接:登录、事件循环线程、斜杠命令树、持久面板按钮。
+
+    交互(斜杠命令、自动补全、预检查、面板按钮)和网关事件(语音状态、频道 / 身份组 / 服务器变化)
+    按 guild_id 交给那个服务器的 GuildLink;没有 GuildLink 的服务器:主服务器回"还在启动",
+    其他服务器礼貌拒绝。斜杠命令现在只同步到主服务器(即时生效,不用等全局命令的缓存)。
+    """
+
+    def __init__(self, token, home_guild_id=None, language='en_US', debug=False, executor=None):
         self.token = token
-        self.guild_id = int(guild_id) if guild_id else None
-        self.announce_channel_id = int(announce_channel_id) if announce_channel_id else None
-        self.admin_ids = {int(x) for x in admin_ids}
-        self.admin_permission = admin_permission
-        self.self_deaf = self_deaf
-        self.bitrate = int(bitrate or 0)
+        self.home_guild_id = int(home_guild_id) if home_guild_id else None
         self.default_locale = {'zh_CN': 'zh-CN', 'ja_JP': 'ja'}.get(language, 'en')
         if debug:
             # discord.py 的调试日志也写进 bot 的日志(根 logger 只显示 WARNING 以上)
@@ -313,26 +322,27 @@ class DiscordLink:
             dlog.setLevel(logging.DEBUG)
             for handler in log.handlers:
                 dlog.addHandler(handler)
+        if executor is None:
+            from .executor import KeyedExecutor
+            executor = KeyedExecutor(name='Discord')
+        #: 回调(on_command 等)在这里按 (guild_id, 'evt') 串行执行,不在事件循环线程里
+        self.executor = executor
 
         intents = discord.Intents.none()
         intents.guilds = True        # 频道列表、角色
         intents.voice_states = True  # 谁在哪个语音频道;连语音也需要
-        self._client = discord.Client(intents=intents, allowed_mentions=discord.AllowedMentions.none())
-        self._tree = app_commands.CommandTree(self._client)
+        self.client = discord.AutoShardedClient(intents=intents, allowed_mentions=discord.AllowedMentions.none())
+        self._tree = app_commands.CommandTree(self.client)
         self._tree.on_error = self._on_tree_error
-        self._client.event(self.on_ready)
-        self._client.event(self.on_voice_state_update)
-        self._client.event(self.on_guild_channel_create)
-        self._client.event(self.on_guild_channel_delete)
-        self._client.event(self.on_guild_channel_update)
-        self._client.event(self.on_guild_update)
-        # 身份组权限变了,"能不能进这个频道"也跟着变
-        self._client.event(self.on_guild_role_create)
-        self._client.event(self.on_guild_role_update)
-        self._client.event(self.on_guild_role_delete)
+        for handler in (self.on_ready, self.on_shard_ready, self.on_voice_state_update,
+                        self.on_guild_channel_create, self.on_guild_channel_delete, self.on_guild_channel_update,
+                        self.on_guild_update,
+                        # 身份组权限变了,"能不能进这个频道"也跟着变
+                        self.on_guild_role_create, self.on_guild_role_update, self.on_guild_role_delete):
+            self.client.event(handler)
         # 预检查要在 Discord 的 3 秒内答复,不和自动补全 / aiohttp 的 DNS 查询抢默认线程池
-        self._precheck_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="Precheck")
-        self._autocomplete_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2,
+        self._precheck_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="Precheck")
+        self._autocomplete_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4,
                                                                         thread_name_prefix="Autocomplete")
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -342,42 +352,13 @@ class DiscordLink:
         self._error: Optional[BaseException] = None
         self._close_reason = ''
         self._synced = False
+        self._panel_view: Any = None    # 持久按钮(on_ready 里建,View 要在事件循环里创建)
 
-        self._users: Mapping[int, User] = {}
-        self._channels: Dict[int, dict] = {}
-        self._me_id: Optional[int] = None
-        self._guild_name = ''
-        self._last_command_channel: Optional[int] = None
-
-        self._pcm = PCMStream()
-        self._volume = 1.0
-        self._cutting = False
-
-        self._events: "queue.Queue" = queue.Queue()
-        self._dispatcher: Optional[threading.Thread] = None
-
-        self.on_command: Optional[Callable[[CommandContext], None]] = None
-        self.on_precheck: Optional[Callable[[CommandContext], Optional[str]]] = None
-        self.on_autocomplete: Optional[Callable[[str, CommandContext, str], List[Tuple[str, str]]]] = None
-        self.on_user_joined: Optional[Callable[[User], None]] = None
-        self.on_user_updated: Optional[Callable[[User, frozenset], None]] = None
-        self.on_user_left: Optional[Callable[[User], None]] = None
-        self.on_self_moved: Optional[Callable[[Optional[int], Optional[int]], None]] = None
-        #: 面板按钮 -> (命令 key, 参数);由 NowPlaying 提供。要很快返回(在事件循环里调用)
-        self.on_panel_button: Optional[Callable[[str], Optional[Tuple[str, Dict[str, Any]]]]] = None
-        #: 面板按钮的命令已经交给分发线程:让面板马上刷新,不等下一秒的轮询
-        self.on_panel_pressed: Optional[Callable[[], None]] = None
+        self._links: Dict[int, 'GuildLink'] = {}
         self._specs: List[Tuple[str, Any]] = []
         self._spec_by_key: Dict[str, Any] = {}
-
-        # "正在播放"面板
-        self._panel_msg: Any = None             # discord.Message / PartialMessage
-        self._panel_adopted: Optional[Tuple[int, int]] = None  # 上次运行留下的 (频道, 消息)
-        self._panel_cover: Optional[bytes] = None
-        self._panel_view: Any = None            # 持久按钮(on_ready 里建,View 要在事件循环里创建)
-        # 语音频道状态:(频道 id, 文字),是我们设置的
-        self._voice_status: Tuple[Optional[int], str] = (None, '')
-        self._voice_status_warned = False
+        #: GuildLink.set_activity 汇总到这里(Hub 决定账号显示什么);没设置就直接改状态
+        self.on_activity: Optional[Callable[[Optional[int], Optional[str], str], None]] = None
 
     # ---- 生命周期 ----------------------------------------------------------
 
@@ -390,8 +371,6 @@ class DiscordLink:
 
     def connect(self, timeout=60):
         """登录并等到 guild 数据同步完。失败时抛异常(token 错误、超时……)。"""
-        self._dispatcher = threading.Thread(target=self._dispatch, name="DiscordEvents", daemon=True)
-        self._dispatcher.start()
         self._thread = threading.Thread(target=self._run, name="DiscordLoop", daemon=True)
         self._thread.start()
         if not self._ready.wait(timeout):
@@ -411,16 +390,17 @@ class DiscordLink:
         finally:
             self._closed.set()
             self._ready.set()
-            self._pcm.close()
-            self._events.put(None)
+            for link in list(self._links.values()):
+                link._pcm.close()
 
     async def _main(self):
         self._loop = asyncio.get_running_loop()
         await self._tree.set_translator(_Translator())
-        async with self._client:
-            await self._client.start(self.token, reconnect=True)
+        async with self.client:
+            await self.client.start(self.token, reconnect=True)
 
     def close(self):
+        """离开所有语音频道、清掉频道状态,然后断开。"""
         loop = self._loop
         if loop is not None and not loop.is_closed():
             try:
@@ -428,17 +408,16 @@ class DiscordLink:
             except Exception:
                 pass
         self._closed.set()
-        self._pcm.close()
+        for link in list(self._links.values()):
+            link._pcm.close()
 
     async def _shutdown(self):
-        guild = self._guild()
-        await self._clear_voice_status()
-        if guild is not None and guild.voice_client is not None:
+        for link in list(self._links.values()):
             try:
-                await guild.voice_client.disconnect(force=True)
+                await link._shutdown_voice()
             except Exception:
-                pass
-        await self._client.close()
+                log.debug("discord: could not leave voice in %s", link.guild_id, exc_info=True)
+        await self.client.close()
 
     @property
     def alive(self):
@@ -449,9 +428,74 @@ class DiscordLink:
     def close_reason(self):
         return self._close_reason
 
+    @property
+    def loop(self):
+        return self._loop
+
+    @property
+    def user(self):
+        return self.client.user
+
+    # ---- 服务器 ------------------------------------------------------------
+
+    def add_link(self, link: 'GuildLink'):
+        """登记一个服务器的 GuildLink:之后这个服务器的交互和事件都交给它。"""
+        self._links[link.guild_id] = link
+        try:
+            self.call(self._attach(link), timeout=15)
+        except Exception:
+            log.warning("discord: could not take the first snapshot of %s", link.guild_id, exc_info=True)
+        return link
+
+    async def _attach(self, link):
+        link._me_id = self.client.user.id if self.client.user else None
+        link._rebuild()
+
+    def remove_link(self, guild_id):
+        return self._links.pop(int(guild_id), None)
+
+    def link(self, guild_id) -> Optional['GuildLink']:
+        return self._links.get(int(guild_id)) if guild_id else None
+
+    def links(self) -> List['GuildLink']:
+        return list(self._links.values())
+
+    def guild_ids(self) -> List[int]:
+        return [g.id for g in list(self.client.guilds)]
+
+    def guild_info(self, guild_id):
+        """{'id', 'name', 'icon'}(icon 是 CDN 地址,没有图标为 '');bot 不在这个服务器返回 None。"""
+        try:
+            guild = self.client.get_guild(int(guild_id))
+        except (TypeError, ValueError):
+            return None
+        if guild is None:
+            return None
+        icon = getattr(guild, 'icon', None)
+        return {'id': str(guild.id), 'name': guild.name, 'icon': icon.url if icon is not None else ''}
+
+    def fetch_member(self, guild_id, user_id):
+        """REST 查 user 是不是服务器成员(不需要 members intent)。是 True,不是 False,查不了 None。"""
+        async def fetch():
+            guild = self.client.get_guild(int(guild_id))
+            if guild is None:
+                return False
+            try:
+                await guild.fetch_member(int(user_id))
+                return True
+            except discord.NotFound:
+                return False
+
+        try:
+            result = self.call(fetch(), timeout=10)
+        except Exception:
+            log.debug("discord: could not look up member %s of %s", user_id, guild_id, exc_info=True)
+            return None
+        return result if isinstance(result, bool) else None
+
     # ---- 线程桥 ------------------------------------------------------------
 
-    def _call(self, coro, timeout=30.0):
+    def call(self, coro, timeout=30.0):
         """在事件循环里执行协程并等结果(从别的线程调用)。在事件循环线程里调用时只调度不等。"""
         loop = self._loop
         if loop is None or loop.is_closed():
@@ -467,68 +511,339 @@ class DiscordLink:
         future = asyncio.run_coroutine_threadsafe(coro, loop)
         return future.result(timeout=timeout)
 
-    def _emit(self, fn, *args):
-        self._events.put((fn, args))
+    def emit(self, key, fn, *args):
+        """在共享线程池里执行回调;同一个 key 按顺序。"""
+        try:
+            self.executor.submit(key, fn, *args)
+        except RuntimeError:
+            log.debug("discord: dropped %s, shutting down", getattr(fn, '__name__', fn))
 
-    def _dispatch(self):
-        while True:
-            item = self._events.get()
-            if item is None:
-                return
-            fn, args = item
-            if fn is None:
-                continue
-            try:
-                fn(*args)
-            except Exception:
-                log.exception("discord: event handler %s failed", getattr(fn, '__name__', fn))
+    # ---- 状态(整个账号一个) -------------------------------------------------
+
+    def report_activity(self, guild_id, text, state=''):
+        hook = self.on_activity
+        if hook is not None:
+            hook(guild_id, text, state)
+        else:
+            self.set_presence(text, state)
+
+    def set_presence(self, text, state=''):
+        """bot 的状态:"正在听 {text}",第二行 state(歌手);text 为 None 清除。
+        bot 账号的活动 Discord 只显示 name 和 state 两行:details、时间戳(进度条)、图片都不显示。"""
+        activity = None
+        if text:
+            activity = discord.Activity(type=discord.ActivityType.listening, name=text[:128],
+                                        state=(state or '')[:128] or None)
+        try:
+            self.call(self.client.change_presence(activity=activity), timeout=10)
+        except Exception:
+            log.debug("discord: could not change presence", exc_info=True)
 
     # ---- discord.py 事件 ----------------------------------------------------
+
+    async def on_ready(self):
+        if self.home_guild_id is None:
+            guilds = list(self.client.guilds)
+            if not guilds:
+                log.error("discord: the bot is not in any server yet; invite it first (see README)")
+            else:
+                self.home_guild_id = guilds[0].id
+                if len(guilds) > 1:
+                    log.warning("discord: the bot is in %d servers but runs in single-server mode; "
+                                "serving %s (%s). Set [discord] guild_id to choose.",
+                                len(guilds), guilds[0].name, guilds[0].id)
+        home = self.client.get_guild(self.home_guild_id) if self.home_guild_id else None
+        if home is None and self.home_guild_id is not None:
+            log.error("discord: server %s not found; is the bot invited to it?", self.home_guild_id)
+        self._check_links()
+        if home is not None and not self._synced:
+            try:
+                self._tree.copy_global_to(guild=home)
+                synced = await self._tree.sync(guild=home)
+                self._synced = True
+                log.info("discord: synced %d slash commands to %s", len(synced), home.name)
+            except Exception:
+                log.exception("discord: could not sync slash commands")
+        if self._panel_view is None:
+            # 持久按钮:custom_id 固定,bot 重启后旧面板上的按钮照样能用;所有服务器共用一个 View
+            self._panel_view = _PanelView(self)
+            self.client.add_view(self._panel_view)
+        log.info("discord: logged in as %s, serving %s", self.client.user, home.name if home else '-')
+        self._ready.set()
+
+    async def on_shard_ready(self, shard_id):
+        # 单个分片重新 IDENTIFY 时不一定再触发 on_ready
+        self._check_links()
+
+    def _check_links(self):
+        for link in list(self._links.values()):
+            try:
+                link._after_ready()
+            except Exception:
+                log.exception("discord: reconnect check for %s failed", link.guild_id)
+
+    async def on_voice_state_update(self, member, before, after):
+        link = self._links.get(member.guild.id)
+        if link is not None:
+            await link.on_voice_state_update(member, before, after)
+
+    def _rebuild(self, guild_id):
+        link = self._links.get(guild_id)
+        if link is not None:
+            link._rebuild()
+
+    async def on_guild_channel_create(self, channel):
+        self._rebuild(channel.guild.id)
+
+    async def on_guild_channel_delete(self, channel):
+        self._rebuild(channel.guild.id)
+
+    async def on_guild_channel_update(self, before, after):
+        self._rebuild(after.guild.id)
+
+    async def on_guild_update(self, before, after):
+        self._rebuild(after.id)
+
+    async def on_guild_role_create(self, role):
+        self._rebuild(role.guild.id)
+
+    async def on_guild_role_update(self, before, after):
+        self._rebuild(after.guild.id)
+
+    async def on_guild_role_delete(self, role):
+        self._rebuild(role.guild.id)
+
+    # ---- 交互路由 ----------------------------------------------------------
+
+    async def _refuse(self, interaction):
+        gid = interaction.guild_id
+        text = STARTING_REPLY if gid is not None and gid == self.home_guild_id else HOME_ONLY_REPLY
+        await interaction.response.send_message(text, ephemeral=True)
+
+    async def _invoke(self, spec, interaction, kwargs, ephemeral=None, silent=False):
+        link = self._links.get(interaction.guild_id) if interaction.guild_id is not None else None
+        if link is None:
+            await self._refuse(interaction)
+            return
+        await link._invoke(spec, interaction, kwargs, ephemeral=ephemeral, silent=silent)
+
+    async def _on_panel_button(self, interaction, action):
+        link = self._links.get(interaction.guild_id) if interaction.guild_id is not None else None
+        if link is None:
+            await self._refuse(interaction)
+            return
+        await link._on_panel_button(interaction, action)
+
+    async def _on_tree_error(self, interaction, error):
+        log.error("discord: slash command error: %s", error, exc_info=error)
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("Something went wrong.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Something went wrong.", ephemeral=True)
+        except Exception:
+            pass
+
+    # ---- 斜杠命令 ----------------------------------------------------------
+
+    def _build_command(self, name, spec):
+        import inspect
+
+        params = [inspect.Parameter('interaction', inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                    annotation=discord.Interaction)]
+        descriptions = {}
+        for opt in spec.options:
+            annotation = _annotation(opt)
+            default = inspect.Parameter.empty if opt.required else None
+            if not opt.required:
+                annotation = Optional[annotation]
+            params.append(inspect.Parameter(opt.name, inspect.Parameter.KEYWORD_ONLY,
+                                            annotation=annotation, default=default))
+            descriptions[opt.name] = _desc(opt.desc, self.default_locale)
+
+        client = self
+
+        async def callback(interaction: discord.Interaction, **kwargs):
+            await client._invoke(spec, interaction, kwargs)
+
+        callback.__signature__ = inspect.Signature(params)
+        callback.__name__ = f"slash_{spec.key}"
+        callback.__qualname__ = callback.__name__
+        callback.__discord_app_commands_param_description__ = descriptions
+        command = app_commands.Command(name=name, description=_desc(spec.desc, self.default_locale),
+                                       callback=callback)
+        command.guild_only = True
+        for opt in spec.options:
+            if opt.autocomplete:
+                command.autocomplete(opt.name)(self._make_autocomplete(opt))
+        return command
+
+    def _make_autocomplete(self, opt):
+        client = self
+
+        async def autocomplete(interaction: discord.Interaction, current: str):
+            link = client._links.get(interaction.guild_id) if interaction.guild_id is not None else None
+            handler = link.on_autocomplete if link is not None else None
+            if handler is None:
+                return []
+            ctx = link._context(None, interaction, {})
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.get_running_loop().run_in_executor(client._autocomplete_pool, handler,
+                                                               opt.autocomplete, ctx, current or ''),
+                    timeout=2.5)
+            except Exception:
+                log.debug("discord: autocomplete %s failed", opt.autocomplete, exc_info=True)
+                return []
+            choices = []
+            for label, value in (results or [])[:25]:
+                if opt.kind == 'int':
+                    try:
+                        value = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                else:
+                    value = str(value)
+                    if len(value) > 100:
+                        continue  # Discord 的选项值最多 100 字符;截断后可能选中别的条目,干脆不列
+                choices.append(app_commands.Choice(name=str(label)[:100] or str(value), value=value))
+            return choices
+
+        return autocomplete
+
+
+# =========================================================================
+#   一个服务器
+# =========================================================================
+
+class GuildLink:
+    """一个服务器(guild)的连接视图:语音、音频缓冲、成员 / 频道快照、公告频道、面板、语音频道状态。
+
+    接口和以前的单服务器 DiscordLink 一样,DJBot / NowPlaying 不用关心底下是共享连接。
+    回调在共享线程池里按 (guild_id, 'evt') 依次调用(不是事件循环线程)。
+    """
+
+    def __init__(self, client: DiscordClient, guild_id, announce_channel_id=None, admin_ids=(),
+                 admin_permission=True, self_deaf=True, bitrate=0):
+        self._dc = client
+        self.guild_id = int(guild_id) if guild_id else None
+        self.announce_channel_id = int(announce_channel_id) if announce_channel_id else None
+        self.admin_ids = {int(x) for x in admin_ids}
+        self.admin_permission = admin_permission
+        self.self_deaf = self_deaf
+        self.bitrate = int(bitrate or 0)
+
+        self._closed = threading.Event()
+        self._close_reason = ''
+
+        self._users: Mapping[int, User] = {}
+        self._channels: Dict[int, dict] = {}
+        self._me_id: Optional[int] = None
+        self._guild_name = ''
+        self._last_command_channel: Optional[int] = None
+
+        self._pcm = PCMStream()
+        self._volume = 1.0
+        self._cutting = False
+
+        self.on_command: Optional[Callable[[CommandContext], None]] = None
+        self.on_precheck: Optional[Callable[[CommandContext], Optional[str]]] = None
+        self.on_autocomplete: Optional[Callable[[str, CommandContext, str], List[Tuple[str, str]]]] = None
+        self.on_user_joined: Optional[Callable[[User], None]] = None
+        self.on_user_updated: Optional[Callable[[User, frozenset], None]] = None
+        self.on_user_left: Optional[Callable[[User], None]] = None
+        self.on_self_moved: Optional[Callable[[Optional[int], Optional[int]], None]] = None
+        #: 面板按钮 -> (命令 key, 参数);由 NowPlaying 提供。要很快返回(在事件循环里调用)
+        self.on_panel_button: Optional[Callable[[str], Optional[Tuple[str, Dict[str, Any]]]]] = None
+        #: 面板按钮的命令已经交给线程池:让面板马上刷新,不等下一秒的轮询
+        self.on_panel_pressed: Optional[Callable[[], None]] = None
+
+        # "正在播放"面板
+        self._panel_msg: Any = None             # discord.Message / PartialMessage
+        self._panel_adopted: Optional[Tuple[int, int]] = None  # 上次运行留下的 (频道, 消息)
+        self._panel_cover: Optional[bytes] = None
+        # 语音频道状态:(频道 id, 文字),是我们设置的
+        self._voice_status: Tuple[Optional[int], str] = (None, '')
+        self._voice_status_warned = False
+
+    # ---- 共享连接 ----------------------------------------------------------
+
+    @property
+    def _client(self):
+        return self._dc.client
+
+    @property
+    def _loop(self):
+        return self._dc.loop
+
+    def _call(self, coro, timeout=30.0):
+        return self._dc.call(coro, timeout=timeout)
+
+    def _emit(self, fn, *args):
+        self._dc.emit((self.guild_id, 'evt'), fn, *args)
+
+    def close(self):
+        """只断开这个服务器:离开语音、清掉频道状态。共享连接不受影响。"""
+        try:
+            self._call(self._shutdown_voice(), timeout=10)
+        except Exception:
+            pass
+        self._closed.set()
+        self._pcm.close()
+        if self._dc.link(self.guild_id) is self:
+            self._dc.remove_link(self.guild_id)
+
+    async def _shutdown_voice(self):
+        guild = self._guild()
+        await self._clear_voice_status()
+        if guild is not None and guild.voice_client is not None:
+            try:
+                await guild.voice_client.disconnect(force=True)
+            except Exception:
+                pass
+
+    @property
+    def alive(self):
+        """连接还在。discord.py 自己会断线重连;只有彻底退出(token 失效等)才是 False。"""
+        return not self._closed.is_set() and self._dc.alive
+
+    @property
+    def close_reason(self):
+        return self._close_reason or self._dc.close_reason
+
+    # ---- discord.py 事件(由 DiscordClient 转过来) ----------------------------
 
     def _guild(self) -> Optional[discord.Guild]:
         if self.guild_id is not None:
             return self._client.get_guild(self.guild_id)
         return None
 
-    async def on_ready(self):
-        if self.guild_id is None:
-            guilds = list(self._client.guilds)
-            if not guilds:
-                log.error("discord: the bot is not in any server yet; invite it first (see README)")
-            else:
-                self.guild_id = guilds[0].id
-                if len(guilds) > 1:
-                    log.warning("discord: the bot is in %d servers but runs in single-server mode; "
-                                "serving %s (%s). Set [discord] guild_id to choose.",
-                                len(guilds), guilds[0].name, guilds[0].id)
-        guild = self._guild()
-        if guild is None and self.guild_id is not None:
-            log.error("discord: server %s not found; is the bot invited to it?", self.guild_id)
-        self._me_id = self._client.user.id if self._client.user else None
+    def _own_channel(self, channel_id):
+        """按 id 取频道,只认本服务器的(公告频道配置错、面板记录串了都不能发到别的服务器去)。"""
+        if not channel_id:
+            return None
+        channel = self._client.get_channel(int(channel_id))
+        if channel is None:
+            return None
+        guild = getattr(channel, 'guild', None)
+        if guild is None or getattr(guild, 'id', None) != self.guild_id:
+            log.debug("discord: channel %s is not in server %s, ignored", channel_id, self.guild_id)
+            return None
+        return channel
+
+    def _after_ready(self):
+        """(重新)连上网关之后:刷新快照,检查语音连接是否还在。"""
+        self._me_id = self._client.user.id if self._client.user else self._me_id
         old_cid = self.my_channel_id
         self._rebuild()
         new_cid = self.my_channel_id
         if old_cid != new_cid:
             # 网关重新 IDENTIFY 时 discord.py 会清掉 voice client:bot 已经不在语音里了,
             # 断开音频输出(否则播放线程卡在写缓冲上),并让上层按"被断开"处理
-            log.warning("discord: voice connection lost after a gateway reconnect")
+            log.warning("discord: voice connection lost after a gateway reconnect (%s)", self.guild_id)
             self._on_self_voice(new_cid)
             if self.on_self_moved:
                 self._emit(self.on_self_moved, old_cid, new_cid)
-        if guild is not None and not self._synced:
-            try:
-                self._tree.copy_global_to(guild=guild)
-                synced = await self._tree.sync(guild=guild)
-                self._synced = True
-                log.info("discord: synced %d slash commands to %s", len(synced), guild.name)
-            except Exception:
-                log.exception("discord: could not sync slash commands")
-        if self._panel_view is None:
-            # 持久按钮:custom_id 固定,bot 重启后旧面板上的按钮照样能用
-            self._panel_view = _PanelView(self)
-            self._client.add_view(self._panel_view)
-        log.info("discord: logged in as %s, serving %s", self._client.user, guild.name if guild else '-')
-        self._ready.set()
 
     async def on_voice_state_update(self, member, before, after):
         if member.guild.id != self.guild_id:
@@ -559,34 +874,6 @@ class DiscordLink:
                                     if getattr(old, k) != getattr(new, k))
                 if changed and self.on_user_updated:
                     self._emit(self.on_user_updated, new, changed)
-
-    async def on_guild_channel_create(self, channel):
-        if channel.guild.id == self.guild_id:
-            self._rebuild()
-
-    async def on_guild_channel_delete(self, channel):
-        if channel.guild.id == self.guild_id:
-            self._rebuild()
-
-    async def on_guild_channel_update(self, before, after):
-        if after.guild.id == self.guild_id:
-            self._rebuild()
-
-    async def on_guild_update(self, before, after):
-        if after.id == self.guild_id:
-            self._rebuild()
-
-    async def on_guild_role_create(self, role):
-        if role.guild.id == self.guild_id:
-            self._rebuild()
-
-    async def on_guild_role_update(self, before, after):
-        if after.guild.id == self.guild_id:
-            self._rebuild()
-
-    async def on_guild_role_delete(self, role):
-        if role.guild.id == self.guild_id:
-            self._rebuild()
 
     # ---- 快照 --------------------------------------------------------------
 
@@ -854,7 +1141,7 @@ class DiscordLink:
                 # 只给本人看的内容(比如 /web 的登录链接)不能改发到公开频道
                 log.warning("discord: dropped a private reply to /%s: the interaction expired", ctx.command)
                 return
-            channel = self._client.get_channel(ctx.channel_id) if ctx.channel_id else None
+            channel = self._own_channel(ctx.channel_id)
             if channel is not None:
                 await channel.send(content, suppress_embeds=True)
             return
@@ -915,7 +1202,7 @@ class DiscordLink:
             if not cid or cid in tried:
                 continue
             tried.add(cid)
-            channel = self._client.get_channel(cid)
+            channel = self._own_channel(cid)
             if channel is None or not hasattr(channel, 'send'):
                 continue
             # 斜杠命令在 bot 没权限发言的频道里也能用(交互回复不受频道权限限制),公告却发不出去
@@ -981,7 +1268,7 @@ class DiscordLink:
             return
         channel_id, message_id = self._panel_adopted
         self._panel_adopted = None
-        channel = self._client.get_channel(channel_id)
+        channel = self._own_channel(channel_id)
         if channel is not None and hasattr(channel, 'get_partial_message'):
             self._panel_msg = channel.get_partial_message(message_id)
 
@@ -1040,7 +1327,7 @@ class DiscordLink:
                 except discord.HTTPException:
                     pass
                 self._panel_msg = msg = None
-        view = self._panel_view if panel.get('buttons') else None
+        view = self._dc._panel_view if panel.get('buttons') else None
 
         if msg is not None:
             kwargs = {'embed': self._panel_embed(panel), 'view': view}
@@ -1092,10 +1379,9 @@ class DiscordLink:
         """面板按钮:换算成命令,和斜杠命令走同一套预检查 / 处理流程。不发回复,结果体现在面板上。"""
         resolver = self.on_panel_button
         resolved = resolver(action) if resolver is not None else None
-        entry = self._spec_by_key.get(resolved[0]) if resolved else None
+        entry = self._dc._spec_by_key.get(resolved[0]) if resolved else None
         if entry is None:
-            await interaction.response.send_message("The bot is still starting, try again in a moment.",
-                                                    ephemeral=True)
+            await interaction.response.send_message(STARTING_REPLY, ephemeral=True)
             return
         await self._invoke(entry[1], interaction, resolved[1], silent=True)
 
@@ -1137,82 +1423,13 @@ class DiscordLink:
             log.debug("discord: could not clear the voice channel status", exc_info=True)
 
     def set_activity(self, text, state=''):
-        """bot 的状态:"正在听 {text}",第二行 state(歌手);text 为 None 清除。
-        bot 账号的活动 Discord 只显示 name 和 state 两行:details、时间戳(进度条)、图片都不显示。"""
-        activity = None
-        if text:
-            activity = discord.Activity(type=discord.ActivityType.listening, name=text[:128],
-                                        state=(state or '')[:128] or None)
+        """这个服务器在放什么(text 为 None = 没在放)。账号的状态由 DiscordClient / Hub 汇总所有服务器后决定。"""
         try:
-            self._call(self._client.change_presence(activity=activity), timeout=10)
+            self._dc.report_activity(self.guild_id, text, state)
         except Exception:
-            log.debug("discord: could not change presence", exc_info=True)
+            log.debug("discord: could not report the activity", exc_info=True)
 
     # ---- 斜杠命令 ----------------------------------------------------------
-
-    def _build_command(self, name, spec):
-        import inspect
-
-        params = [inspect.Parameter('interaction', inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                                    annotation=discord.Interaction)]
-        descriptions = {}
-        for opt in spec.options:
-            annotation = _annotation(opt)
-            default = inspect.Parameter.empty if opt.required else None
-            if not opt.required:
-                annotation = Optional[annotation]
-            params.append(inspect.Parameter(opt.name, inspect.Parameter.KEYWORD_ONLY,
-                                            annotation=annotation, default=default))
-            descriptions[opt.name] = _desc(opt.desc, self.default_locale)
-
-        link = self
-
-        async def callback(interaction: discord.Interaction, **kwargs):
-            await link._invoke(spec, interaction, kwargs)
-
-        callback.__signature__ = inspect.Signature(params)
-        callback.__name__ = f"slash_{spec.key}"
-        callback.__qualname__ = callback.__name__
-        callback.__discord_app_commands_param_description__ = descriptions
-        command = app_commands.Command(name=name, description=_desc(spec.desc, self.default_locale),
-                                       callback=callback)
-        command.guild_only = True
-        for opt in spec.options:
-            if opt.autocomplete:
-                command.autocomplete(opt.name)(self._make_autocomplete(opt))
-        return command
-
-    def _make_autocomplete(self, opt):
-        link = self
-
-        async def autocomplete(interaction: discord.Interaction, current: str):
-            handler = link.on_autocomplete
-            if handler is None:
-                return []
-            ctx = link._context(None, interaction, {})
-            try:
-                results = await asyncio.wait_for(
-                    asyncio.get_running_loop().run_in_executor(link._autocomplete_pool, handler, opt.autocomplete,
-                                                               ctx, current or ''),
-                    timeout=2.5)
-            except Exception:
-                log.debug("discord: autocomplete %s failed", opt.autocomplete, exc_info=True)
-                return []
-            choices = []
-            for label, value in (results or [])[:25]:
-                if opt.kind == 'int':
-                    try:
-                        value = int(value)
-                    except (TypeError, ValueError):
-                        continue
-                else:
-                    value = str(value)
-                    if len(value) > 100:
-                        continue  # Discord 的选项值最多 100 字符;截断后可能选中别的条目,干脆不列
-                choices.append(app_commands.Choice(name=str(label)[:100] or str(value), value=value))
-            return choices
-
-        return autocomplete
 
     def _context(self, spec, interaction, kwargs, ephemeral=None):
         member = interaction.user
@@ -1261,14 +1478,14 @@ class DiscordLink:
         被预检查拒绝时仍然只给本人看一句为什么。"""
         if interaction.guild_id is None or interaction.guild_id != self.guild_id:
             await interaction.response.send_message(
-                "This bot only works in its home server for now.", ephemeral=True)
+                HOME_ONLY_REPLY, ephemeral=True)
             return
         ctx = self._context(spec, interaction, kwargs, ephemeral=True if silent else ephemeral)
         ctx.silent = silent
         if self.on_precheck is not None:
             try:
                 refusal = await asyncio.wait_for(
-                    asyncio.get_running_loop().run_in_executor(self._precheck_pool, self.on_precheck, ctx),
+                    asyncio.get_running_loop().run_in_executor(self._dc._precheck_pool, self.on_precheck, ctx),
                     timeout=1.5)
             except Exception:
                 # 检查不了就拒绝(否则管理员命令 / 封禁会被绕过);命令本身在 bot 里还会再查一遍权限
@@ -1286,21 +1503,11 @@ class DiscordLink:
             self._last_command_channel = interaction.channel_id
         if self.on_command is None:
             if not silent:
-                await interaction.edit_original_response(content="The bot is still starting, try again in a moment.")
+                await interaction.edit_original_response(content=STARTING_REPLY)
             return
         self._emit(self.on_command, ctx)
         if silent and self.on_panel_pressed is not None:
             self.on_panel_pressed()
-
-    async def _on_tree_error(self, interaction, error):
-        log.error("discord: slash command error: %s", error, exc_info=error)
-        try:
-            if interaction.response.is_done():
-                await interaction.followup.send("Something went wrong.", ephemeral=True)
-            else:
-                await interaction.response.send_message("Something went wrong.", ephemeral=True)
-        except Exception:
-            pass
 
 
 def _clip(text, limit):
@@ -1313,18 +1520,20 @@ PANEL_BUTTONS = (('toggle', '⏯️'), ('skip', '⏭️'), ('stop', '⏹️'), (
 
 
 class _PanelView(discord.ui.View):
-    def __init__(self, link):
+    """所有服务器共用一个:按钮回调按 interaction.guild_id 找到那个服务器的 GuildLink。"""
+
+    def __init__(self, client):
         super().__init__(timeout=None)
         for action, emoji in PANEL_BUTTONS:
             button = discord.ui.Button(emoji=emoji, style=discord.ButtonStyle.secondary,
                                        custom_id=f'djbot:np:{action}')
-            button.callback = self._callback(link, action)
+            button.callback = self._callback(client, action)
             self.add_item(button)
 
     @staticmethod
-    def _callback(link, action):
+    def _callback(client, action):
         async def callback(interaction: discord.Interaction):
-            await link._on_panel_button(interaction, action)
+            await client._on_panel_button(interaction, action)
         return callback
 
 

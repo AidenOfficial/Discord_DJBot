@@ -1,5 +1,5 @@
 # coding=utf-8
-""""正在播放"面板 + 语音频道状态:纯函数、后台更新的决策、DiscordLink 那一侧的发 / 改 / 重发。"""
+""""正在播放"面板 + 语音频道状态:纯函数、后台更新的决策、共用的 ticker、GuildLink 那一侧的发 / 改 / 重发。"""
 import asyncio
 import base64
 import configparser
@@ -21,7 +21,8 @@ import constants  # noqa: E402
 import variables as var  # noqa: E402
 from bot import discord_link as dl  # noqa: E402
 from bot import now_playing as np  # noqa: E402
-from bot.discord_link import DiscordLink, User  # noqa: E402
+from bot.discord_link import User  # noqa: E402
+from bot.executor import KeyedExecutor  # noqa: E402
 from bot.session_queue import SessionQueue  # noqa: E402
 from bot.store import GuildStore  # noqa: E402
 from database import SettingsDatabase  # noqa: E402
@@ -315,12 +316,23 @@ class ControllerTest(_VarCase):
 
     def test_poke_refreshes_without_waiting_for_the_poll(self):
         ticks = threading.Event()
+        ticker = np.NowPlayingTicker()
         with mock.patch.object(np, 'TICK', 30), mock.patch.object(np, 'POKE_DELAY', 0), \
                 mock.patch.object(self.np, 'tick', side_effect=lambda: ticks.set()):
-            self.np.start()
+            self.np.start(ticker)
             self.np.poke()
             self.assertTrue(ticks.wait(2))
             self.np.stop()
+            self.assertEqual(ticker.players, [])
+            ticker.stop()
+
+    def test_tick_errors_are_contained(self):
+        with mock.patch.object(self.np, 'tick', side_effect=RuntimeError('discord down')):
+            self.np.safe_tick()
+            self.np.safe_tick()
+        self.assertEqual(self.np._failures, 2)
+        self.np.safe_tick()                                 # 恢复了
+        self.assertEqual(self.np._failures, 0)
 
     def test_switches(self):
         quiet = np.NowPlaying(self.bot, self.link, panel=False, voice=False)
@@ -351,7 +363,7 @@ class ControllerTest(_VarCase):
 
 
 # =========================================================================
-#   DiscordLink:发 / 改 / 重发
+#   GuildLink:发 / 改 / 重发
 # =========================================================================
 
 class LoopThread:
@@ -382,8 +394,9 @@ class FakeMessage:
 
 
 class FakeChannel:
-    def __init__(self, cid, perms=None):
+    def __init__(self, cid, perms=None, guild=1):
         self.id = cid
+        self.guild = types.SimpleNamespace(id=guild)
         self.sent = []
         self.latest = None
         self.perms = perms or types.SimpleNamespace(view_channel=True, send_messages=True, embed_links=True,
@@ -419,9 +432,9 @@ def panel(**kw):
 
 class LinkPanelTest(unittest.TestCase):
     def setUp(self):
+        from tests.test_discord_link import make_link
         self.lt = LoopThread()
-        self.link = DiscordLink('token', guild_id=1)
-        self.link._loop = self.lt.loop
+        self.client, self.link = make_link(1, self.lt.loop)
         self.link.announce_channel_id = 500
         self.channel = FakeChannel(500)
         self.guild = types.SimpleNamespace(me=object(), voice_client=None)
@@ -499,6 +512,16 @@ class LinkPanelTest(unittest.TestCase):
             self.link.panel_show(panel(title='Last'), new_track=True)
             self.assertEqual(len(voice_chat.sent), 1)
 
+    def test_panel_never_posts_in_another_guild(self):
+        # 配置的公告频道其实是别的服务器的:跳过它,面板发到本服务器能发的频道
+        foreign = FakeChannel(900, guild=2)
+        self.link.announce_channel_id = 900
+        self.link._last_command_channel = 500
+        channels = {500: self.channel, 900: foreign}
+        with mock.patch.object(self.link._client, 'get_channel', side_effect=channels.get):
+            self.assertTrue(self.link.panel_show(panel(), new_track=True))
+        self.assertEqual((foreign.sent, len(self.channel.sent)), ([], 1))
+
     def test_no_embed_permission_means_no_panel(self):
         self.channel.perms.embed_links = False
         self.assertFalse(self.link.panel_show(panel(), new_track=True))
@@ -519,7 +542,7 @@ class LinkPanelTest(unittest.TestCase):
         spec = Spec('mode', 'mode', lambda *a: None, _d('x', 'x', 'x'),
                     options=(Opt('mode', _d('m', 'm', 'm'), kind='choice',
                                  choices=('one-shot', 'repeat', 'single', 'random', 'autoplay')),))
-        self.link._spec_by_key = {'mode': ('mode', spec)}
+        self.client._spec_by_key = {'mode': ('mode', spec)}
         self.link.on_panel_button = lambda action: ('mode', {'mode': 'repeat'})
         got, pokes = [], []
         self.link.on_command = got.append
@@ -546,7 +569,7 @@ class LinkPanelTest(unittest.TestCase):
         from commands.slash import Spec, _d
         from tests.test_discord_link import fake_interaction
         spec = Spec('skip', 'skip', lambda *a: None, _d('x', 'x', 'x'))
-        self.link._spec_by_key = {'skip': ('skip', spec)}
+        self.client._spec_by_key = {'skip': ('skip', spec)}
         self.link.on_panel_button = lambda action: ('skip', {})
         self.link.on_precheck = lambda ctx: "You're not in my voice channel!"
         click = fake_interaction(guild_id=1)
@@ -574,6 +597,78 @@ class LinkPanelTest(unittest.TestCase):
             self.assertFalse(self.link.set_voice_status('🎵 Other'))
             self.assertEqual(len(calls), 2)
             self.assertTrue(self.link._voice_status_warned)
+
+
+# =========================================================================
+#   共用的 ticker
+# =========================================================================
+
+class FakePlayer:
+    def __init__(self):
+        self.ticks = 0
+        self.event = threading.Event()
+
+    def safe_tick(self):
+        self.ticks += 1
+        self.event.set()
+
+
+class TickerTest(unittest.TestCase):
+    def test_one_thread_ticks_every_session(self):
+        ticker = np.NowPlayingTicker()
+        a, b = FakePlayer(), FakePlayer()
+        with mock.patch.object(np, 'TICK', 0.02):
+            ticker.add(a)
+            ticker.add(b)
+            self.assertTrue(a.event.wait(2) and b.event.wait(2))
+            ticker.remove(a)
+            time.sleep(0.05)
+            count = a.ticks
+            time.sleep(0.1)
+            ticker.stop()
+        self.assertEqual(a.ticks, count)                    # 移除后不再更新
+        self.assertGreater(b.ticks, 1)
+
+    def test_poke_only_refreshes_that_session(self):
+        ticker = np.NowPlayingTicker()
+        a, b = FakePlayer(), FakePlayer()
+        with mock.patch.object(np, 'TICK', 30), mock.patch.object(np, 'POKE_DELAY', 0):
+            ticker.add(a)
+            ticker.add(b)
+            ticker.poke(a)
+            self.assertTrue(a.event.wait(2))
+            time.sleep(0.05)
+            ticker.stop()
+        self.assertEqual((a.ticks, b.ticks), (1, 0))
+
+    def test_executor_runs_ticks_and_skips_busy_sessions(self):
+        executor = KeyedExecutor(max_workers=4, name='T')
+        ticker = np.NowPlayingTicker(executor=executor)
+        release = threading.Event()
+        slow_calls, fast = [], FakePlayer()
+
+        class Slow:
+            def safe_tick(self):
+                slow_calls.append(1)
+                release.wait(2)                             # Discord 接口很慢的服务器
+
+        slow = Slow()
+        ticker._tick([slow, fast])
+        self.assertTrue(fast.event.wait(2))                 # 慢的不拖住别的服务器
+        ticker._tick([slow, fast])                          # 上一次还没完:这一轮跳过
+        release.set()
+        self.assertTrue(wait_until(lambda: not executor.pending(ticker._key(slow))))
+        self.assertEqual(len(slow_calls), 1)
+        self.assertTrue(wait_until(lambda: fast.ticks == 2))
+
+
+def wait_until(predicate, timeout=2.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
 
 
 if __name__ == '__main__':
