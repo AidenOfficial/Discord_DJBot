@@ -38,16 +38,17 @@ apply() {
         "$ipt" -w -A "$CHAIN" -p ipv6-icmp -j RETURN
     fi
     # DNS 服务器(默认 bridge 网络上 resolv.conf 可能直接是路由器的地址)
-    local ns
-    for ns in $(awk '/^nameserver/ {print $2}' /etc/resolv.conf 2>/dev/null); do
+    local key ns _rest
+    while read -r key ns _rest; do
+        [ "$key" = nameserver ] && [ -n "$ns" ] || continue
         case "$ns" in
             *:*) [ "$family" = 6 ] || continue ;;
             *) [ "$family" = 4 ] || continue ;;
         esac
         "$ipt" -w -A "$CHAIN" -d "$ns" -p udp --dport 53 -j RETURN
         "$ipt" -w -A "$CHAIN" -d "$ns" -p tcp --dport 53 -j RETURN
-    done
-    local net
+    done < <(cat /etc/resolv.conf 2>/dev/null || true)
+    local net allow
     allow="${BAM_EGRESS_ALLOW:-}"
     for net in ${allow//,/ }; do
         case "$net" in
