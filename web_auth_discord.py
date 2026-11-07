@@ -446,9 +446,12 @@ def forbidden():
 # =====================================================================
 
 def create_blueprint():
+    from web_security import rate_limited
+
     bp = Blueprint('auth_discord', __name__)
 
     @bp.route('/auth/discord/login', methods=['GET'])
+    @rate_limited('discord_auth')
     def login():
         if not configured():
             return jsonify({'error': 'discord_login_not_configured'}), 404
@@ -471,6 +474,7 @@ def create_blueprint():
         return redirect(AUTHORIZE_URL + '?' + urlencode(params), code=302)
 
     @bp.route('/auth/discord/callback', methods=['GET'])
+    @rate_limited('discord_auth')
     def callback():
         from constants import tr_web
 

@@ -30,7 +30,7 @@ FROM python:3.12-slim-bookworm
 ENV DEBIAN_FRONTEND=noninteractive
 EXPOSE 8181
 RUN apt-get update && \
-    apt-get install --no-install-recommends -y libopus0 opus-tools ffmpeg libmagic-dev curl tar unzip ca-certificates && \
+    apt-get install --no-install-recommends -y libopus0 opus-tools ffmpeg libmagic-dev curl tar unzip ca-certificates iptables && \
     rm -rf /var/lib/apt/lists/*
 
 # Deno:spotdl 下载 YouTube 音频时用它破解 JS 校验,缺它 Spotify 播放会失败。
@@ -46,7 +46,7 @@ COPY . /botamusique
 COPY --from=webui-builder /webui/dist /botamusique/webui/dist
 WORKDIR /botamusique
 # 修掉可能存在的 Windows CRLF 换行(否则容器内会报 bad interpreter),再赋可执行权限。
-RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh
+RUN sed -i 's/\r$//' entrypoint.sh scripts/egress-filter.sh && chmod +x entrypoint.sh scripts/egress-filter.sh
 
 ENTRYPOINT [ "/botamusique/entrypoint.sh" ]
 CMD ["venv/bin/python", "djbot.py"]

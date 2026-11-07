@@ -28,6 +28,7 @@ import util
 import variables as var
 import web_context
 from bot.limits import limits_for
+from web_security import rate_limited
 
 log = logging.getLogger("bot")
 
@@ -819,7 +820,7 @@ def _entries_from_source(payload):
         url = (payload.get('url') or '').strip()
         if payload.get('provider') == 'bilibili':
             url = util.get_bilibili_url_from_input(payload.get('id') or url)
-        if not url or not url.lower().startswith(('http://', 'https://')):
+        if not url or not url.lower().startswith(('http://', 'https://')) or len(url) > 2048                 or not util.is_public_url(url):
             abort(400)
         try:
             duration = float(payload.get('duration') or 0)
@@ -944,6 +945,7 @@ def create_blueprint(requires_auth):
 
     @api.route('/playlists/import', methods=['POST'])
     @requires_auth
+    @rate_limited('import')
     def import_playlist():
         """Body: {url, playlist_id?(导入到已有歌单), name?(新歌单名,默认用来源标题)}
         支持 YouTube 播放列表、网易云音乐 / QQ 音乐歌单、Spotify 歌单/专辑。"""
@@ -956,6 +958,8 @@ def create_blueprint(requires_auth):
             abort(400)
         if playlist_import.detect_source(url) is None:
             return jsonify({'error': 'unsupported_source'}), 400
+        if not util.is_public_url(url):
+            abort(400)
         playlist_id = payload.get('playlist_id')
         if playlist_id is not None:
             try:
@@ -1000,6 +1004,7 @@ def create_blueprint(requires_auth):
 
     @api.route('/favorites', methods=['POST'])
     @requires_auth
+    @rate_limited('save')
     def toggle_favorite():
         """Body: 同 /playlists/<id>/items 的来源字段 + favorite: true(收藏)/ false(取消)。
         收藏歌单就是名叫 Favorites 的那张(和Discord 里的 /fav 同一张),没有就自动建。"""
@@ -1062,6 +1067,7 @@ def create_blueprint(requires_auth):
 
     @api.route('/playlists/<int:playlist_id>/items', methods=['POST'])
     @requires_auth
+    @rate_limited('save')
     def add_items(playlist_id):
         """Body: 见 _entries_from_source"""
         owner = _owner()
@@ -1094,6 +1100,7 @@ def create_blueprint(requires_auth):
 
     @api.route('/playlists/<int:playlist_id>/play', methods=['POST'])
     @requires_auth
+    @rate_limited('enqueue')
     def play_playlist(playlist_id):
         """Body: {mode: append|next|replace, shuffle?: bool, item?: row id(只放这一首)}"""
         import random

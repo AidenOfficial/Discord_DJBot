@@ -103,32 +103,67 @@ def get_url_from_input(string):
         return ""
 
 
+def ip_is_public(ip):
+    """公网地址才算:内网 / 本机 / 链路本地(169.254,云的元数据接口)/ CGNAT(100.64/10,Tailscale)/
+    保留 / 组播 / 文档地址都不算。IPv4 映射的 IPv6(::ffff:10.0.0.1)按里面的 IPv4 判断。"""
+    try:
+        ip = ipaddress.ip_address(str(ip).split('%', 1)[0])
+    except ValueError:
+        return False
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_global and not (ip.is_multicast or ip.is_reserved or ip.is_unspecified)
+
+
+# [bot] private_network_allow 里放行的内网网段(bot.egress.install 填),入口检查和连接守卫共用
+private_network_allow = []
+
+
+def ip_is_allowed(ip):
+    """可以连:公网地址,或在放行的内网网段里。"""
+    if ip_is_public(ip):
+        return True
+    try:
+        addr = ipaddress.ip_address(str(ip).split('%', 1)[0])
+    except ValueError:
+        return False
+    if addr.version == 6 and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return any(addr.version == net.version and addr in net for net in private_network_allow)
+
+
 def is_public_url(url):
     # Reject URLs whose host resolves to a private / loopback / link-local /
     # reserved address, so untrusted chat input can't make the bot probe the
     # local network (SSRF). Only http(s) URLs are accepted.
+    # 这只是入口处的检查:跳转和 DNS 重绑定(检查时解析到公网、真正连接时解析到内网)
+    # 由 bot.egress 在建立连接时再拦一次。
     try:
         parts = urlparse(url)
     except ValueError:
         return False
     if parts.scheme.lower() not in ("http", "https"):
         return False
-    host = parts.hostname
+    try:
+        host = parts.hostname
+        parts.port  # 端口不合法(:99999、:abc)urlparse 到这里才报错
+    except ValueError:
+        return False
     if not host:
         return False
+    addresses = resolve_host(host)
+    if not addresses:
+        return False
+    return all(ip_is_allowed(ip) for ip in addresses)
+
+
+def resolve_host(host):
+    """主机名 -> 它解析到的全部 IP(字符串);解析不了返回 []。"""
     try:
         infos = socket.getaddrinfo(host, None)
     except (socket.gaierror, UnicodeError, ValueError):
-        return False
-    for info in infos:
-        try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            return False
-        if (ip.is_private or ip.is_loopback or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
-            return False
-    return True
+        return []
+    return [info[4][0] for info in infos]
 
 
 def bv_to_av(bvid):
@@ -151,23 +186,30 @@ def _is_bilibili_host(host):
             or host in ("b23.tv", "www.b23.tv"))
 
 
-def _resolve_bilibili_redirect(url, max_hops=5):
-    # Follow HTTP redirects one hop at a time, refusing to leave Bilibili.
-    # requests' allow_redirects=True would fetch every hop server-side before we
-    # could check it, letting a crafted b23.tv link reach internal hosts (SSRF).
+def resolve_redirects(url, host_ok, max_hops=5, method='HEAD', headers=None):
+    """一跳一跳地跟随 HTTP 跳转,每一跳的主机都要 host_ok(hostname) 通过,否则返回 None。
+    requests 的 allow_redirects=True 会先把每一跳都请求了才让我们检查,精心构造的短链就能
+    让 bot 去请求内网地址(SSRF)。"""
     for _ in range(max_hops):
         try:
-            resp = requests.head(url, allow_redirects=False, timeout=10)
+            resp = requests.request(method, url, allow_redirects=False, timeout=10, headers=headers,
+                                    stream=True)
+            resp.close()
         except requests.exceptions.RequestException:
             return None
-        location = resp.headers.get("Location")
+        location = resp.headers.get("Location") if resp.is_redirect else None
         if not location:
             return url
         location = urljoin(url, location)
-        if not _is_bilibili_host(urlparse(location).hostname):
+        if urlparse(location).scheme.lower() not in ("http", "https")                 or not host_ok((urlparse(location).hostname or '').lower()):
             return None
         url = location
-    return url
+    return None
+
+
+def _resolve_bilibili_redirect(url, max_hops=5):
+    # Follow HTTP redirects one hop at a time, refusing to leave Bilibili.
+    return resolve_redirects(url, _is_bilibili_host, max_hops)
 
 
 def get_bilibili_url_from_input(string):

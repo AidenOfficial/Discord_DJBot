@@ -114,6 +114,83 @@ access_aud = <Access 应用 Overview 页的 Application Audience (AUD) Tag>
   用 Discord 登录后,身份优先于 Access 邮箱头(JWT 校验仍然照常要求)。
 - 会话 Cookie 由 `flask_secret` 签名;不配置时随机生成一次存进 settings 库,重启不掉登录。
 
+## 不用 Access 直接上公网(用 Discord 登录)
+
+整站不套 Cloudflare Access、让用户在应用里用 Discord 登录时,Tunnel 后面就是公网,下面这些要确认:
+
+- `auth_method = discord`(见上一节)。`none` 等于谁都能控制 bot。
+- **不要信任 Access 的邮箱头**:没有 Access 时,请求头 `Cf-Access-Authenticated-User-Email` 是访问者
+  自己可以随便写的,令牌 / 密码登录时会被当成身份。把它关掉:
+
+  ```ini
+  [webinterface]
+  access_email_header =
+  ```
+
+  (`auth_method = discord` 时 Discord 身份优先,这个头不起作用,但关掉更稳妥。)
+- 内置的防护(默认开着,一般不用改):
+  - **安全响应头**:CSP 只允许本站脚本;`frame-ancestors` 只允许本站和 Discord
+    (`[webinterface] frame_ancestors`,Activity 要嵌在 discord.com 里),别的网站嵌不进来(点击劫持);
+    `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
+  - **限流**(`[webinterface] rate_limit`):搜索、点歌入队、歌单导入、Discord 登录、令牌校验
+    按登录身份和选中的服务器计数,没有身份才按 IP。Activity 的请求都从 Discord 代理的 IP 来,
+    只按 IP 会把所有人一起限住。超限返回 429(带 `Retry-After`)。
+  - **输错令牌 / 密码**:同一 IP 超过 `max_attempts` 次后 `ban_minutes`(默认 15)分钟内不能再试;
+    已经登录的会话、用 Discord 登录的人不受影响。令牌现在是 22 个字符(以前 7 个)。
+  - **不让 bot 访问内网**:用户给的链接、跳转、DNS 重绑定都到不了局域网和 NAS 本身。
+    bot 进程里由 `[bot] block_private_network` 拦,容器里的 ffmpeg 等子进程由
+    `BAM_EGRESS_FILTER` 拦(见 `deploy/DOCKER.md`「禁止访问内网」)。
+  - Web 服务用 waitress(生产 WSGI 服务器),不再是 Flask 的开发服务器。
+- 管理接口(日志、缓存)想再加一层,看下一节。
+
+## 管理接口再套一层 Cloudflare Access(按路径)
+
+普通入口只用 Discord 登录,**只给管理路径**套 Access:Cloudflare 在边缘先要求 Access 登录,
+通过后请求才到 bot,bot 照常再检查是不是 bot 主人(`[bot] admin` 里的 Discord ID)。
+两层都过才能用,Access 这层不改变应用里的身份(身份仍然是 Discord 登录的账号)。
+
+管理路径(都只有 bot 主人 / `log_viewers` 能用):
+
+| 路径 | 内容 |
+|---|---|
+| `/api/logs`(含 `/api/logs/debug`、`/api/logs/download`) | 日志面板、调试日志开关、导出 |
+| `/api/cache` | 下载缓存:固定、删除、清理 |
+
+**例外**:`/api/logs/client` 是**所有人**的浏览器上报前端 JS 报错用的,不能被 Access 拦住。
+
+Zero Trust 控制台 → Access → Applications:
+
+1. **Add an application → Self-hosted**,名字如 `DJBot admin`。
+   - Public hostname:`music.example.com`,Path:`api/logs`;
+     再 **Add public hostname** 一条同域名、Path `api/cache`。
+     (Access 的路径匹配它本身和下面的所有路径。)
+   - Policy:Action **Allow**,Include → Emails → 主人的邮箱(或 Emails ending in / GitHub 组织等)。
+   - Session duration 按需(如 24h)。
+2. **再建一个 Self-hosted 应用**,名字如 `DJBot client logs`:
+   - Public hostname:`music.example.com`,Path:`api/logs/client`;
+   - Policy:Action **Bypass**,Include → **Everyone**。
+   Access 按最具体的路径生效,所以这条覆盖上一条里的 `/api/logs`。
+3. **不要**给整站(`music.example.com` 不带路径)建 Access 应用,否则普通用户也会被拦。
+4. **不要**在 `configuration.ini` 里填 `access_aud` / `access_team_domain`:那会要求**每个**请求都带
+   Access JWT,没套 Access 的普通路径全部 403。这里 Access 只做边缘的门,应用不用读它。
+
+使用:主人先在浏览器里直接打开一次 `https://music.example.com/api/logs`,完成 Access 登录
+(`CF_Authorization` cookie 是整个域名的),之后 Web UI 设置页里的日志、缓存页就能正常用。
+其他人打开日志 / 缓存接口会被 Access 拦在 Cloudflare,请求到不了 NAS。
+
+验证:
+
+- [ ] 无痕窗口打开 `https://music.example.com/api/logs` → 跳到 Access 登录页。
+- [ ] 无痕窗口打开首页 → 是 Discord 登录,不是 Access。
+- [ ] `curl -X POST https://music.example.com/api/logs/client -d '{}' -H 'Content-Type: application/json'`
+      返回的是 bot 的 401 / 400 JSON,不是 Access 的跳转。
+
+**为什么不用单独的管理主机名**(比如 `admin.music.example.com` 整站套 Access):Discord 登录的回调地址
+只有一个(`public_url`),登录后会话 cookie 落在主域名上,管理主机名上没有登录状态,
+`auth_method = discord` 时那边打不开。要用管理主机名得先让 Discord 登录支持多个回调地址(还没做)。
+如果只是不想让管理接口暴露在公网,也可以在 Cloudflare 用 WAF 自定义规则直接拦掉
+`/api/logs`、`/api/cache`(放过 `/api/logs/client`),只在局域网里管理。
+
 ## 语音频道与跟随(Settings 页)
 
 - 实时显示服务器的语音频道(按分类分组,和 Discord 里的顺序一致)和每个频道里的人

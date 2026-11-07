@@ -4,6 +4,7 @@ import html
 import json
 import logging
 import os
+import time
 from functools import wraps
 
 from flask import Flask, render_template, request, redirect, send_from_directory, Response, abort, session, g
@@ -60,6 +61,7 @@ import web_channels
 import web_guilds
 import web_library
 import web_logs
+import web_security
 import web_upload
 import web_users
 
@@ -106,8 +108,36 @@ def authenticate():
                     {'WWW-Authenticate': 'Basic realm="Login Required"'})
 
 
+# 输错令牌 / 密码的次数和封禁(ip -> 到期时间,time.monotonic())。
+# 封禁只拦再拿凭据来试的请求,已登录的会话照常用(见 web_security 里的说明)
 bad_access_count = {}
-banned_ip = []
+banned_ip = {}
+
+
+def reset_bans():
+    bad_access_count.clear()
+    banned_ip.clear()
+
+
+def _ip_banned(ip):
+    until = banned_ip.get(ip)
+    if until is None:
+        return False
+    if time.monotonic() >= until:
+        banned_ip.pop(ip, None)
+        bad_access_count.pop(ip, None)
+        return False
+    return True
+
+
+def _record_failure(ip, what):
+    count = bad_access_count.get(ip, 0) + 1
+    bad_access_count[ip] = count
+    log.info(f"web: {what} from ip {ip}, {count} attempts.")
+    if count > var.config.getint("webinterface", "max_attempts", fallback=10):
+        seconds = web_security.ban_seconds()
+        banned_ip[ip] = time.monotonic() + seconds
+        log.info(f"web: login attempts from {ip} blocked for {seconds // 60} min")
 
 
 def _with_identity(f, auth_user, args, kwargs):
@@ -119,9 +149,6 @@ def _with_identity(f, auth_user, args, kwargs):
 def requires_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if request.remote_addr in banned_ip:
-            abort(403)
-
         auth_method = var.config.get("webinterface", "auth_method")
 
         if auth_method == 'discord':
@@ -133,21 +160,12 @@ def requires_auth(f):
 
         if auth_method == 'password':
             auth = request.authorization
-            if auth:
-                if not check_auth(auth.username, auth.password):
-                    if request.remote_addr in bad_access_count:
-                        bad_access_count[request.remote_addr] += 1
-                        log.info(f"web: failed login attempt, user: {auth.username}, from ip {request.remote_addr}."
-                                 f"{bad_access_count[request.remote_addr]} attempts.")
-                        if bad_access_count[request.remote_addr] > var.config.getint("webinterface", "max_attempts",
-                                                                                     fallback=10):
-                            banned_ip.append(request.remote_addr)
-                            log.info(f"web: access banned for {request.remote_addr}")
-                    else:
-                        bad_access_count[request.remote_addr] = 1
-                        log.info(f"web: failed login attempt, user: {auth.username}, from ip {request.remote_addr}.")
-                    return authenticate()
-            else:
+            if not auth:
+                return authenticate()
+            if _ip_banned(request.remote_addr):
+                abort(403)
+            if not check_auth(auth.username, auth.password):
+                _record_failure(request.remote_addr, f"failed login attempt, user: {auth.username}")
                 return authenticate()
         if auth_method == 'token':
             # 配置了 Discord 登录时,和 bot 在同一服务器的 Discord 账号可以代替令牌
@@ -157,6 +175,11 @@ def requires_auth(f):
             if 'user' in session and 'token' not in request.args:
                 return _with_identity(f, session['user'], args, kwargs)
             elif 'token' in request.args:
+                if _ip_banned(request.remote_addr):
+                    abort(403)
+                wait = web_security.check('token')
+                if wait:
+                    return web_security.too_many(wait)
                 token = request.args.get('token')
                 token_user = var.db.get("web_token", token, fallback=None)
                 if token_user is not None:
@@ -171,16 +194,7 @@ def requires_auth(f):
                     session['user'] = token_user
                     return _with_identity(f, token_user, args, kwargs)
 
-            if request.remote_addr in bad_access_count:
-                bad_access_count[request.remote_addr] += 1
-                log.info(f"web: bad token from ip {request.remote_addr}, "
-                         f"{bad_access_count[request.remote_addr]} attempts.")
-                if bad_access_count[request.remote_addr] > var.config.getint("webinterface", "max_attempts"):
-                    banned_ip.append(request.remote_addr)
-                    log.info(f"web: access banned for {request.remote_addr}")
-            else:
-                bad_access_count[request.remote_addr] = 1
-                log.info(f"web: bad token from ip {request.remote_addr}.")
+                _record_failure(request.remote_addr, "bad token")
 
             command = "/" + (var.bot.command_name('requests_webinterface_access') if var.bot else 'web')
             bot_name = (var.bot.link.bot_name if var.bot else '') or 'the bot'
@@ -202,6 +216,11 @@ def requires_auth(f):
         return _with_identity(f, auth_user, args, kwargs)
 
     return decorated
+
+
+@web.after_request
+def _security_headers(response):
+    return web_security.apply_security_headers(response)
 
 
 # 用 Discord 登录(/auth/discord/login、/auth/discord/callback、/auth/logout),不经过 requires_auth

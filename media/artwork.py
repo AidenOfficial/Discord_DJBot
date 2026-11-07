@@ -604,6 +604,11 @@ def _with_image(match):
 def _fetch_image(url):
     import requests
     from PIL import Image
+
+    import util
+    # 封面链接来自视频页的元数据(yt-dlp 的 thumbnail / og:image),别人的网页可以随便填
+    if not util.is_public_url(url):
+        raise ValueError(f"artwork url is not public: {url[:200]}")
     headers = dict(_HEADERS)
     if 'hdslb.com' in url or 'bilibili' in url:
         headers['Referer'] = 'https://www.bilibili.com/'

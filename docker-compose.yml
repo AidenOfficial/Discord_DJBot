@@ -19,7 +19,17 @@ services:
       timeout: 10s
       retries: 3
       start_period: 120s
+    # 出站过滤要用 iptables 改容器自己的网络规则(只影响这个容器,不影响宿主机)。
+    # entrypoint 装好规则后会去掉这个能力再启动 bot。见 deploy/DOCKER.md「禁止访问内网」
+    cap_add:
+      - NET_ADMIN
     environment:
+      # 不让容器里的任何进程(bot / ffmpeg / yt-dlp)连内网和宿主机:
+      # 10/8、172.16/12、192.168/16、169.254/16、100.64/10 等;Discord 和外网不受影响。
+      # 局域网里有要用的服务(HTTP 代理、Icecast 电台)写进 BAM_EGRESS_ALLOW,比如 192.168.1.10/32。
+      # 关掉:BAM_EGRESS_FILTER=0(并去掉上面的 cap_add)。
+      BAM_EGRESS_FILTER: ${BAM_EGRESS_FILTER:-1}
+      BAM_EGRESS_ALLOW: ${BAM_EGRESS_ALLOW:-}
       # Discord bot token:写在同目录的 .env 里(DISCORD_TOKEN=...,.env 已 gitignore),不要写进这个文件。
       DISCORD_TOKEN: ${DISCORD_TOKEN:?set DISCORD_TOKEN in .env}
       # 可选:Web 界面"用 Discord 登录"的 OAuth2 Client Secret,同样只写在 .env 里

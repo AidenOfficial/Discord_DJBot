@@ -19,6 +19,7 @@ import util
 import variables as var
 import web_context
 import web_search
+from web_security import rate_limited
 from media import artwork, lyrics
 from bot.limits import limits_for
 from media.cache import get_cached_wrapper_from_scrap
@@ -378,6 +379,7 @@ def create_blueprint(requires_auth):
 
     @api.route('/search', methods=['GET'])
     @requires_auth
+    @rate_limited('search')
     def api_search():
         query = (request.args.get('q') or '').strip()[:200]
         if len(query) < 2:
@@ -394,6 +396,7 @@ def create_blueprint(requires_auth):
 
     @api.route('/search/add', methods=['POST'])
     @requires_auth
+    @rate_limited('enqueue')
     def api_search_add():
         """Add a search result to the queue. Bilibili results go through the
         av/BV normalization every other entry point uses."""
@@ -403,6 +406,8 @@ def create_blueprint(requires_auth):
         url = _search_result_url(payload.get('source'), payload.get('url'), payload.get('id'))
         if not url or not url.lower().startswith(('http://', 'https://')):
             abort(400)
+        if not util.is_public_url(url):
+            return jsonify({'error': 'bad_url'}), 400
         music_wrapper = get_cached_wrapper_from_scrap(
             type='url', url=url, user=current_user_name())
         try:

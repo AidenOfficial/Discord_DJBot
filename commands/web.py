@@ -22,8 +22,7 @@ def cmd_web_access(bot, user, text, command, parameter):
     user = _web_user(text, user)
 
     if auth_method == 'token':
-        interface.banned_ip = []
-        interface.bad_access_count = {}
+        interface.reset_bans()
 
         user_info = var.db.get("user", user, fallback='{}')
         user_dict = json.loads(user_info)
@@ -31,7 +30,8 @@ def cmd_web_access(bot, user, text, command, parameter):
             var.db.remove_option("web_token", user_dict['token'])
             var.db.remove_option(TOKEN_GUILD_SECTION, user_dict['token'])
 
-        token = secrets.token_urlsafe(5)
+        # 16 字节(22 个字符):令牌在公网上,5 字节(约 7 个字符)太容易猜
+        token = secrets.token_urlsafe(16)
         user_dict['token'] = token
         user_dict['token_created'] = str(datetime.datetime.now())
         user_dict['last_ip'] = ''

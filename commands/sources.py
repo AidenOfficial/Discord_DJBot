@@ -186,6 +186,10 @@ def cmd_play_radio(bot, user, text, command, parameter):
         if var.config.has_option('radio', parameter):
             parameter = var.config.get('radio', parameter)
             parameter = parameter.split()[0]
+        elif util.get_url_from_input(parameter) and not util.is_public_url(util.get_url_from_input(parameter)):
+            # 配置里的预设电台是管理员填的(可以是局域网的 Icecast);用户直接给的链接不能指向内网
+            bot.send_msg(tr('bad_url'), text)
+            return
         url = util.get_url_from_input(parameter)
         if url:
             music_wrapper = get_cached_wrapper_from_scrap(type='radio', url=url, user=user)

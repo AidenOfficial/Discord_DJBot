@@ -21,25 +21,69 @@ from .hub import Hub
 from .store import GuildStore
 
 
+class AccessLog:
+    """waitress 不记访问日志(werkzeug 开发服务器以前会记):补一行 ip 方法 路径 状态码。"""
+
+    def __init__(self, app, logger):
+        self.app = app
+        self.logger = logger
+
+    def __call__(self, environ, start_response):
+        seen = {}
+
+        def _start_response(status, headers, exc_info=None):
+            seen['status'] = status.split(' ', 1)[0]
+            return start_response(status, headers, exc_info)
+
+        try:
+            return self.app(environ, _start_response)
+        finally:
+            # REMOTE_ADDR 是 ReverseProxied 换过的真实访问者 IP(它在 web.wsgi_app 里,比这一层先跑完)
+            path = environ.get('SCRIPT_NAME', '') + environ.get('PATH_INFO', '')
+            self.logger.info('%s "%s %s" %s', environ.get('REMOTE_ADDR', '-'),
+                             environ.get('REQUEST_METHOD', '-'), path, seen.get('status', '-'))
+
+
+def web_server_options():
+    """waitress 的参数。请求体上限跟着上传上限走(waitress 默认 1 GiB,max_upload_file_size 默认 4G)。"""
+    max_upload = util.parse_file_size(var.config.get('webinterface', 'max_upload_file_size', fallback='4G'))
+    return {
+        'threads': 8,
+        'ident': 'DJBot',
+        # 上传以外的请求体都很小;留 16 MiB 给 multipart 的头部和其它字段
+        'max_request_body_size': (max_upload or 4 * 1024 ** 3) + 16 * 1024 * 1024,
+        # 反向代理的头由 interface.ReverseProxied 处理(is_web_proxified),waitress 自己不认
+        'trusted_proxy': None,
+        'clear_untrusted_proxy_headers': False,
+    }
+
+
 def start_web_interface(addr, port):
     import interface
 
-    # setup logger
-    werkzeug_logger = logging.getLogger('werkzeug')
+    # 访问日志(以前 werkzeug 记的那份):web_logfile 有值就写文件,否则打到控制台
+    access_logger = logging.getLogger('werkzeug')
     logfile = util.solve_filepath(var.config.get('webinterface', 'web_logfile'))
     if logfile:
         handler = logging.handlers.RotatingFileHandler(logfile, mode='a', maxBytes=10240, backupCount=3)  # Rotate after 10KB, leave 3 old logs
     else:
         handler = logging.StreamHandler()
-
-    werkzeug_logger.addHandler(handler)
-    werkzeug_logger.propagate = False  # avoid double-printing access logs
+    access_logger.setLevel(logging.INFO)
+    access_logger.addHandler(handler)
+    access_logger.propagate = False  # avoid double-printing access logs
 
     interface.init_proxy()
-    interface.web.env = 'development'
     interface.web.secret_key = util.resolve_flask_secret()
-    interface.web.run(port=port, host=addr)
-
+    try:
+        import waitress
+    except ImportError:
+        # 源码部署升级后没重装依赖:先用开发服务器跑起来,提示装上
+        logging.getLogger('bot').warning(
+            "web: waitress is not installed (pip install -r requirements.txt); "
+            "falling back to Flask's development server, which is not meant for public use")
+        interface.web.run(port=port, host=addr)
+        return
+    waitress.serve(AccessLog(interface.web, access_logger), host=addr, port=port, **web_server_options())
 
 
 def main():
@@ -139,6 +183,10 @@ def main():
     if obsolete_configs:
         obsolete_str = ", ".join([f"'[{k}] {v}'" for (k, v) in obsolete_configs])
         bot_logger.warning(f"Ignoring obsolete config items {obsolete_str}; they can be removed from your config file.")
+
+    # 出站连接守卫:用户给的链接(包括跳转、DNS 重绑定)不能让 bot 连到内网
+    from . import egress
+    egress.install(config)
 
     # ======================
     #     Load Database

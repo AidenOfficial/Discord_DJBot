@@ -18,6 +18,7 @@ import variables as var
 from media.item import BaseItem, item_builders, item_loaders, item_id_generators, ValidationFailedError, \
     PreparationFailedError, BlockedHereError, validation_guild
 from bot.limits import limits_for
+import util
 from util import format_time
 
 log = logging.getLogger("bot")
@@ -149,6 +150,10 @@ class URLItem(BaseItem):
             # Check if this url is banned globally (the bot owner's /globalban)
             if var.store is not None and var.store.has_rule('url_ban', self.url):
                 raise ValidationFailedError(tr('url_ban', url=self.url))
+
+            # 入口查过,但条目可能是以前存下来的(个人歌单、重启恢复的队列):要联网之前再查一次
+            if not util.is_public_url(self.url):
+                raise ValidationFailedError(tr('bad_url'))
 
             # avoid multiple process validating in the meantime
             info = self._get_info_from_url()

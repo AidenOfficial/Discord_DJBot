@@ -67,6 +67,9 @@ def cmd_play_live(bot, user, text, command, parameter):
         return
 
     url = util.get_url_from_input(parameter)
+    if url and not util.is_public_url(url):
+        bot.send_msg(tr('bad_url'), text)
+        return
     if url:
         _enqueue_live(bot, user, url, '', text)
         return
