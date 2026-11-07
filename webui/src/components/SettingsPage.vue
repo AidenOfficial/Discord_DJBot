@@ -1,24 +1,38 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   fetchChannels, joinChannel, leaveChannel, saveChannelSettings, type ChannelNode, type ChannelOverview,
   type FollowMode,
 } from '../api'
 import ChannelTreeNode from './ChannelTreeNode.vue'
+import GuildAdminPanel from './GuildAdminPanel.vue'
 import LogsPanel from './LogsPanel.vue'
+import { useGuilds } from '../composables/useGuilds'
 import { useMe } from '../composables/useMe'
+import { selectedGuild } from '../guild'
 import { t, tParts } from '../i18n'
 import type { Key } from '../i18n/en'
 
 const { me } = useMe()
-type Tab = 'channel' | 'logs'
+const { canManage } = useGuilds()
+type Tab = 'channel' | 'server' | 'logs'
 const tab = ref<Tab>('channel')
-try { if (localStorage.getItem('settingsTab') === 'logs') tab.value = 'logs' } catch { /* ignore */ }
+try {
+  const saved = localStorage.getItem('settingsTab')
+  if (saved === 'logs' || saved === 'server') tab.value = saved
+} catch { /* ignore */ }
 function setTab(next: Tab) {
   tab.value = next
   try { localStorage.setItem('settingsTab', next) } catch { /* ignore */ }
 }
-const showLogs = computed(() => tab.value === 'logs' && !!me.value?.can_view_logs)
+// 服务器管理只给能管理当前服务器的人,日志只给能看日志的人
+const tabs = computed<Tab[]>(() => [
+  'channel',
+  ...(canManage.value ? ['server' as const] : []),
+  ...(me.value?.can_view_logs ? ['logs' as const] : []),
+])
+const activeTab = computed<Tab>(() => (tabs.value.includes(tab.value) ? tab.value : 'channel'))
+const TAB_LABEL: Record<Tab, Key> = { channel: 'set.tabChannel', server: 'set.tabServer', logs: 'logs.tab' }
 
 const data = ref<ChannelOverview | null>(null)
 const error = ref('')
@@ -33,13 +47,25 @@ function say(msg: string) {
 }
 
 async function reload() {
+  const guild = selectedGuild.value
   try {
-    data.value = await fetchChannels()
+    const fresh = await fetchChannels()
+    if (guild !== selectedGuild.value) return  // 途中换了服务器
+    data.value = fresh
     error.value = ''
   } catch {
-    error.value = t('set.readFailed')
+    if (guild === selectedGuild.value) error.value = t('set.readFailed')
   }
 }
+
+watch(selectedGuild, () => {
+  data.value = null
+  error.value = ''
+  reload()
+})
+
+/** 不能改这个服务器的频道设置(只能移动 / 离开) */
+const locked = computed(() => data.value?.can_edit_settings === false)
 
 // 频道里的人随时在变,定时刷新
 let timer: ReturnType<typeof setInterval> | undefined
@@ -118,22 +144,24 @@ const modeHint = computed(() => {
   <section class="mx-auto w-full max-w-3xl px-4 py-8">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <h1 class="text-xl font-semibold">{{ t('set.title') }}</h1>
-      <div v-if="me?.can_view_logs" class="flex gap-1 rounded-full p-1" :style="{ background: 'var(--c-surface-2)' }">
+      <div v-if="tabs.length > 1" class="flex gap-1 rounded-full p-1" :style="{ background: 'var(--c-surface-2)' }">
         <button
-          v-for="tb in (['channel', 'logs'] as const)"
+          v-for="tb in tabs"
           :key="tb"
           class="cursor-pointer rounded-full border-0 px-3.5 py-1 text-xs font-medium"
-          :style="(tb === 'logs') === showLogs
+          :style="tb === activeTab
             ? { background: 'var(--c-surface)', color: 'var(--c-text)', boxShadow: 'var(--shadow-1)' }
             : { background: 'transparent', color: 'var(--c-text-muted)' }"
           @click="setTab(tb)"
-        >{{ t(tb === 'logs' ? 'logs.tab' : 'set.tabChannel') }}</button>
+        >{{ t(TAB_LABEL[tb]) }}</button>
       </div>
     </div>
 
-    <LogsPanel v-if="showLogs" class="mt-5" />
+    <LogsPanel v-if="activeTab === 'logs'" class="mt-5" />
+    <GuildAdminPanel v-else-if="activeTab === 'server'" />
 
     <template v-else>
+    <p v-if="locked" class="mt-3 rounded-lg px-3 py-2 text-xs" :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text-muted)' }"><Icon icon="lock" class="mr-1.5" aria-hidden="true" />{{ t('set.manageOnly') }}</p>
     <p v-if="error" class="mt-3 rounded-lg px-3 py-2 text-sm" :style="{ background: 'var(--c-accent-soft)', color: 'var(--c-danger)' }">{{ error }}</p>
 
     <template v-if="data">
@@ -157,7 +185,7 @@ const modeHint = computed(() => {
             v-if="data.settings.default_path.length"
             class="cursor-pointer rounded-full border-0 px-3 py-1 text-xs"
             :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
-            :disabled="busy"
+            :disabled="busy || locked"
             :title="t('set.clearDefaultTitle')"
             @click="apply(saveChannelSettings({ default_channel_id: null }), t('set.defaultCleared'))"
           ><Icon icon="xmark" class="mr-1" />{{ t('set.clearDefault') }}</button>
@@ -171,7 +199,7 @@ const modeHint = computed(() => {
             :style="data.settings.follow === m.key
               ? { background: 'var(--c-accent)', color: 'var(--c-on-accent)' }
               : { background: 'transparent', color: 'var(--c-text-muted)' }"
-            :disabled="busy"
+            :disabled="busy || locked"
             @click="setFollow(m.key)"
           >{{ t(m.label) }}</button>
         </div>
@@ -184,7 +212,7 @@ const modeHint = computed(() => {
             :value="data.settings.follow_user"
             class="rounded-full border px-3 py-1.5 text-sm outline-none"
             :style="{ background: 'var(--c-bg)', borderColor: 'var(--c-border)', color: 'var(--c-text)' }"
-            :disabled="busy"
+            :disabled="busy || locked"
             @change="apply(saveChannelSettings({ follow_user: ($event.target as HTMLSelectElement).value }), t('common.saved'))"
           >
             <option v-if="!followChoices.length" value="">{{ t('set.nobody') }}</option>
@@ -198,7 +226,7 @@ const modeHint = computed(() => {
           <input
             type="checkbox"
             :checked="data.settings.return_home"
-            :disabled="busy"
+            :disabled="busy || locked"
             class="h-4 w-4"
             :style="{ accentColor: 'var(--c-accent)' }"
             @change="apply(saveChannelSettings({ return_home: ($event.target as HTMLInputElement).checked }), t('common.saved'))"
@@ -220,7 +248,7 @@ const modeHint = computed(() => {
             min="0"
             max="1440"
             :value="data.settings.idle_pause_minutes"
-            :disabled="busy"
+            :disabled="busy || locked"
             class="w-20 rounded-lg border px-2 py-1 text-sm tabular-nums outline-none"
             :style="{ background: 'var(--c-bg)', borderColor: 'var(--c-border)', color: 'var(--c-text)' }"
             @change="onIdleMinutes"
@@ -234,7 +262,7 @@ const modeHint = computed(() => {
           <input
             type="checkbox"
             :checked="data.settings.idle_resume"
-            :disabled="busy || data.settings.idle_pause_minutes === 0"
+            :disabled="busy || locked || data.settings.idle_pause_minutes === 0"
             class="h-4 w-4"
             :style="{ accentColor: 'var(--c-accent)' }"
             @change="apply(saveChannelSettings({ idle_resume: ($event.target as HTMLInputElement).checked }), t('common.saved'))"
@@ -256,7 +284,7 @@ const modeHint = computed(() => {
             :default-id="data.settings.default_channel_id"
             :busy="busy"
             @move="(id: string) => apply(joinChannel(id), t(data?.settings.follow === 'off' ? 'set.moving' : 'set.movingFollow'))"
-            @set-default="(id: string) => apply(saveChannelSettings({ default_channel_id: id }), t('set.defaultSaved'))"
+            @set-default="(id: string) => locked ? say(t('set.manageOnly')) : apply(saveChannelSettings({ default_channel_id: id }), t('set.defaultSaved'))"
           />
         </ul>
         <p v-else class="px-2 py-4 text-sm" :style="{ color: 'var(--c-text-muted)' }">{{ t('set.notConnected') }}</p>

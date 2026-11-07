@@ -1,5 +1,6 @@
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { fetchStatus, postControls, type BotStatus, type ControlAction } from '../api'
+import { selectedGuild } from '../guild'
 
 const POLL_MS = 3000
 
@@ -22,12 +23,22 @@ function applyStatus(s: BotStatus) {
 }
 
 async function poll() {
+  const guild = selectedGuild.value
   try {
-    applyStatus(await fetchStatus())
+    const s = await fetchStatus()
+    if (guild === selectedGuild.value) applyStatus(s)  // 请求途中换了服务器:丢掉旧服务器的状态
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
+    if (guild === selectedGuild.value) error.value = e instanceof Error ? e.message : String(e)
   }
 }
+
+// 换服务器:旧服务器的状态立刻清掉,马上拉新的(不等下一轮)
+watch(selectedGuild, () => {
+  status.value = null
+  error.value = null
+  clock.playhead = 0
+  if (started) poll()
+})
 
 function tick() {
   const s = status.value
@@ -60,8 +71,10 @@ function ensureStarted() {
 
 /** Fire a control action; the response is a fresh status, applied at once. */
 async function control(body: ControlAction) {
+  const guild = selectedGuild.value
   try {
-    applyStatus(await postControls(body))
+    const s = await postControls(body)
+    if (guild === selectedGuild.value) applyStatus(s)
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   }

@@ -1,6 +1,8 @@
 // 分片上传客户端(配合 web_upload.py)。每片 32MB 以内,单片失败自动重试,
 // 服务器返回 409 时按它记录的 received 续传,所以断网/切后台后重试也不会重传整份文件。
 
+import { apiFetch } from './api'
+
 const BASE = '..'
 
 export interface UploadResult {
@@ -36,7 +38,7 @@ export async function uploadFile(
   onProgress: (p: UploadProgress) => void,
   opts: { targetdir?: string; signal?: AbortSignal } = {},
 ): Promise<UploadResult> {
-  const init = await fetch(`${BASE}/api/upload/init`, {
+  const init = await apiFetch(`${BASE}/api/upload/init`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ filename: file.name, size: file.size, targetdir: opts.targetdir ?? 'uploads/' }),
@@ -54,7 +56,7 @@ export async function uploadFile(
     if (opts.signal?.aborted) throw new UploadError('aborted')
     const chunk = file.slice(offset, Math.min(offset + chunkSize, file.size))
     try {
-      const rv = await fetch(`${BASE}/api/upload/${id}?offset=${offset}`, {
+      const rv = await apiFetch(`${BASE}/api/upload/${id}?offset=${offset}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/octet-stream' },
         body: chunk,
@@ -78,11 +80,11 @@ export async function uploadFile(
   }
 
   onProgress({ phase: 'processing', sent: file.size, total: file.size })
-  const fin = await fetch(`${BASE}/api/upload/${id}/finish`, { method: 'POST', signal: opts.signal })
+  const fin = await apiFetch(`${BASE}/api/upload/${id}/finish`, { method: 'POST', signal: opts.signal })
   if (!fin.ok && fin.status !== 415) throw new UploadError(`http_${fin.status}`)
   // 后台处理(视频抽音轨)可能要一会儿,轮询结果
   for (;;) {
-    const st = await (await fetch(`${BASE}/api/upload/${id}`, { signal: opts.signal })).json()
+    const st = await (await apiFetch(`${BASE}/api/upload/${id}`, { signal: opts.signal })).json()
     if (st.status === 'done' || st.status === 'error') return st
     await sleep(1000)
   }
