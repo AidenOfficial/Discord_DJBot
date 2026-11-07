@@ -209,8 +209,9 @@ class DJBot(PlayerMixin, ChannelMixin):
             self.playlist.save()
 
     def stop_session(self):
-        """让播放循环退出(它退出前会再存一次队列),面板不再更新。进程退出 / 休眠时由 Hub 调用。
-        (不能叫 stop:那是 PlayerMixin 的"停止播放",/stop 命令和 Web 都在用。)"""
+        """让这个会话的播放循环退出(退出前会再存一次队列),面板不再更新。进程退出 / 休眠时由 Hub 调用。
+        不能叫 stop():那是 PlayerMixin 的"停止播放"(/stop、/leave、网页停止键都调它),
+        重名会把它覆盖掉,停止播放变成整个进程退出。"""
         self.exit = True
         now_playing = getattr(self, 'now_playing', None)
         if now_playing is not None:
