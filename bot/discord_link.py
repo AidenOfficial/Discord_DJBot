@@ -93,6 +93,8 @@ class CommandContext:
     role_ids: Tuple[int, ...] = ()
     is_admin: bool = False
     ephemeral: bool = False
+    #: 面板按钮触发的:结果就是面板本身的变化,命令的文字回复一律不发(避免刷屏)
+    silent: bool = False
     interaction: Any = None
     created_at: float = field(default_factory=time.time)
     # 内部状态
@@ -363,6 +365,8 @@ class DiscordLink:
         self.on_self_moved: Optional[Callable[[Optional[int], Optional[int]], None]] = None
         #: 面板按钮 -> (命令 key, 参数);由 NowPlaying 提供。要很快返回(在事件循环里调用)
         self.on_panel_button: Optional[Callable[[str], Optional[Tuple[str, Dict[str, Any]]]]] = None
+        #: 面板按钮的命令已经交给分发线程:让面板马上刷新,不等下一秒的轮询
+        self.on_panel_pressed: Optional[Callable[[], None]] = None
         self._specs: List[Tuple[str, Any]] = []
         self._spec_by_key: Dict[str, Any] = {}
 
@@ -828,6 +832,10 @@ class DiscordLink:
 
     def reply(self, ctx: CommandContext, message, ephemeral=None):
         """回复一条斜杠命令。message 是 bot 内部的 HTML,这里转 Markdown 并按长度切分。不抛异常。"""
+        if ctx.silent:
+            # 面板按钮:交互的"原始消息"就是面板,编辑它会把面板换成这句回复;结果看面板就行
+            log.debug("discord: dropped a reply to a panel button: %s", message)
+            return
         text = html_to_markdown(message)
         if not text:
             return
@@ -866,7 +874,8 @@ class DiscordLink:
         """命令处理完。还没回复过就过一会儿删掉 "思考中…"(期间有回复就不删)。"""
         ctx.finished = True
         loop = self._loop
-        if loop is None or loop.is_closed() or ctx.interaction is None:
+        if loop is None or loop.is_closed() or ctx.interaction is None or ctx.silent:
+            # silent:没有 "思考中…" 可删;delete_original_response 删的会是面板本身
             return
         loop.call_soon_threadsafe(self._schedule_finish, ctx)
 
@@ -1080,7 +1089,7 @@ class DiscordLink:
         return True
 
     async def _on_panel_button(self, interaction, action):
-        """面板按钮:换算成命令,和斜杠命令走同一套预检查 / 处理流程,回复只给点按钮的人看。"""
+        """面板按钮:换算成命令,和斜杠命令走同一套预检查 / 处理流程。不发回复,结果体现在面板上。"""
         resolver = self.on_panel_button
         resolved = resolver(action) if resolver is not None else None
         entry = self._spec_by_key.get(resolved[0]) if resolved else None
@@ -1088,7 +1097,7 @@ class DiscordLink:
             await interaction.response.send_message("The bot is still starting, try again in a moment.",
                                                     ephemeral=True)
             return
-        await self._invoke(entry[1], interaction, resolved[1], ephemeral=True)
+        await self._invoke(entry[1], interaction, resolved[1], silent=True)
 
     # ---- 语音频道状态 -------------------------------------------------------
 
@@ -1247,13 +1256,15 @@ class DiscordLink:
             interaction=interaction,
         )
 
-    async def _invoke(self, spec, interaction, kwargs, ephemeral=None):
-        """ephemeral:覆盖命令自己的设置(面板按钮的回复只给点的人看)。"""
+    async def _invoke(self, spec, interaction, kwargs, ephemeral=None, silent=False):
+        """ephemeral:覆盖命令自己的设置。silent:面板按钮,不发任何回复,只确认交互(面板自己会更新);
+        被预检查拒绝时仍然只给本人看一句为什么。"""
         if interaction.guild_id is None or interaction.guild_id != self.guild_id:
             await interaction.response.send_message(
                 "This bot only works in its home server for now.", ephemeral=True)
             return
-        ctx = self._context(spec, interaction, kwargs, ephemeral=ephemeral)
+        ctx = self._context(spec, interaction, kwargs, ephemeral=True if silent else ephemeral)
+        ctx.silent = silent
         if self.on_precheck is not None:
             try:
                 refusal = await asyncio.wait_for(
@@ -1266,13 +1277,20 @@ class DiscordLink:
             if refusal:
                 await interaction.response.send_message(html_to_markdown(refusal)[:2000], ephemeral=True)
                 return
-        await interaction.response.defer(ephemeral=ctx.ephemeral, thinking=True)
+        if silent:
+            # 按钮交互不带 thinking 的 defer = "稍后更新这条消息":不产生任何新消息
+            await interaction.response.defer()
+        else:
+            await interaction.response.defer(ephemeral=ctx.ephemeral, thinking=True)
         if not ctx.ephemeral:
             self._last_command_channel = interaction.channel_id
         if self.on_command is None:
-            await interaction.edit_original_response(content="The bot is still starting, try again in a moment.")
+            if not silent:
+                await interaction.edit_original_response(content="The bot is still starting, try again in a moment.")
             return
         self._emit(self.on_command, ctx)
+        if silent and self.on_panel_pressed is not None:
+            self.on_panel_pressed()
 
     async def _on_tree_error(self, interaction, error):
         log.error("discord: slash command error: %s", error, exc_info=error)

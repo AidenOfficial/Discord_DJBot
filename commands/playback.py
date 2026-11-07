@@ -88,7 +88,8 @@ def cmd_play(bot, user, text, command, parameter):
 
 def cmd_pause(bot, user, text, command, parameter):
     bot.pause()
-    bot.send_channel_msg(tr('paused'))
+    # 回复发命令的人(面板按钮触发时不回复,面板自己会变成"已暂停"),不再另发一条频道公告
+    bot.send_msg(tr('paused'), text)
 
 
 

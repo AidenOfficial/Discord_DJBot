@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from io import BytesIO
@@ -18,6 +19,7 @@ import discord  # noqa: E402
 
 import constants  # noqa: E402
 import variables as var  # noqa: E402
+from bot import discord_link as dl  # noqa: E402
 from bot import now_playing as np  # noqa: E402
 from bot.discord_link import DiscordLink, User  # noqa: E402
 from database import SettingsDatabase  # noqa: E402
@@ -305,6 +307,15 @@ class ControllerTest(_VarCase):
         self.np.tick(now=4)
         self.assertEqual(self.link.statuses, ['🎵 One — A', '🎵 One — A'])
 
+    def test_poke_refreshes_without_waiting_for_the_poll(self):
+        ticks = threading.Event()
+        with mock.patch.object(np, 'TICK', 30), mock.patch.object(np, 'POKE_DELAY', 0), \
+                mock.patch.object(self.np, 'tick', side_effect=lambda: ticks.set()):
+            self.np.start()
+            self.np.poke()
+            self.assertTrue(ticks.wait(2))
+            self.np.stop()
+
     def test_switches(self):
         quiet = np.NowPlaying(self.bot, self.link, panel=False, voice=False)
         quiet.tick(now=1)
@@ -496,19 +507,46 @@ class LinkPanelTest(unittest.TestCase):
         self.assertIsNone(msg.edits[-1]['view'])
         self.assertEqual(msg.edits[-1]['embed'].description, 'done')
 
-    def test_button_runs_the_command_privately(self):
-        from commands.slash import Spec, _d
-        spec = Spec('pause', 'pause', lambda *a: None, _d('x', 'x', 'x'))
-        self.link._spec_by_key = {'pause': ('pause', spec)}
-        self.link.on_panel_button = lambda action: ('pause', {})
-        invoked = []
+    def test_button_runs_the_command_silently(self):
+        from commands.slash import Opt, Spec, _d
+        from tests.test_discord_link import fake_interaction
+        spec = Spec('mode', 'mode', lambda *a: None, _d('x', 'x', 'x'),
+                    options=(Opt('mode', _d('m', 'm', 'm'), kind='choice',
+                                 choices=('one-shot', 'repeat', 'single', 'random', 'autoplay')),))
+        self.link._spec_by_key = {'mode': ('mode', spec)}
+        self.link.on_panel_button = lambda action: ('mode', {'mode': 'repeat'})
+        got, pokes = [], []
+        self.link.on_command = got.append
+        self.link.on_panel_pressed = lambda: pokes.append(1)
+        self.link.on_precheck = lambda ctx: None
+        self.link._emit = lambda fn, ctx: fn(ctx)
+        click = fake_interaction(guild_id=1)
+        asyncio.run_coroutine_threadsafe(self.link._on_panel_button(click, 'mode'), self.lt.loop).result(2)
 
-        async def fake_invoke(s, interaction, kwargs, ephemeral=None):
-            invoked.append((s.key, kwargs, ephemeral))
-        with mock.patch.object(self.link, '_invoke', side_effect=fake_invoke):
-            asyncio.run_coroutine_threadsafe(self.link._on_panel_button(mock.MagicMock(), 'toggle'),
-                                             self.lt.loop).result(2)
-        self.assertEqual(invoked, [('pause', {}, True)])
+        click.response.defer.assert_awaited_once_with()    # "稍后更新这条消息":不产生新消息
+        ctx = got[0]
+        self.assertEqual((ctx.command, ctx.argument, ctx.silent), ('mode', 'repeat', True))
+        self.assertEqual(pokes, [1])
+        self.assertIsNone(self.link._last_command_channel)  # 按钮不改变公告频道
+        with mock.patch.object(dl, 'FINISH_GRACE', 0.01):
+            self.link.reply(ctx, 'Mevius changed the mode to repeat')
+            self.link.finish(ctx)
+            time.sleep(0.1)
+        click.edit_original_response.assert_not_called()   # 原始消息就是面板,不能被回复覆盖
+        click.followup.send.assert_not_called()
+        click.delete_original_response.assert_not_called()  # 更不能把面板删了
+
+    def test_button_refusal_is_still_explained(self):
+        from commands.slash import Spec, _d
+        from tests.test_discord_link import fake_interaction
+        spec = Spec('skip', 'skip', lambda *a: None, _d('x', 'x', 'x'))
+        self.link._spec_by_key = {'skip': ('skip', spec)}
+        self.link.on_panel_button = lambda action: ('skip', {})
+        self.link.on_precheck = lambda ctx: "You're not in my voice channel!"
+        click = fake_interaction(guild_id=1)
+        asyncio.run_coroutine_threadsafe(self.link._on_panel_button(click, 'skip'), self.lt.loop).result(2)
+        click.response.send_message.assert_awaited_once_with("You're not in my voice channel!", ephemeral=True)
+        click.response.defer.assert_not_called()
 
     def test_voice_status_needs_permission_and_is_cleared_on_leave(self):
         voice = FakeChannel(3)

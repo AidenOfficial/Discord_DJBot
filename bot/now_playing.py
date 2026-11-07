@@ -24,6 +24,8 @@ log = logging.getLogger("bot")
 
 #: 检查播放状态的间隔(秒)
 TICK = 1.0
+#: 按了面板按钮后等多久再刷新(秒):命令在别的线程执行,暂停 / 切歌要先生效
+POKE_DELAY = 0.3
 #: 播放中刷新进度条的间隔(秒)。频道消息编辑的限速大约是每 5 秒 5 次,远用不完
 PROGRESS_EVERY = 10.0
 #: 更新失败后多久再试(秒),免得频道没权限时每秒打一次 API
@@ -251,6 +253,7 @@ class NowPlaying:
         self.panel_enabled = panel
         self.voice_enabled = voice
         self._stop = threading.Event()
+        self._wake = threading.Event()
         self._thread = None
         # 面板
         self._shown = False         # 面板上是一首正在进行的歌(不是"播放结束")
@@ -277,10 +280,20 @@ class NowPlaying:
 
     def stop(self):
         self._stop.set()
+        self._wake.set()
+
+    def poke(self):
+        """面板按钮刚按过:马上刷新一次,不等下一秒。"""
+        self._wake.set()
 
     def _run(self):
         failures = 0
-        while not self._stop.wait(TICK):
+        while True:
+            if self._wake.wait(TICK):
+                self._wake.clear()
+                time.sleep(POKE_DELAY)  # 命令在分发线程里执行,给它一点时间生效
+            if self._stop.is_set():
+                return
             try:
                 self.tick()
                 failures = 0

@@ -141,6 +141,7 @@ class DJBot(PlayerMixin, ChannelMixin):
         self.link.on_user_left = self._on_user_removed
         self.link.on_self_moved = self._on_self_moved
         self.link.on_panel_button = self.now_playing.resolve_button
+        self.link.on_panel_pressed = self.now_playing.poke
         try:
             self.link.connect()
         except Exception as e:
