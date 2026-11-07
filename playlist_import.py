@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 
 import requests
 
+import util
 import variables as var
 
 log = logging.getLogger("bot")
@@ -40,15 +41,34 @@ _jobs_lock = threading.Lock()
 
 # ---- 来源识别 ------------------------------------------------------------------
 
+def _host_is(host, *domains):
+    """host 是 domains 之一或它们的子域名。只用 endswith 的话 evilyoutube.com 也算 youtube.com"""
+    return any(host == d or host.endswith('.' + d) for d in domains)
+
+
+def _host(url):
+    try:
+        return (urlparse(url).hostname or '').lower()
+    except ValueError:
+        return ''
+
+
 def detect_source(url):
-    host = (urlparse(url).hostname or '').lower()
-    if host.endswith('youtube.com') or host == 'youtu.be':
+    try:
+        parts = urlparse(url)
+        parts.port
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in ('http', 'https'):
+        return None
+    host = (parts.hostname or '').lower()
+    if _host_is(host, 'youtube.com') or host == 'youtu.be':
         return 'youtube' if 'list=' in url else None
-    if host.endswith('music.163.com') or host == '163cn.tv':
+    if _host_is(host, 'music.163.com') or host == '163cn.tv':
         return 'netease' if _netease_playlist_id(url) else None
     if host == 'open.spotify.com':
         return 'spotify' if re.search(r'/(playlist|album)/', url) else None
-    if host == 'y.qq.com' or host.endswith('.y.qq.com'):
+    if _host_is(host, 'y.qq.com'):
         if _qq_short_link(url) or _qq_playlist_id(url):
             return 'qqmusic'
     return None
@@ -102,8 +122,11 @@ def list_youtube(url):
 
 def list_netease(url):
     """歌单接口未登录只给前 10 首详情,但给全部曲目 id;剩下的用歌曲详情接口批量补。"""
-    if urlparse(url).hostname == '163cn.tv':  # 分享短链
-        url = requests.head(url, allow_redirects=True, timeout=10, headers=NETEASE_HEADERS).url
+    if _host(url) == '163cn.tv':  # 分享短链:一跳一跳地跟,不许跳出网易云
+        url = util.resolve_redirects(url, lambda h: h == '163cn.tv' or _host_is(h, '163.com'),
+                                     headers=NETEASE_HEADERS)
+        if not url:
+            raise ValueError('netease short link did not resolve to music.163.com')
     playlist_id = _netease_playlist_id(url)
     r = requests.get('https://music.163.com/api/v6/playlist/detail', params={'id': playlist_id},
                      headers=NETEASE_HEADERS, timeout=15)
@@ -159,9 +182,10 @@ QQ_HEADERS = {'Referer': 'https://y.qq.com/', 'User-Agent': 'Mozilla/5.0'}
 def list_qqmusic(url):
     """QQ 音乐歌单接口一次返回全部曲目(实测 398 首一次拿全),不需要登录。"""
     if _qq_short_link(url):
-        resolved = requests.get(url, headers=QQ_HEADERS, timeout=10, allow_redirects=True).url
-        host = (urlparse(resolved).hostname or '').lower()
-        if not host.endswith('qq.com'):
+        # 一跳一跳地跟:allow_redirects=True 会先请求完每一跳(哪怕跳去内网)才轮到我们检查
+        resolved = util.resolve_redirects(url, lambda h: _host_is(h, 'qq.com'), method='GET',
+                                          headers=QQ_HEADERS)
+        if not resolved:
             raise ValueError('qq music short link left qq.com')
         url = resolved
     playlist_id = _qq_playlist_id(url)

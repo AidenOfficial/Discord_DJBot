@@ -7,6 +7,7 @@ from constants import tr_cli as tr
 import interface
 import util
 import variables as var
+from web_context import TOKEN_GUILD_SECTION
 
 
 
@@ -21,19 +22,24 @@ def cmd_web_access(bot, user, text, command, parameter):
     user = _web_user(text, user)
 
     if auth_method == 'token':
-        interface.banned_ip = []
-        interface.bad_access_count = {}
+        interface.reset_bans()
 
         user_info = var.db.get("user", user, fallback='{}')
         user_dict = json.loads(user_info)
         if 'token' in user_dict:
             var.db.remove_option("web_token", user_dict['token'])
+            var.db.remove_option(TOKEN_GUILD_SECTION, user_dict['token'])
 
-        token = secrets.token_urlsafe(5)
+        # 16 字节(22 个字符):令牌在公网上,5 字节(约 7 个字符)太容易猜
+        token = secrets.token_urlsafe(16)
         user_dict['token'] = token
         user_dict['token_created'] = str(datetime.datetime.now())
         user_dict['last_ip'] = ''
         var.db.set("web_token", token, user)
+        # 令牌只能操作发命令的这个服务器(多服务器时,见 web_context.token_guild_id)
+        guild_id = getattr(text, 'guild_id', None) or getattr(bot, 'guild_id', None)
+        if guild_id:
+            var.db.set(TOKEN_GUILD_SECTION, token, str(guild_id))
         var.db.set("user", user, json.dumps(user_dict))
 
         access_address = var.config.get("webinterface", "access_address") + "/?token=" + token

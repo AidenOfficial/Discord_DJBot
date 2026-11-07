@@ -14,6 +14,7 @@ import yt_dlp as youtube_dl
 from constants import tr_cli as tr
 from media.item import (BaseItem, item_builders, item_loaders,
                         item_id_generators, ValidationFailedError)
+import util
 import variables as var
 
 log = logging.getLogger("bot")
@@ -94,6 +95,9 @@ class LiveStreamItem(BaseItem):
     def validate(self):
         if self.ready == 'yes':
             return True
+        if not util.is_public_url(self.url):
+            self.ready = 'failed'
+            raise ValidationFailedError(tr('bad_url'))
         info = self._fetch_info()
         if not (info.get('is_live') or info.get('live_status') == 'is_live'):
             self.ready = 'failed'

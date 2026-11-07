@@ -163,6 +163,61 @@ SSH 里执行 `crontab -e`,加一行(每天凌晨 5 点重启):
 > `docker compose up -d` 时 Docker 会自动建好这个目录。缓存上限默认 4GB,
 > 在 Web UI 的 **Cache** 页查看占用、固定常听的歌、手动释放空间。
 
+## 七之一、禁止访问内网(出站过滤)
+
+用户点歌给的链接由 bot 去抓。不加限制的话,有人可以给一个指向局域网的链接(或者公网链接跳转到局域网),
+让 bot 去访问 NAS 管理页、路由器、`169.254.169.254` 这类内网地址(SSRF)。两层防护:
+
+1. **bot 进程里**(`[bot] block_private_network = True`,默认开):所有 Python 发起的连接在建立时检查目标 IP,
+   内网 / 本机 / 链路本地 / CGNAT 地址一律拒绝,跳转和 DNS 重绑定也拦得住。
+2. **容器网络层**(`BAM_EGRESS_FILTER=1`,`docker-compose.yml` 默认开):entrypoint 用 iptables 在
+   **容器自己的网络命名空间**里拒绝发往
+   `10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`169.254.0.0/16`、`100.64.0.0/10` 等网段的连接,
+   管住 ffmpeg、deno、spotdl 这些子进程和 yt-dlp 伪装浏览器时用的 curl_cffi(它们不走 Python 的 socket)。
+   规则装好后 entrypoint 用 `setpriv` 去掉 `NET_ADMIN` 再启动 bot,bot 自己改不了规则。
+
+放行的:回环(Docker 内置 DNS `127.0.0.11`)、已建立连接的回包(cloudflared 连进来的 Web 请求不受影响)、
+`/etc/resolv.conf` 里的 DNS 服务器(只放 53 端口)。Discord、YouTube、B 站等外网照常。
+
+需要的 compose 配置(仓库里的 `docker-compose.yml` 已经写好):
+
+```yaml
+services:
+  botamusique:
+    cap_add:
+      - NET_ADMIN
+    environment:
+      BAM_EGRESS_FILTER: ${BAM_EGRESS_FILTER:-1}
+      BAM_EGRESS_ALLOW: ${BAM_EGRESS_ALLOW:-}
+```
+
+- 局域网里有 bot 要用的服务(HTTP 代理、Icecast 电台):在 `.env` 写
+  `BAM_EGRESS_ALLOW=192.168.1.10/32`(逗号分隔多个),同时在 `configuration.ini` 的
+  `[bot] private_network_allow` 写同样的网段(bot 进程那一层)。`HTTP(S)_PROXY` 环境变量里的代理
+  bot 进程会自动放行,容器层仍要写进 `BAM_EGRESS_ALLOW`。
+- 验证:`docker compose logs botamusique | grep egress` 能看到
+  `[egress-filter] IPv4 private networks blocked`;再执行
+  `docker exec discord-music curl -m 5 -sS http://192.168.1.1/` 应该立刻报 `Couldn't connect`,
+  `docker exec discord-music curl -sS -o /dev/null -w '%{http_code}\n' https://discord.com/api/v10/gateway` 返回 `200`。
+- 启动日志报 `出站过滤没装上` 并退出:容器没有 `NET_ADMIN`(检查 `cap_add`),或者内核不支持 iptables。
+  临时关掉:`.env` 里 `BAM_EGRESS_FILTER=0`。
+
+**绿联 NAS 上用 Docker 图形界面(不是 compose)建的容器**:在容器设置 → 高级 → 能力(Capabilities)里勾选
+`NET_ADMIN`,环境变量加 `BAM_EGRESS_FILTER=1`。界面里没有能力设置时,改在宿主机上过滤
+(UGOS 是 Debian,有 iptables;需要 SSH 并 sudo):
+
+```bash
+# 查容器的 IP(compose 网络里每次重建可能变,所以按接口过滤更稳:先查网桥名)
+sudo docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.NetworkID}}{{end}}' discord-music
+# DOCKER-USER 链是 Docker 留给用户的,Docker 自己不会改。把 <IP> 换成上面查到的地址
+for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10; do
+  sudo iptables -I DOCKER-USER -s <IP> -d "$net" -m conntrack ! --ctstate ESTABLISHED,RELATED -j REJECT
+done
+```
+
+这样拦不住容器访问 NAS 自己(发往网桥网关的包走 INPUT 链,不经过 DOCKER-USER),也不会开机保留
+(要在 UGOS 的计划任务里加一个开机运行的脚本),所以能用 compose 就优先用上面的容器内过滤。
+
 ---
 
 ## 八、故障排查

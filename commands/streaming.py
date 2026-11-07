@@ -67,6 +67,9 @@ def cmd_play_live(bot, user, text, command, parameter):
         return
 
     url = util.get_url_from_input(parameter)
+    if url and not util.is_public_url(url):
+        bot.send_msg(tr('bad_url'), text)
+        return
     if url:
         _enqueue_live(bot, user, url, '', text)
         return
@@ -83,7 +86,10 @@ def cmd_play_live(bot, user, text, command, parameter):
         if not lives:
             bot.send_channel_msg(tr('live_no_match', query=parameter))
             return
-        _enqueue_live(bot, user, lives[0]['url'], lives[0]['title'], text)
+        try:
+            _enqueue_live(bot, user, lives[0]['url'], lives[0]['title'], text)
+        except media.playlist.QueueFullError as e:
+            bot.send_channel_msg(tr('queue_full', max=e.limit))
 
     threading.Thread(target=search_and_enqueue, name="LiveSearch", daemon=True).start()
 
@@ -162,7 +168,11 @@ def _spotify_feeder_loop(bot, user, url, cancel_event):
         if paths:
             for path in paths:
                 music_wrapper = get_cached_wrapper_from_scrap(type='file', path=path, user=user)
-                bot.playlist.append(music_wrapper)
+                try:
+                    bot.playlist.append(music_wrapper)
+                except media.playlist.QueueFullError as e:
+                    bot.send_channel_msg(tr('queue_full', max=e.limit))
+                    return
                 log.info("cmd: spotify feeder added: " + music_wrapper.format_debug_string())
         else:
             log.info("cmd: spotify feeder found no match for '%s', skipping"
@@ -259,7 +269,11 @@ def cmd_play_spotify(bot, user, text, command, parameter):
             music_wrappers.append(music_wrapper)
             log.info("cmd: add to playlist: " + music_wrapper.format_debug_string())
 
-        bot.playlist.extend(music_wrappers)
+        try:
+            bot.playlist.extend(music_wrappers)
+        except media.playlist.QueueFullError as e:
+            bot.send_channel_msg(tr('queue_full', max=e.limit))
+            return
 
         if len(music_wrappers) == 1:
             bot.send_channel_msg(tr('file_added', item=music_wrappers[0].format_song_string()))

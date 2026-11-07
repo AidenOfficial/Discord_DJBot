@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { createBindCode, fetchMe, saveAlias, unbindDiscord } from '../api'
+import { DISCORD_LOGIN_URL, createBindCode, fetchMe, logout, saveAlias, unbindDiscord } from '../api'
+import { useGuilds } from '../composables/useGuilds'
 import { useMe } from '../composables/useMe'
+import { embedded } from '../activity'
 import { t, tParts } from '../i18n'
 import type { Key } from '../i18n/en'
 
@@ -14,8 +16,23 @@ const message = ref('')
 const messageOk = ref(false) // 成功时显示勾和绿色
 const root = ref<HTMLElement | null>(null)
 
+const { reloadGuilds } = useGuilds()
+
 const initial = computed(() => (me.value?.display_name || '?').trim().charAt(0).toUpperCase())
 const signedIn = computed(() => !!me.value?.identity)
+const viaDiscord = computed(() => me.value?.source === 'discord')
+// 配置了 Discord 登录、现在不是用 Discord 登录的:给个入口(登录完回到当前页面)
+const discordLoginHref = computed(() => !embedded && me.value?.discord_login_available && !viaDiscord.value
+  ? `${DISCORD_LOGIN_URL}?next=${encodeURIComponent(location.pathname + location.search)}`
+  : null)
+
+async function signOut() {
+  try {
+    await logout()
+  } catch { /* 会话可能已经没了,照样去退出页 */ }
+  // 退出页不会自动跳回 Discord(门禁模式下直接刷新会被 prompt=none 立刻登录回来)
+  location.href = '../auth/logout'
+}
 
 function toggle() {
   open.value = !open.value
@@ -70,6 +87,7 @@ async function startBind() {
           bindMsg.value = t('me.linked', { name: fresh.discord.discord_name })
           bindOk.value = true
           clearInterval(bindPoll)
+          reloadGuilds()  // 绑定后能操作的服务器变了
         }
       } catch { /* 下一轮再试 */ }
     }, 3000)
@@ -92,6 +110,7 @@ async function unlink() {
   me.value = await unbindDiscord()
   bindMsg.value = t('me.unlinked')
   bindOk.value = false
+  reloadGuilds()
 }
 
 onBeforeUnmount(() => clearInterval(bindPoll))
@@ -103,6 +122,7 @@ onMounted(() => document.addEventListener('click', onDocClick))
 onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 
 const SOURCE_LABEL: Record<string, Key> = {
+  'discord': 'me.src.discord',
   'cloudflare': 'me.src.cloudflare',
   'cloudflare-jwt': 'me.src.cloudflareJwt',
   'web-user': 'me.src.webUser',
@@ -207,6 +227,21 @@ const SOURCE_LABEL: Record<string, Key> = {
         <p class="font-medium">{{ t('me.guestTitle') }}</p>
         <p class="mt-1 text-xs leading-relaxed" :style="{ color: 'var(--c-text-muted)' }">{{ t('me.guestHint') }}</p>
       </template>
+
+      <!-- Discord 登录 / 退出 -->
+      <a
+        v-if="discordLoginHref"
+        :href="discordLoginHref"
+        class="mt-4 flex w-full items-center justify-center rounded-lg px-3 py-1.5 text-xs font-semibold no-underline"
+        :style="{ background: 'var(--c-accent)', color: 'var(--c-on-accent)' }"
+      ><Icon icon="headphones" class="mr-1.5" aria-hidden="true" />{{ t('me.loginDiscord') }}</a>
+      <!-- Activity 里登录跟着 Discord,关掉 Activity 就退出 -->
+      <button
+        v-if="viaDiscord && !embedded"
+        class="mt-4 w-full cursor-pointer rounded-lg border-0 px-3 py-1.5 text-xs font-medium"
+        :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
+        @click="signOut"
+      ><Icon icon="right-from-bracket" class="mr-1.5" aria-hidden="true" />{{ t('me.logout') }}</button>
     </div>
   </div>
 </template>

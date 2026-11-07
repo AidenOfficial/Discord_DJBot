@@ -71,10 +71,11 @@ It is the Discord port of [Mumble-DJBot](https://github.com/AidenOfficial/Mumble
 - **Library:** browsing and resumable chunked uploads (up to 4 GB per file by default). Audio is extracted from video files.
 - **Cache:** storage use and play counts; frequently played tracks can be pinned or saved to the library.
 - **Statistics:** most played tracks, top requesters, busiest hours and most skipped tracks.
+- **Discord Activity:** the same panel opens inside Discord from the voice channel (see [Discord Activity](#discord-activity)).
 
 ### Personal playlists
 
-- Users are identified by the email address that Cloudflare Access passes through, and can set a display alias.
+- Users are identified by the email address that Cloudflare Access passes through, or by their Discord account when they [log in with Discord](#log-in-with-discord), and can set a display alias.
 - Each user has their own playlists, which can be played, shuffled or appended to the queue.
 - Playlists can be imported from YouTube, NetEase Cloud Music, QQ Music and Spotify.
 - A Discord account can be linked to the web identity with a one-time code (`/bind`). Linked users can use their playlists from Discord with `/mylist` and `/fav`.
@@ -181,6 +182,44 @@ The recommended way to expose the web interface is Cloudflare Tunnel with Cloudf
 
 For detailed instructions, see [`deploy/WEBUI.md`](deploy/WEBUI.md).
 
+### Log in with Discord
+
+The web interface can also sign users in with their Discord account (OAuth2, scopes `identify guilds`). Someone who already linked their account with `/bind` keeps their playlists and favorites. Everyone else gets a new web identity tied to their Discord account, so `/bind` is no longer needed.
+
+1. In the [Developer Portal](https://discord.com/developers/applications), open your application → **OAuth2** and add the redirect `<public_url>/auth/discord/callback` (for example `https://music.example.com/auth/discord/callback`).
+2. Copy the **Client ID** and **Client Secret** into `configuration.ini`:
+
+   ```ini
+   [webinterface]
+   auth_method = discord        ; require Discord login (or keep token/none and use it optionally)
+   discord_client_id = <client id>
+   discord_client_secret =      ; or set DISCORD_CLIENT_SECRET in .env instead
+   public_url = https://music.example.com
+   ```
+
+3. Restart the bot. With `auth_method = discord`, unauthenticated pages redirect to Discord, `/api/*` returns 401, and only accounts that are in a server the bot serves are let in. With `auth_method = token`, the token page shows a **Log in with Discord** button as an alternative.
+
+> [!CAUTION]
+> The client secret is a credential. Never commit it to git. The `DISCORD_CLIENT_SECRET` environment variable overrides the ini value.
+
+### Discord Activity
+
+The control panel can also open inside Discord: users click the **Activities** (rocket) button in a voice channel and get the queue, search and playback controls for that server. Audio still comes from the bot in the voice channel; the Activity is only a remote control.
+
+1. In the [Developer Portal](https://discord.com/developers/applications), open **Activities → Settings** and turn on **Enable Activities**. This creates the Entry Point command (`Launch`).
+2. **Activities → URL Mappings**: set the root mapping `/` to your public hostname (for example `music.example.com`, with no scheme or path).
+3. **OAuth2**: keep the same Client ID and Client Secret as Discord login. At least one redirect must exist; `<public_url>/auth/discord/callback` is enough.
+4. In `configuration.ini`:
+
+   ```ini
+   [webinterface]
+   activity_enabled = True
+   discord_client_id = <client id>
+   public_url = https://music.example.com
+   ```
+
+The Activity signs in with its own short-lived tokens, whatever `auth_method` is set to. Before issuing a token, the server checks that the user really is in that server and in that voice channel right now. When the bot syncs its global slash commands, it keeps the Entry Point command, because Discord rejects a bulk overwrite that drops it. The public hostname must be reachable by Discord's proxy, so it cannot sit behind an interactive Cloudflare Access login. For the full setup and the pre-launch checklist, see [deploy/WEBUI.md](deploy/WEBUI.md#discord-activity在-discord-里打开控制面板可选).
+
 ## Security Considerations
 
 > [!WARNING]
@@ -189,7 +228,7 @@ For detailed instructions, see [`deploy/WEBUI.md`](deploy/WEBUI.md).
 - **Keep the bot token secret.** If it leaks, reset it in the Developer Portal immediately.
 - **Do not expose port 8181** to the internet or to untrusted networks.
 - **Enable Access JWT verification** by setting `access_team_domain` and `access_aud` under `[webinterface]`, so traffic that bypasses the tunnel cannot impersonate a user.
-- **Change `flask_secret`** to a long random value if you switch to `auth_method = token`, since it signs the session cookies.
+- **`flask_secret` signs the session cookies** (`token` and `discord` logins). If you leave it unset, a random secret is generated once and kept in the settings database. If you set it, use a long random value.
 - Administrators and bans are keyed by Discord user and role IDs, which cannot be spoofed by changing a nickname.
 
 ## Usage
@@ -212,7 +251,9 @@ Type `/` in the server to browse every command with its options. `/help` lists t
 | `/bind` / `/mylist` / `/fav` | Personal playlists (generate the code in the web interface) |
 | `/lyrics` / `/web` / `/help` / `/version` | Other |
 
-Administrators — users or roles listed in `[bot] admin`, plus members with *Administrator* or *Manage Server* unless `[discord] admin_by_permission = False` — also have `/kill`, `/update`, `/urlban`, `/userban`, `/maxvolume`, `/rescan` and the web user commands.
+Server admins — members with *Administrator* or *Manage Server* (unless `[discord] admin_by_permission = False`) and roles listed in `[bot] admin` — manage their own server with `/maxvolume`, `/userban`, `/userunban`, `/urlban`, `/urlunban` and `/banlist`. Discord shows these only to members with *Manage Server* by default; a server can change that under *Server Settings → Integrations*.
+
+The bot owner — the user IDs in `[bot] admin` — is an admin everywhere and also has the global ban list (`/globalban`, `/globalunban`, `/globalbanlist`, `/urlwhitelist`, `/urlunwhitelist`) and the operations commands (`/kill`, `/update`, `/rescan`, `/dropdatabase`, web user commands). These are registered only in `[discord] owner_guild_id` (or globally, visible to administrators, when it is empty), and the bot checks the owner's ID every time they run.
 
 By default only people in the bot's voice channel can control playback (`[bot] allow_other_channel_message`).
 

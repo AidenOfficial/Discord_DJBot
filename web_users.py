@@ -1,13 +1,16 @@
 """Web 用户身份(Cloudflare Access 邮箱 + 别名)与个人歌单。
 
 身份来源(按优先级):
-  1. Cloudflare Access 回源时带的邮箱头(默认 Cf-Access-Authenticated-User-Email);
+  1. 用 Discord 登录的会话(web_auth_discord):绑定过(/bind)的用绑定的 Web 身份,
+     否则身份键是 "discord:<user id>"。它是用户自己主动登录的账号,所以排在最前。
+  2. Cloudflare Access 回源时带的邮箱头(默认 Cf-Access-Authenticated-User-Email);
      配置了 access_team_domain + access_aud 时,改为校验 Cf-Access-Jwt-Assertion
      JWT 并从中取邮箱,校验失败直接 403(防止有人绕过 Tunnel 伪造请求头)。
-  2. auth_method = password / token 时的 Web 用户名。
-  3. 都没有 → 匿名(可以点歌,署名 Guest,但没有个人歌单)。
+     JWT 校验是门禁,即使已经用 Discord 登录也照样要求合法 JWT。
+  3. auth_method = password / token 时的 Web 用户名。
+  4. 都没有 → 匿名(可以点歌,署名 Guest,但没有个人歌单)。
 
-身份键:邮箱(小写)或 "user:<用户名>"。别名、歌单都挂在身份键上。
+身份键:邮箱(小写)、"user:<用户名>" 或 "discord:<id>"。别名、歌单都挂在身份键上。
 数据存在 settings 数据库文件里(save_music_library=False 时 music_db 是
 :memory:,不能用),表在首次使用时创建。
 """
@@ -19,11 +22,13 @@ import sqlite3
 import threading
 import time
 
-from flask import Blueprint, abort, g, jsonify, request
+from flask import Blueprint, abort, g, jsonify, make_response, request
 
 import util
 import variables as var
 import web_context
+from bot.limits import limits_for
+from web_security import rate_limited
 
 log = logging.getLogger("bot")
 
@@ -49,6 +54,12 @@ class Identity:
         self.source = source
         self.fallback_name = fallback_name
         self.alias = None
+        # 用 Discord 登录时:{id, username, global_name, avatar}
+        self.discord_user = None
+
+    @property
+    def discord_id(self):
+        return self.discord_user['id'] if self.discord_user else None
 
     @property
     def display_name(self):
@@ -100,9 +111,13 @@ def jwt_verification_enabled():
 def resolve_identity(auth_user=None):
     """根据当前请求得出身份。auth_user 是 password/token 鉴权得到的用户名。
     启用了 JWT 校验但请求没带合法 JWT 时 abort(403)。"""
+    import web_auth_discord
+
     email = None
     source = 'anonymous'
-    if jwt_verification_enabled():
+    # Activity 经 Discord 的代理访问,带不了 Cloudflare Access 的 JWT;Bearer 令牌本身已经验过
+    activity = getattr(g, 'activity_claims', None) is not None
+    if jwt_verification_enabled() and not activity:
         token = request.headers.get('Cf-Access-Jwt-Assertion', '')
         if not token:
             abort(403)
@@ -112,7 +127,7 @@ def resolve_identity(auth_user=None):
             log.warning("web: rejected Cloudflare Access JWT from %s: %s", request.remote_addr, e)
             abort(403)
         source = 'cloudflare-jwt'
-    else:
+    elif not activity:
         header = var.config.get('webinterface', 'access_email_header',
                                 fallback='Cf-Access-Authenticated-User-Email').strip()
         if header:
@@ -120,7 +135,12 @@ def resolve_identity(auth_user=None):
             if email:
                 source = 'cloudflare'
 
-    if email:
+    discord_user = web_auth_discord.session_user()
+    if discord_user:
+        ident = Identity(key=web_auth_discord.identity_key_for(discord_user), source='discord',
+                         fallback_name=web_auth_discord.display_name(discord_user))
+        ident.discord_user = discord_user
+    elif email:
         email = email.strip().lower()
         ident = Identity(key=email, email=email, source=source)
     elif auth_user:
@@ -134,6 +154,19 @@ def resolve_identity(auth_user=None):
         except Exception:
             log.debug("web: could not load alias for %s", ident.key, exc_info=True)
     return ident
+
+
+def _discord_login_fields(ident):
+    """/api/me 里 Discord 登录相关的字段(之前的字段不变)。"""
+    import web_auth_discord
+
+    user = ident.discord_user
+    return {
+        'discord_id': ident.discord_id,
+        'discord_username': user.get('username') if user else None,
+        'discord_avatar': web_auth_discord.avatar_url(user) if user else None,
+        'discord_login_available': web_auth_discord.configured(),
+    }
 
 
 def current_identity():
@@ -319,11 +352,33 @@ class UserDatabase:
                 conn.execute("UPDATE discord_link SET discord_name=? WHERE discord_key=?", (discord_name, discord_key))
             return row['identity']
 
+    def link_discord_login(self, discord_key, discord_name):
+        """用 Discord 登录时调用:已经绑定过就返回绑定的身份;否则把 discord_key 本身
+        记成身份并写绑定。返回 (identity, 是否新建)。"""
+        with self._conn() as conn:
+            row = conn.execute("SELECT identity FROM discord_link WHERE discord_key=?",
+                               (discord_key,)).fetchone()
+            if row is not None:
+                return row['identity'], False
+            # discord:<id> 这个身份可能已经被别的 Discord 账号 /bind 走了(identity 唯一),
+            # 那就不写绑定,身份仍然是 discord:<id>
+            cur = conn.execute("INSERT OR IGNORE INTO discord_link (discord_key, identity, discord_name, linked_at) "
+                               "VALUES (?, ?, ?, ?)", (discord_key, discord_key, discord_name, time.time()))
+            return discord_key, cur.rowcount > 0
+
     def discord_link_for(self, identity):
         with self._conn() as conn:
             row = conn.execute("SELECT discord_name, linked_at FROM discord_link WHERE identity=?",
                                (identity,)).fetchone()
             return dict(row) if row else None
+
+    def discord_id_for(self, identity):
+        """这个 Web 身份绑定的 Discord user id(字符串);没绑定是 None。"""
+        with self._conn() as conn:
+            row = conn.execute("SELECT discord_key FROM discord_link WHERE identity=?",
+                               (identity,)).fetchone()
+        key = row['discord_key'] if row else ''
+        return key.split(':', 1)[1] if key.startswith('discord:') and key[8:].isdigit() else None
 
     def unlink_identity(self, identity):
         with self._conn() as conn:
@@ -767,7 +822,8 @@ def _entries_from_source(payload):
         url = (payload.get('url') or '').strip()
         if payload.get('provider') == 'bilibili':
             url = util.get_bilibili_url_from_input(payload.get('id') or url)
-        if not url or not url.lower().startswith(('http://', 'https://')):
+        if not url or not url.lower().startswith(('http://', 'https://')) or len(url) > 2048 \
+                or not util.is_public_url(url):
             abort(400)
         try:
             duration = float(payload.get('duration') or 0)
@@ -783,6 +839,11 @@ def enqueue(wrappers, mode):
     """mode: append(加到队尾) / next(插到当前曲之后) / replace(清空队列后立即播放)。"""
     if not wrappers:
         return
+    # 队列长度限额(bot.limits):放不下就整批拒绝,replace 也不先清空
+    limit = limits_for(getattr(web_context.session(), 'guild_id', '')).max_queue
+    existing = 0 if mode == 'replace' else len(web_context.playlist())
+    if limit and existing + len(wrappers) > limit:
+        abort(make_response(jsonify({'error': 'queue_full', 'max': limit}), 409))
     if mode == 'replace':
         # clear() 会释放旧队列里的条目;新 wrapper 和旧队列重复的那些(同一歌单再播一次)
         # 还没入队,也会被清掉,队列里就是悬空引用(ItemNotCachedError,一首首被跳过)。
@@ -815,6 +876,7 @@ def create_blueprint(requires_auth):
         data = ident.to_dict()
         data['jwt_verified'] = data['source'] == 'cloudflare-jwt'
         data['discord'] = var.user_db.discord_link_for(ident.key) if ident.key and var.user_db else None
+        data.update(_discord_login_fields(ident))
         import web_logs
         data['can_view_logs'] = web_logs.can_view()
         return data
@@ -832,7 +894,7 @@ def create_blueprint(requires_auth):
         if not ident.key or var.user_db is None:
             abort(403)
         code, expires_at = var.user_db.create_bind_code(ident.key)
-        command_name = getattr(web_context.session(), 'command_name', None)
+        command_name = getattr(web_context.any_session(), 'command_name', None)
         name = command_name('bind') if command_name else 'bind'
         return jsonify({'code': code, 'expires_at': expires_at, 'command': f"/{name} code:{code}"})
 
@@ -886,6 +948,7 @@ def create_blueprint(requires_auth):
 
     @api.route('/playlists/import', methods=['POST'])
     @requires_auth
+    @rate_limited('import')
     def import_playlist():
         """Body: {url, playlist_id?(导入到已有歌单), name?(新歌单名,默认用来源标题)}
         支持 YouTube 播放列表、网易云音乐 / QQ 音乐歌单、Spotify 歌单/专辑。"""
@@ -898,6 +961,8 @@ def create_blueprint(requires_auth):
             abort(400)
         if playlist_import.detect_source(url) is None:
             return jsonify({'error': 'unsupported_source'}), 400
+        if not util.is_public_url(url):
+            abort(400)
         playlist_id = payload.get('playlist_id')
         if playlist_id is not None:
             try:
@@ -942,6 +1007,7 @@ def create_blueprint(requires_auth):
 
     @api.route('/favorites', methods=['POST'])
     @requires_auth
+    @rate_limited('save')
     def toggle_favorite():
         """Body: 同 /playlists/<id>/items 的来源字段 + favorite: true(收藏)/ false(取消)。
         收藏歌单就是名叫 Favorites 的那张(和Discord 里的 /fav 同一张),没有就自动建。"""
@@ -1004,6 +1070,7 @@ def create_blueprint(requires_auth):
 
     @api.route('/playlists/<int:playlist_id>/items', methods=['POST'])
     @requires_auth
+    @rate_limited('save')
     def add_items(playlist_id):
         """Body: 见 _entries_from_source"""
         owner = _owner()
@@ -1036,6 +1103,7 @@ def create_blueprint(requires_auth):
 
     @api.route('/playlists/<int:playlist_id>/play', methods=['POST'])
     @requires_auth
+    @rate_limited('enqueue')
     def play_playlist(playlist_id):
         """Body: {mode: append|next|replace, shuffle?: bool, item?: row id(只放这一首)}"""
         import random

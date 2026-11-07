@@ -86,6 +86,189 @@ access_aud = <Access 应用 Overview 页的 Application Audience (AUD) Tag>
 开启后每个请求都校验 `Cf-Access-Jwt-Assertion`,没有合法 JWT 的一律 403
 (局域网直连也会被拒,这是预期行为)。
 
+## 用 Discord 登录(可选)
+
+不想依赖 Cloudflare Access 识别身份时,可以让用户用 Discord 账号登录:
+
+1. Developer Portal → 你的应用 → **OAuth2** → Redirects 加上
+   `<public_url>/auth/discord/callback`,必须和下面的 `public_url` 拼出来的完全一致。
+2. `configuration.ini`:
+
+   ```ini
+   [webinterface]
+   auth_method = discord          ; 当门禁用;保持 none/token 时则是可选登录方式
+   discord_client_id = <Client ID>
+   public_url = https://music.example.com
+   ```
+
+   Client Secret 放进 `.env` 的 `DISCORD_CLIENT_SECRET`(优先于 ini 里的
+   `discord_client_secret`),**不要提交进仓库**。
+3. 路由:`/auth/discord/login` → Discord 授权 → `/auth/discord/callback`;
+   `/auth/logout` 退出(GET 显示页面,POST 返回 JSON)。
+
+- `auth_method = discord`:没登录的网页跳去登录,`/api/*` 返回 401 JSON;
+  只放行和 bot 在同一个服务器里的账号,其他人 403。
+- `auth_method = token`:令牌页多一个"用 Discord 登录"按钮,同服务器的账号可以代替令牌。
+- 身份:用 `/bind` 绑定过的 Discord 账号登录后就是绑定的那个 Web 身份(歌单、收藏都在);
+  没绑定过的身份是 `discord:<用户 ID>`,并自动记一条绑定,不需要再 `/bind`。
+  用 Discord 登录后,身份优先于 Access 邮箱头(JWT 校验仍然照常要求)。
+- 会话 Cookie 由 `flask_secret` 签名;不配置时随机生成一次存进 settings 库,重启不掉登录。
+
+## 不用 Access 直接上公网(用 Discord 登录)
+
+整站不套 Cloudflare Access、让用户在应用里用 Discord 登录时,Tunnel 后面就是公网,下面这些要确认:
+
+- `auth_method = discord`(见上一节)。`none` 等于谁都能控制 bot。
+- **不要信任 Access 的邮箱头**:没有 Access 时,请求头 `Cf-Access-Authenticated-User-Email` 是访问者
+  自己可以随便写的,令牌 / 密码登录时会被当成身份。把它关掉:
+
+  ```ini
+  [webinterface]
+  access_email_header =
+  ```
+
+  (`auth_method = discord` 时 Discord 身份优先,这个头不起作用,但关掉更稳妥。)
+- 内置的防护(默认开着,一般不用改):
+  - **安全响应头**:CSP 只允许本站脚本;`frame-ancestors` 只允许本站和 Discord
+    (`[webinterface] frame_ancestors`,Activity 要嵌在 discord.com 里),别的网站嵌不进来(点击劫持);
+    `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
+  - **限流**(`[webinterface] rate_limit`):搜索、点歌入队、歌单导入、Discord 登录、令牌校验
+    按登录身份和选中的服务器计数,没有身份才按 IP。Activity 的请求都从 Discord 代理的 IP 来,
+    只按 IP 会把所有人一起限住。超限返回 429(带 `Retry-After`)。
+  - **输错令牌 / 密码**:同一 IP 超过 `max_attempts` 次后 `ban_minutes`(默认 15)分钟内不能再试;
+    已经登录的会话、用 Discord 登录的人不受影响。令牌现在是 22 个字符(以前 7 个)。
+  - **不让 bot 访问内网**:用户给的链接、跳转、DNS 重绑定都到不了局域网和 NAS 本身。
+    bot 进程里由 `[bot] block_private_network` 拦,容器里的 ffmpeg 等子进程由
+    `BAM_EGRESS_FILTER` 拦(见 `deploy/DOCKER.md`「禁止访问内网」)。
+  - Web 服务用 waitress(生产 WSGI 服务器),不再是 Flask 的开发服务器。
+- 管理接口(日志、缓存)想再加一层,看下一节。
+
+## 管理接口再套一层 Cloudflare Access(按路径)
+
+普通入口只用 Discord 登录,**只给管理路径**套 Access:Cloudflare 在边缘先要求 Access 登录,
+通过后请求才到 bot,bot 照常再检查是不是 bot 主人(`[bot] admin` 里的 Discord ID)。
+两层都过才能用,Access 这层不改变应用里的身份(身份仍然是 Discord 登录的账号)。
+
+管理路径(都只有 bot 主人 / `log_viewers` 能用):
+
+| 路径 | 内容 |
+|---|---|
+| `/api/logs`(含 `/api/logs/debug`、`/api/logs/download`) | 日志面板、调试日志开关、导出 |
+| `/api/cache` | 下载缓存:固定、删除、清理 |
+
+**例外**:`/api/logs/client` 是**所有人**的浏览器上报前端 JS 报错用的,不能被 Access 拦住。
+
+Zero Trust 控制台 → Access → Applications:
+
+1. **Add an application → Self-hosted**,名字如 `DJBot admin`。
+   - Public hostname:`music.example.com`,Path:`api/logs`;
+     再 **Add public hostname** 一条同域名、Path `api/cache`。
+     (Access 的路径匹配它本身和下面的所有路径。)
+   - Policy:Action **Allow**,Include → Emails → 主人的邮箱(或 Emails ending in / GitHub 组织等)。
+   - Session duration 按需(如 24h)。
+2. **再建一个 Self-hosted 应用**,名字如 `DJBot client logs`:
+   - Public hostname:`music.example.com`,Path:`api/logs/client`;
+   - Policy:Action **Bypass**,Include → **Everyone**。
+   Access 按最具体的路径生效,所以这条覆盖上一条里的 `/api/logs`。
+3. **不要**给整站(`music.example.com` 不带路径)建 Access 应用,否则普通用户也会被拦。
+4. **不要**在 `configuration.ini` 里填 `access_aud` / `access_team_domain`:那会要求**每个**请求都带
+   Access JWT,没套 Access 的普通路径全部 403。这里 Access 只做边缘的门,应用不用读它。
+
+使用:主人先在浏览器里直接打开一次 `https://music.example.com/api/logs`,完成 Access 登录
+(`CF_Authorization` cookie 是整个域名的),之后 Web UI 设置页里的日志、缓存页就能正常用。
+其他人打开日志 / 缓存接口会被 Access 拦在 Cloudflare,请求到不了 NAS。
+
+验证:
+
+- [ ] 无痕窗口打开 `https://music.example.com/api/logs` → 跳到 Access 登录页。
+- [ ] 无痕窗口打开首页 → 是 Discord 登录,不是 Access。
+- [ ] `curl -X POST https://music.example.com/api/logs/client -d '{}' -H 'Content-Type: application/json'`
+      返回的是 bot 的 401 / 400 JSON,不是 Access 的跳转。
+
+**为什么不用单独的管理主机名**(比如 `admin.music.example.com` 整站套 Access):Discord 登录的回调地址
+只有一个(`public_url`),登录后会话 cookie 落在主域名上,管理主机名上没有登录状态,
+`auth_method = discord` 时那边打不开。要用管理主机名得先让 Discord 登录支持多个回调地址(还没做)。
+如果只是不想让管理接口暴露在公网,也可以在 Cloudflare 用 WAF 自定义规则直接拦掉
+`/api/logs`、`/api/cache`(放过 `/api/logs/client`),只在局域网里管理。
+
+## Discord Activity(在 Discord 里打开控制面板,可选)
+
+在语音频道里点 **Activities(火箭图标)** 就能打开 bot 的控制面板:队列、搜索、播放控制,
+和网页版是同一个界面。声音照旧由 bot 推进语音频道,Activity 只是遥控器;面板固定操作
+**打开它的那个服务器**,不显示服务器切换。
+
+下文的 `<PUBLIC_HOST>` 是以后对外的 HTTPS 主机名(例如 `music.example.com`,还没定)。
+
+### 工作方式
+
+1. Discord 在 iframe 里打开 `https://<应用 ID>.discordsays.com/?frame_id=…&instance_id=…`,
+   经 Discord 的代理转到 `https://<PUBLIC_HOST>/`。带着这两个启动参数时,首页和打包的静态资源
+   不需要登录(里面没有数据)。
+2. 前端用 Embedded App SDK 的 `authorize()` 拿到 code(scope `identify guilds`),
+   `POST /api/activity/token {code, guild_id, channel_id}`。
+3. 服务端用 Client Secret 换 Discord access token,读 `/users/@me` 和 `/users/@me/guilds`,然后
+   **不信 SDK 给的上下文**,逐项核对:bot 在这个服务器;用户是成员(OAuth 服务器列表,或 bot 查成员);
+   按 bot 网关的语音状态,用户此刻就在这个语音频道里。都对了才签发我们自己的短期令牌
+   (`activity_token_ttl` 秒,默认 15 分钟,用 `flask_secret` 签名,可撤销)。
+4. 前端调 SDK 的 `authenticate()`,之后所有 API 请求带 `Authorization: Bearer <令牌>`。
+   令牌只在内存里,不写 localStorage,不用 Cookie。快到期时 `POST /api/activity/refresh`
+   换新令牌(会再核对一次语音频道,人已经离开就不续);关闭时 `POST /api/activity/logout` 作废。
+5. 权限和用 Discord 登录网页版一样(`web_context` 的规则:bot 主人、管理服务器权限……),
+   打开 Activity 的服务器是默认服务器。`auth_method` 是什么都不影响 Activity。
+6. 外部图片(搜索结果封面、头像)经 `/api/thumbnail/external` 转发(只代理 YouTube / Bilibili /
+   Discord CDN 等图床),所以 **不需要** 给图床另外登记 URL Mapping,也用不着 `patchUrlMappings`。
+
+### Developer Portal 配置(应用 ID `1568438278825181214`)
+
+1. **Activities → Settings**:打开 **Enable Activities**。Discord 会自动建一条入口命令
+   (Entry Point,`PRIMARY_ENTRY_POINT`,默认叫 `Launch`)。Supported Platforms 勾上
+   Web / Desktop / iOS / Android;手机的方向锁定选 Unlocked(竖屏横屏都适配了)。
+2. **Activities → URL Mappings**:Root Mapping 设成 `/` → `<PUBLIC_HOST>`(只填主机名,
+   不带 `https://`、不带路径)。不需要别的映射。
+3. **OAuth2**:
+   - 记下 Client ID 和 Client Secret(和"用 Discord 登录"是同一对)。
+   - Redirects 至少要有一条(SDK 授权本身不用跳转):已经配了 `<public_url>/auth/discord/callback`
+     就够了,没有的话加一条 `https://127.0.0.1` 当占位。
+   - scope 不用在 Portal 里设:前端请求 `identify` 和 `guilds`,用户第一次打开时 Discord 弹窗确认。
+4. **入口命令**:Portal 里自动建的那条可以改名字和描述。bot 同步全局斜杠命令时会读出现有的入口命令
+   原样一起提交(Discord 的全局同步是整体覆盖,不带上会被拒:错误码 50240);如果 Discord 上一条都没有、
+   而 `activity_enabled = True`,bot 会登记一条 `/launch`(由 Discord 直接打开 Activity)。
+5. **Installation**:保持 Guild Install(bot 本来就要装进服务器)。
+
+### bot 配置
+
+```ini
+[webinterface]
+activity_enabled = True
+activity_token_ttl = 900
+discord_client_id = 1568438278825181214
+public_url = https://<PUBLIC_HOST>
+; Client Secret 放 .env 的 DISCORD_CLIENT_SECRET
+```
+
+改完重启 bot:日志里会看到全局斜杠命令重新同步一次(开关 Activity 也算命令变了)。
+
+### 网络 / 安全响应头
+
+- `<PUBLIC_HOST>` 要能从公网直接访问:Discord 的代理在它自己的服务器上取页面,
+  **不能挡在 Cloudflare Access 的交互登录后面**(Tunnel 本身没问题)。
+- 响应头(加固那边负责):CSP 的 `frame-ancestors` 要放行 `https://discord.com`、
+  `https://*.discord.com`、`https://*.discordsays.com`;`img-src` 要允许 `blob:`(Activity 里的图片
+  是带令牌取回来再用 blob URL 显示的);`connect-src 'self'` 就够。不能发 `X-Frame-Options: DENY`。
+
+### 上线前检查清单
+
+- [ ] 公网域名定了,`<PUBLIC_HOST>` 已替换进 URL Mapping 和 `public_url`,`https://<PUBLIC_HOST>/api/activity/config` 返回 `enabled: true`。
+- [ ] Portal 里 Activities 已开启,入口命令存在;bot 重启后日志显示全局命令同步成功,入口命令还在(客户端的 App Launcher 里能看到)。
+- [ ] Client Secret 只在 `.env`,没进 git;`flask_secret` 不是默认值(令牌用它签名,换了就全部失效)。
+- [ ] 桌面客户端:进语音频道 → 火箭图标 → 打开 → 第一次弹授权 → 看到当前服务器的队列,能播放 / 暂停 / 跳过 / 搜索点歌,声音从 bot 出来。
+- [ ] 手机客户端(竖屏):布局不溢出,刘海和底部手势条不挡按钮;缩成画中画时只剩迷你播放条。
+- [ ] 不在语音频道的人打开(或从别的频道转发的邀请)被拒,提示"先进入语音频道"。
+- [ ] 离开语音频道后,最多一个 `activity_token_ttl` 内面板提示需要重新打开。
+- [ ] 搜索结果封面、队列封面在 Activity 里都显示(外部图片走代理)。
+- [ ] 浏览器开发者工具里没有 CSP / frame-ancestors 报错。
+- [ ] 应用要对外公开前:按 Discord 的要求完成应用验证(未验证的应用,Activity 的可用范围有限制)。
+
 ## 语音频道与跟随(Settings 页)
 
 - 实时显示服务器的语音频道(按分类分组,和 Discord 里的顺序一致)和每个频道里的人
@@ -202,3 +385,4 @@ access_aud = <Access 应用 Overview 页的 Application Audience (AUD) Tag>
 - [ ] 上传大小上限 `max_upload_file_size` 符合预期;上传一个 >100MB 的视频能成功并只剩音轨。
 - [ ] 右上角显示的是自己的 Access 邮箱;设置别名后点一首歌,队列里显示别名。
 - [ ] bot 不在语音频道时,Now Playing 顶部有提示;Settings 里能让 bot 进出频道。
+- [ ] 开了 Discord Activity 的话:按上面"Discord Activity → 上线前检查清单"逐项过一遍。

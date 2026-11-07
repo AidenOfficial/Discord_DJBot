@@ -15,6 +15,7 @@ import variables as var
 from database import Condition
 from media.cache import get_cached_wrapper_by_id
 from media.item import dicts_to_items
+from web_security import rate_limited
 from web_users import current_user_name, enqueue
 
 log = logging.getLogger("bot")
@@ -137,6 +138,7 @@ def create_blueprint(requires_auth):
 
     @api.route('/enqueue', methods=['POST'])
     @requires_auth
+    @rate_limited('enqueue')
     def library_enqueue():
         """把曲库条目加入队列。Body: {"id": ..., "mode": "append"|"next"}。"""
         payload = _payload()

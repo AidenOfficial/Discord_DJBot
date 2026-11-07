@@ -16,7 +16,9 @@ from constants import tr_cli as tr
 from media import artwork
 import variables as var
 from media.item import BaseItem, item_builders, item_loaders, item_id_generators, ValidationFailedError, \
-    PreparationFailedError
+    PreparationFailedError, BlockedHereError, validation_guild
+from bot.limits import limits_for
+import util
 from util import format_time
 
 log = logging.getLogger("bot")
@@ -115,6 +117,11 @@ class URLItem(BaseItem):
     def validate(self):
         try:
             self.validating_lock.acquire()
+            # 本服务器封禁了这个链接:条目是各服务器共用的,下载好了也不能在这里放(全局封禁见下面)
+            guild_id = validation_guild()
+            if guild_id and var.store is not None \
+                    and var.store.has_rule('url_ban', self.url, guild_id, include_global=False):
+                raise BlockedHereError(tr('url_ban', url=self.url))
             if self.ready in ['yes', 'validated']:
                 artwork.ensure(self)
                 return True
@@ -140,9 +147,13 @@ class URLItem(BaseItem):
                     artwork.ensure(self)
                     return True
 
-            # Check if this url is banned (global rules; per-guild bans are checked when the command comes in)
+            # Check if this url is banned globally (the bot owner's /globalban)
             if var.store is not None and var.store.has_rule('url_ban', self.url):
                 raise ValidationFailedError(tr('url_ban', url=self.url))
+
+            # 入口查过,但条目可能是以前存下来的(个人歌单、重启恢复的队列):要联网之前再查一次
+            if not util.is_public_url(self.url):
+                raise ValidationFailedError(tr('bad_url'))
 
             # avoid multiple process validating in the meantime
             info = self._get_info_from_url()
@@ -151,7 +162,8 @@ class URLItem(BaseItem):
                 return False
 
             # Check if the song is too long and is not whitelisted
-            max_duration = var.config.getint('bot', 'max_track_duration') * 60
+            # 限额现在各服务器相同;以后按服务器分档时,超长要改成只在本服务器拒绝(BlockedHereError)
+            max_duration = limits_for(guild_id).max_track_seconds
             if max_duration and \
                     not (var.store is not None and var.store.has_rule('url_whitelist', self.url)) and \
                     self.duration > max_duration:

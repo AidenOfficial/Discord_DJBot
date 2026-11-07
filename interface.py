@@ -4,6 +4,7 @@ import html
 import json
 import logging
 import os
+import time
 from functools import wraps
 
 from flask import Flask, render_template, request, redirect, send_from_directory, Response, abort, session, g
@@ -45,17 +46,23 @@ class ReverseProxied(object):
         scheme = environ.get('HTTP_X_SCHEME', '')
         if scheme:
             environ['wsgi.url_scheme'] = scheme
-        real_ip = environ.get('HTTP_X_REAL_IP', '')
+        # 访问者的真实 IP:Cloudflare Tunnel(cloudflared)放在 Cf-Connecting-IP,nginx 一般用 X-Real-IP。
+        # 不认的话所有人都是 cloudflared 容器的地址,输错令牌的 IP 封禁会把所有人一起封掉
+        real_ip = environ.get('HTTP_CF_CONNECTING_IP', '') or environ.get('HTTP_X_REAL_IP', '')
         if real_ip:
-            environ['REMOTE_ADDR'] = real_ip
+            environ['REMOTE_ADDR'] = real_ip.strip()
         return self.app(environ, start_response)
 
 
+import web_activity
 import web_api
+import web_auth_discord
 import web_cache
 import web_channels
+import web_guilds
 import web_library
 import web_logs
+import web_security
 import web_upload
 import web_users
 
@@ -102,8 +109,41 @@ def authenticate():
                     {'WWW-Authenticate': 'Basic realm="Login Required"'})
 
 
+# 输错令牌 / 密码的次数和封禁(ip -> 到期时间,time.monotonic())。
+# 封禁只拦再拿凭据来试的请求,已登录的会话照常用(见 web_security 里的说明)
 bad_access_count = {}
-banned_ip = []
+banned_ip = {}
+
+
+def reset_bans():
+    bad_access_count.clear()
+    banned_ip.clear()
+
+
+def _ip_banned(ip):
+    until = banned_ip.get(ip)
+    if until is None:
+        return False
+    if time.monotonic() >= until:
+        banned_ip.pop(ip, None)
+        bad_access_count.pop(ip, None)
+        return False
+    return True
+
+
+def _log_safe(value):
+    # 用户名、IP(来自请求头)都是访问者给的:去掉换行,免得伪造出多行日志
+    return str(value).replace('\r', '').replace('\n', '')[:200]
+
+
+def _record_failure(ip, what):
+    count = bad_access_count.get(ip, 0) + 1
+    bad_access_count[ip] = count
+    log.info("web: %s from ip %s, %d attempts.", _log_safe(what), _log_safe(ip), count)
+    if count > var.config.getint("webinterface", "max_attempts", fallback=10):
+        seconds = web_security.ban_seconds()
+        banned_ip[ip] = time.monotonic() + seconds
+        log.info("web: login attempts from %s blocked for %d min", _log_safe(ip), seconds // 60)
 
 
 def _with_identity(f, auth_user, args, kwargs):
@@ -115,33 +155,46 @@ def _with_identity(f, auth_user, args, kwargs):
 def requires_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if request.remote_addr in banned_ip:
-            abort(403)
+        # Discord Activity 的 Bearer 令牌:开了 Activity 就认,不管 auth_method 是什么。
+        # 这里不按 IP 封禁:Activity 的请求都来自 Discord 代理的 IP,封一个 IP 等于封所有人;
+        # 输错令牌 / 密码的 IP 封禁只拦登录尝试(见下面各分支)
+        bearer = web_activity.check_bearer()
+        if bearer is True:
+            return _with_identity(f, None, args, kwargs)
+        if bearer is not None:
+            return bearer
 
         auth_method = var.config.get("webinterface", "auth_method")
 
+        if auth_method == 'discord':
+            if web_auth_discord.session_user() is None:
+                return web_auth_discord.unauthenticated()
+            if not web_auth_discord.shares_guild_with_bot():
+                return web_auth_discord.forbidden()
+            return _with_identity(f, None, args, kwargs)
+
         if auth_method == 'password':
             auth = request.authorization
-            if auth:
-                if not check_auth(auth.username, auth.password):
-                    if request.remote_addr in bad_access_count:
-                        bad_access_count[request.remote_addr] += 1
-                        log.info(f"web: failed login attempt, user: {auth.username}, from ip {request.remote_addr}."
-                                 f"{bad_access_count[request.remote_addr]} attempts.")
-                        if bad_access_count[request.remote_addr] > var.config.getint("webinterface", "max_attempts",
-                                                                                     fallback=10):
-                            banned_ip.append(request.remote_addr)
-                            log.info(f"web: access banned for {request.remote_addr}")
-                    else:
-                        bad_access_count[request.remote_addr] = 1
-                        log.info(f"web: failed login attempt, user: {auth.username}, from ip {request.remote_addr}.")
-                    return authenticate()
-            else:
+            if not auth:
+                return authenticate()
+            if _ip_banned(request.remote_addr):
+                abort(403)
+            if not check_auth(auth.username, auth.password):
+                _record_failure(request.remote_addr, f"failed login attempt, user: {auth.username}")
                 return authenticate()
         if auth_method == 'token':
+            # 配置了 Discord 登录时,和 bot 在同一服务器的 Discord 账号可以代替令牌
+            if web_auth_discord.session_user() is not None and 'token' not in request.args \
+                    and web_auth_discord.shares_guild_with_bot():
+                return _with_identity(f, None, args, kwargs)
             if 'user' in session and 'token' not in request.args:
                 return _with_identity(f, session['user'], args, kwargs)
             elif 'token' in request.args:
+                if _ip_banned(request.remote_addr):
+                    abort(403)
+                wait = web_security.check('token')
+                if wait:
+                    return web_security.too_many(wait)
                 token = request.args.get('token')
                 token_user = var.db.get("web_token", token, fallback=None)
                 if token_user is not None:
@@ -156,19 +209,11 @@ def requires_auth(f):
                     session['user'] = token_user
                     return _with_identity(f, token_user, args, kwargs)
 
-            if request.remote_addr in bad_access_count:
-                bad_access_count[request.remote_addr] += 1
-                log.info(f"web: bad token from ip {request.remote_addr}, "
-                         f"{bad_access_count[request.remote_addr]} attempts.")
-                if bad_access_count[request.remote_addr] > var.config.getint("webinterface", "max_attempts"):
-                    banned_ip.append(request.remote_addr)
-                    log.info(f"web: access banned for {request.remote_addr}")
-            else:
-                bad_access_count[request.remote_addr] = 1
-                log.info(f"web: bad token from ip {request.remote_addr}.")
+                _record_failure(request.remote_addr, "bad token")
 
             command = "/" + (var.bot.command_name('requests_webinterface_access') if var.bot else 'web')
             bot_name = (var.bot.link.bot_name if var.bot else '') or 'the bot'
+            discord_login = web_auth_discord.configured()
             return render_template('need_token.html',
                                    lang=var.language.split('_')[0],
                                    title=tr_web('token_required'),
@@ -176,7 +221,10 @@ def requires_auth(f):
                                                   name=html.escape(bot_name),
                                                   command=html.escape(command)),
                                    token_label=tr_web('token'),
-                                   submit=tr_web('submit'))
+                                   submit=tr_web('submit'),
+                                   discord_login_url=web_auth_discord.login_url(request.script_root + request.path)
+                                   if discord_login else None,
+                                   discord_login_label=tr_web('login_with_discord') if discord_login else None)
 
         auth_user = request.authorization.username \
             if auth_method == 'password' and request.authorization else None
@@ -185,14 +233,38 @@ def requires_auth(f):
     return decorated
 
 
+@web.after_request
+def _security_headers(response):
+    return web_security.apply_security_headers(response)
+
+
+def requires_auth_or_activity_shell(f):
+    """页面外壳(index.html、打包的静态资源):Activity 的 iframe 第一次打开时还没有令牌,放行;
+    其余照旧要登录。"""
+    authed = requires_auth(f)
+
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if web_activity.serves_shell():
+            return f(*args, **kwargs)
+        return authed(*args, **kwargs)
+
+    return decorated
+
+
+# 用 Discord 登录(/auth/discord/login、/auth/discord/callback、/auth/logout),不经过 requires_auth
+web.register_blueprint(web_auth_discord.create_blueprint())
 # JSON API for the new web interface (all routes under /api/)
 web.register_blueprint(web_api.create_blueprint(requires_auth))
 web.register_blueprint(web_users.create_blueprint(requires_auth))
 web.register_blueprint(web_cache.create_blueprint(requires_auth))
 web.register_blueprint(web_upload.create_blueprint(requires_auth))
 web.register_blueprint(web_channels.create_blueprint(requires_auth))
+web.register_blueprint(web_guilds.create_blueprint(requires_auth))
 web.register_blueprint(web_library.create_blueprint(requires_auth))
 web.register_blueprint(web_logs.create_blueprint(requires_auth))
+# Discord Activity:/api/activity/*(换令牌)和外部图片代理 /api/thumbnail/external
+web.register_blueprint(web_activity.create_blueprint(requires_auth))
 
 
 # The web interface: webui/ (Vue + Vite), built into webui/dist.
@@ -200,7 +272,7 @@ webui_dist = os.path.join(root_dir, "webui", "dist")
 
 
 @web.route("/", methods=['GET'])
-@requires_auth
+@requires_auth_or_activity_shell
 def index():
     if not os.path.isfile(os.path.join(webui_dist, "index.html")):
         return "Web interface not built (run `npm ci && npm run build` in webui/).", 404
@@ -208,7 +280,7 @@ def index():
 
 
 @web.route("/assets/<path:path>", methods=['GET'])
-@requires_auth
+@requires_auth_or_activity_shell
 def webui_assets(path):
     return send_from_directory(os.path.join(webui_dist, "assets"), path)
 

@@ -71,10 +71,11 @@ Discord-DJBot 进入 Discord 服务器的语音频道，播放来自 YouTube、B
 - **曲库：** 支持浏览与分片上传，单文件默认上限 4 GB，可断点续传；视频文件只保留音轨。
 - **缓存：** 显示存储占用与播放次数，常听的曲目可固定或转存至曲库。
 - **统计：** 最常播放的曲目、点歌最多的用户、最活跃的时段以及最常被跳过的曲目。
+- **Discord Activity：** 同一个面板可以在 Discord 的语音频道里直接打开（见 [Discord Activity](#discord-activity)）。
 
 ### 个人歌单
 
-- 以 Cloudflare Access 传递的登录邮箱识别用户，用户可设置显示别名。
+- 以 Cloudflare Access 传递的登录邮箱识别用户，或在[用 Discord 登录](#用-discord-登录)后以 Discord 账号识别；用户可设置显示别名。
 - 每位用户拥有独立歌单，可立即播放、随机播放或追加到队列。
 - 可从 YouTube、网易云音乐、QQ 音乐与 Spotify 导入歌单。
 - 可通过一次性绑定码（`/bind`）把 Discord 账号与 Web 身份关联，之后在 Discord 里用 `/mylist`、`/fav` 使用个人歌单。
@@ -181,6 +182,44 @@ NAS 部署、cookies 配置与日常维护参见 [`deploy/DOCKER.md`](deploy/DOC
 
 详细步骤参见 [`deploy/WEBUI.md`](deploy/WEBUI.md)。
 
+### 用 Discord 登录
+
+Web 界面也可以用 Discord 账号登录（OAuth2，scope 为 `identify guilds`）。已经用 `/bind` 绑定过的人，登录后沿用原来的歌单和收藏；其他人会得到一个挂在 Discord 账号上的新 Web 身份，不再需要 `/bind`。
+
+1. 在 [Developer Portal](https://discord.com/developers/applications) 打开你的应用 → **OAuth2**，添加 Redirect：`<public_url>/auth/discord/callback`（例如 `https://music.example.com/auth/discord/callback`）。
+2. 把 **Client ID** 和 **Client Secret** 填进 `configuration.ini`：
+
+   ```ini
+   [webinterface]
+   auth_method = discord        ; 强制用 Discord 登录（也可以保持 token/none，把它当作可选登录方式）
+   discord_client_id = <client id>
+   discord_client_secret =      ; 也可以改在 .env 里设置 DISCORD_CLIENT_SECRET
+   public_url = https://music.example.com
+   ```
+
+3. 重启 bot。`auth_method = discord` 时，未登录的页面会跳转到 Discord，`/api/*` 返回 401，并且只放行和 bot 在同一个服务器里的账号。`auth_method = token` 时，令牌页会多一个“用 Discord 登录”按钮。
+
+> [!CAUTION]
+> Client Secret 是凭据，绝不能提交到 git。环境变量 `DISCORD_CLIENT_SECRET` 优先于 ini 里的值。
+
+### Discord Activity
+
+控制面板也能在 Discord 里打开：在语音频道点 **Activities（火箭图标）**，就能看到这个服务器的队列、搜索和播放控制。声音照旧由 bot 推进语音频道，Activity 只是遥控器。
+
+1. 在 [Developer Portal](https://discord.com/developers/applications) 的 **Activities → Settings** 打开 **Enable Activities**，Discord 会建好入口命令（`Launch`）。
+2. **Activities → URL Mappings**：Root Mapping 设成 `/` → 公网主机名（例如 `music.example.com`，不带 `https://` 和路径）。
+3. **OAuth2**：和"用 Discord 登录"用同一对 Client ID / Client Secret；Redirects 至少要有一条，`<public_url>/auth/discord/callback` 就行。
+4. `configuration.ini`：
+
+   ```ini
+   [webinterface]
+   activity_enabled = True
+   discord_client_id = <client id>
+   public_url = https://music.example.com
+   ```
+
+不管 `auth_method` 设的是什么，Activity 都用自己的短期令牌登录。签发令牌前，服务端会核对用户确实是这个服务器的成员，并且此刻就在这个语音频道里。bot 同步全局斜杠命令时会保留入口命令，因为 Discord 会拒绝删掉它的整体覆盖。Discord 的代理要能访问公网主机名，所以它不能放在 Cloudflare Access 的交互登录后面。完整步骤和上线前检查清单见 [deploy/WEBUI.md](deploy/WEBUI.md#discord-activity在-discord-里打开控制面板可选)。
+
 ## 安全注意事项
 
 > [!WARNING]
@@ -189,7 +228,7 @@ NAS 部署、cookies 配置与日常维护参见 [`deploy/DOCKER.md`](deploy/DOC
 - **bot token 要保密。** 一旦泄露，立即到 Developer Portal 重置。
 - **不要将 8181 端口暴露**到公网或不可信网络。
 - **启用 Access JWT 校验**：在 `[webinterface]` 中配置 `access_team_domain` 与 `access_aud`，绕过 Tunnel 的请求就无法冒充用户。
-- 如改用 `auth_method = token`，**务必修改 `flask_secret`** 为足够长的随机字符串，因为它用于签名会话 Cookie。
+- **`flask_secret` 用于签名会话 Cookie**（`token` 和 `discord` 登录都靠它）。不配置时会随机生成一次并存进 settings 数据库；如果自己配置，请用足够长的随机字符串。
 - 管理员和封禁都按 Discord 用户 ID / 身份组 ID 认，改昵称冒充不了。
 
 ## 使用
@@ -212,7 +251,9 @@ NAS 部署、cookies 配置与日常维护参见 [`deploy/DOCKER.md`](deploy/DOC
 | `/bind` / `/mylist` / `/fav` | 个人歌单（绑定码在 Web 界面中生成） |
 | `/lyrics` / `/web` / `/help` / `/version` | 其他 |
 
-管理员（`[bot] admin` 里列出的用户或身份组，加上有「管理员」或「管理服务器」权限的成员，可用 `[discord] admin_by_permission = False` 关掉后者）还可以使用 `/kill`、`/update`、`/urlban`、`/userban`、`/maxvolume`、`/rescan` 以及 Web 用户相关命令。
+服务器管理员（有「管理员」或「管理服务器」权限的成员，可用 `[discord] admin_by_permission = False` 关掉；以及 `[bot] admin` 里列出的身份组）可以用 `/maxvolume`、`/userban`、`/userunban`、`/urlban`、`/urlunban`、`/banlist` 管理自己的服务器。这些命令默认只有「管理服务器」权限的人看得到，服务器可以在「服务器设置 → 整合」里改。
+
+bot 主人（`[bot] admin` 里的用户 ID）在所有服务器都是管理员，另外还有全局封禁（`/globalban`、`/globalunban`、`/globalbanlist`、`/urlwhitelist`、`/urlunwhitelist`）和运维命令（`/kill`、`/update`、`/rescan`、`/dropdatabase`、Web 用户相关命令）。这些命令只注册在 `[discord] owner_guild_id`（留空则注册成全局命令，默认只有「管理员」看得到），每次执行都会核对主人的用户 ID。
 
 默认只有和 bot 在同一个语音频道的人能控制播放（见 `[bot] allow_other_channel_message`）。
 

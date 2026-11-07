@@ -262,6 +262,10 @@ class LinkTest(unittest.TestCase):
         self.assertTrue(self.link._context(spec, fake_interaction(user_id=7), {}).is_admin)      # 配置的用户 ID
         self.assertTrue(self.link._context(spec, fake_interaction(roles=(7,)), {}).is_admin)     # 配置的身份组 ID
         self.assertTrue(self.link._context(spec, fake_interaction(admin=True), {}).is_admin)     # 服务器管理员
+        # bot 主人只有配置的用户 ID;服务器管理员、配置的身份组都不是主人
+        self.assertTrue(self.link._context(spec, fake_interaction(user_id=7), {}).is_owner)
+        self.assertFalse(self.link._context(spec, fake_interaction(roles=(7,)), {}).is_owner)
+        self.assertFalse(self.link._context(spec, fake_interaction(admin=True), {}).is_owner)
         self.link.admin_permission = False
         self.assertFalse(self.link._context(spec, fake_interaction(admin=True), {}).is_admin)
 
@@ -320,6 +324,47 @@ class CommandTreeTest(unittest.TestCase):
         ban = asyncio.run(payload('userban'))['options'][0]
         self.assertEqual(ban['type'], discord.AppCommandOptionType.user.value)
 
+    def test_default_permissions_and_owner_guild_split(self):
+        named = all_specs()
+        client = DiscordClient('token', home_guild_id=1)
+        client.register_commands(named, owner_guild_id=999)
+        owner_guild = discord.Object(id=999)
+        global_names = {c.name for c in client._tree.get_commands()}
+        owner_names = {c.name for c in client._tree.get_commands(guild=owner_guild)}
+        owner_specs = {name for name, spec in named if spec.owner_only}
+        self.assertIn('kill', owner_specs)
+        self.assertEqual(owner_names, owner_specs)                 # 主人命令只在主人的服务器
+        self.assertFalse(global_names & owner_specs)
+        self.assertEqual(global_names | owner_names, {name for name, _ in named})
+
+        commands = {c.name: c for c in client._tree.get_commands()}
+        manage = discord.Permissions(manage_guild=True)
+        for name, spec in named:
+            if spec.admin:
+                self.assertEqual(commands[name].default_permissions, manage, name)
+            elif not spec.owner_only:
+                self.assertIsNone(commands[name].default_permissions, name)
+        self.assertTrue(client._tree.get_command('kill', guild=owner_guild).default_permissions.administrator)
+        data = asyncio.run(commands['userban'].get_translated_payload(client._tree, dl._Translator()))
+        self.assertEqual(int(data['default_member_permissions']), manage.value)
+
+    def test_without_owner_guild_owner_commands_are_global_but_hidden(self):
+        named = all_specs()
+        client = DiscordClient('token', home_guild_id=1)
+        client.register_commands(named)
+        self.assertEqual(len(client._tree.get_commands()), len(named))
+        kill = client._tree.get_command('kill')
+        self.assertEqual(kill.default_permissions, discord.Permissions(administrator=True))
+
+    def test_dev_guild_gets_every_command(self):
+        named = all_specs()
+        client = DiscordClient('token', home_guild_id=1)
+        client.register_commands(named, owner_guild_id=999, dev_guild_id=888)
+        self.assertEqual({c.name for c in client._tree.get_commands(guild=discord.Object(id=888))},
+                         {name for name, spec in named if not spec.owner_only})
+        # 全局、主人的服务器、开发服务器,再加以前的主服务器(清掉旧的服务器命令)
+        self.assertEqual(client._sync_targets(), [None, 999, 888, 1])
+
     def test_callback_passes_option_values(self):
         from commands.slash import Opt, Spec, _d
         link = DiscordClient('token', home_guild_id=1)
@@ -336,6 +381,140 @@ class CommandTreeTest(unittest.TestCase):
         self.assertEqual(seen, {'query': 'lofi', 'start': None})
         self.assertEqual([p.name for p in command.parameters], ['query', 'start'])
         self.assertTrue(command.parameters[0].required)
+
+
+def all_specs(renames=None):
+    import configparser
+    from commands import slash
+    config = configparser.ConfigParser(interpolation=None)
+    if renames:
+        config.read_dict({'commands': renames})
+    return slash.configured_specs(config)
+
+
+class FakeSyncState:
+    """SettingsDatabase 的 get / set。"""
+
+    def __init__(self):
+        self.data = {}
+
+    def get(self, section, option, fallback=None):
+        return self.data.get((section, option), fallback)
+
+    def set(self, section, option, value):
+        self.data[(section, option)] = value
+
+
+class CommandSyncTest(unittest.TestCase):
+    def make(self, state, named=None, home=None, remote=(), **kw):
+        """remote:Discord 上现有的全局命令(get_global_commands 的返回)。"""
+        client = DiscordClient('token', home_guild_id=home)
+        client.register_commands(named or all_specs(), sync_state=state, **kw)
+        client.client._connection.application_id = 777
+        client._tree.sync = mock.AsyncMock(return_value=[])
+        client.client.http.get_global_commands = mock.AsyncMock(return_value=[dict(c) for c in remote])
+        client.client.http.bulk_upsert_global_commands = mock.AsyncMock(
+            side_effect=lambda app_id, payload: list(payload))
+        return client
+
+    @staticmethod
+    def synced(client):
+        """同步到了哪些地方(None = 全局),按调用顺序。"""
+        targets = [None] * client.client.http.bulk_upsert_global_commands.await_count
+        return targets + [c.kwargs['guild'].id for c in client._tree.sync.await_args_list]
+
+    @staticmethod
+    def global_payload(client):
+        call = client.client.http.bulk_upsert_global_commands.await_args
+        assert call.args[0] == 777
+        return call.kwargs['payload']
+
+    def test_sync_only_when_the_commands_changed(self):
+        state = FakeSyncState()
+        first = self.make(state, owner_guild_id=999)
+        asyncio.run(first._sync_commands())
+        self.assertEqual(self.synced(first), [None, 999])
+
+        again = self.make(state, owner_guild_id=999)              # 重启,命令没变:不调用 Discord
+        asyncio.run(again._sync_commands())
+        again._tree.sync.assert_not_awaited()
+
+        renamed = self.make(state, all_specs({'play': 'p'}), owner_guild_id=999)
+        asyncio.run(renamed._sync_commands())
+        self.assertEqual(self.synced(renamed), [None])             # 只有全局那份变了
+
+    def test_failed_sync_is_retried_on_next_start(self):
+        state = FakeSyncState()
+        client = self.make(state)
+        client.client.http.bulk_upsert_global_commands = mock.AsyncMock(side_effect=RuntimeError('429'))
+        asyncio.run(client._sync_commands())
+        self.assertEqual(state.data, {})
+        retry = self.make(state)
+        asyncio.run(retry._sync_commands())
+        self.assertEqual(self.synced(retry), [None])
+
+    def test_old_home_guild_commands_are_cleared_once(self):
+        state = FakeSyncState()
+        client = self.make(state, home=5)
+        asyncio.run(client._sync_commands())
+        self.assertEqual(self.synced(client), [None, 5])
+        self.assertEqual(client._tree.get_commands(guild=discord.Object(id=5)), [])  # 同步一份空的过去
+        again = self.make(state, home=5)
+        asyncio.run(again._sync_commands())
+        again._tree.sync.assert_not_awaited()
+
+    # ---- Activity 的入口命令(PRIMARY_ENTRY_POINT,type 4)-------------------------
+
+    ENTRY = {'id': '1', 'application_id': '777', 'version': '9', 'name': 'launch', 'type': 4,
+             'handler': 2, 'description': 'Launch the panel', 'integration_types': [0, 1],
+             'contexts': [0, 1, 2], 'name_localizations': None, 'default_member_permissions': None}
+
+    def test_global_sync_keeps_the_entry_point_command(self):
+        # Discord 上已经有入口命令(开 Activity 时 Portal 自动建的):整体覆盖时原样带上,不然会被删 / 被拒
+        remote = [{'id': '2', 'name': 'play', 'type': 1, 'description': 'old'}, self.ENTRY]
+        client = self.make(FakeSyncState(), remote=remote)
+        asyncio.run(client._sync_commands())
+        payload = self.global_payload(client)
+        entries = [p for p in payload if p.get('type') == dl.ENTRY_POINT_TYPE]
+        self.assertEqual(entries, [{'name': 'launch', 'type': 4, 'handler': 2, 'description': 'Launch the panel',
+                                    'integration_types': [0, 1], 'contexts': [0, 1, 2]}])
+        # 其余是我们自己的斜杠命令,旧的 play 被新的替换,不重复
+        self.assertEqual(sum(1 for p in payload if p['name'] == 'play'), 1)
+        self.assertGreater(len(payload), 10)
+
+    def test_entry_point_kept_even_with_activity_disabled(self):
+        client = self.make(FakeSyncState(), remote=[self.ENTRY], entry_point=False)
+        asyncio.run(client._sync_commands())
+        self.assertEqual(sum(1 for p in self.global_payload(client) if p.get('type') == 4), 1)
+
+    def test_default_entry_point_registered_when_activity_enabled(self):
+        client = self.make(FakeSyncState(), remote=[], entry_point=True)
+        asyncio.run(client._sync_commands())
+        entries = [p for p in self.global_payload(client) if p.get('type') == 4]
+        self.assertEqual(entries, [dl.default_entry_point()])
+        self.assertEqual(entries[0]['handler'], dl.ENTRY_POINT_HANDLER_DISCORD)
+
+    def test_no_entry_point_without_activity(self):
+        client = self.make(FakeSyncState(), remote=[])
+        asyncio.run(client._sync_commands())
+        self.assertFalse(any(p.get('type') == 4 for p in self.global_payload(client)))
+
+    def test_turning_activity_on_triggers_a_resync(self):
+        state = FakeSyncState()
+        asyncio.run(self.make(state)._sync_commands())
+        enabled = self.make(state, entry_point=True)
+        asyncio.run(enabled._sync_commands())
+        self.assertEqual(self.synced(enabled), [None])
+        again = self.make(state, entry_point=True)
+        asyncio.run(again._sync_commands())
+        self.assertEqual(self.synced(again), [])
+
+    def test_guild_sync_never_carries_the_entry_point(self):
+        # 入口命令只能是全局的;开发服务器那份照旧走 discord.py 的 sync
+        client = self.make(FakeSyncState(), remote=[self.ENTRY], dev_guild_id=888)
+        asyncio.run(client._sync_commands())
+        self.assertEqual(self.synced(client), [None, 888])
+        client._tree.sync.assert_awaited_once()
 
 
 class FakeVoiceClient:
@@ -586,6 +765,84 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual([(c.name, c.value) for c in choices], [('library@2', 'lo')])
         self.assertEqual(asyncio.run(complete(fake_interaction(guild_id=3), 'lo')), [])
 
+    def test_unknown_guild_gets_a_session_first(self):
+        asked = []
+
+        def need(gid):
+            asked.append(gid)
+            # Hub 在线程池里建会话,过一会儿 GuildLink 才登记上
+            threading.Timer(0.1, lambda: self.client._links.__setitem__(gid, FakeGuildLink(gid))).start()
+
+        self.client.on_session_needed = need
+        asyncio.run(self.client._invoke('spec', fake_interaction(guild_id=3), {}))
+        self.assertEqual(asked, [3])
+        self.assertEqual(self.client._links[3].got, [('invoke', 'spec', False)])
+        asyncio.run(self.client._on_panel_button(fake_interaction(guild_id=3), 'stop'))
+        self.assertEqual(asked, [3])                    # 已经有了:不再请求
+        self.assertEqual(self.client._links[3].got[-1], ('button', 'stop'))
+
+    def test_refused_or_slow_session(self):
+        self.client.on_session_needed = lambda gid: 'Not here.'
+        refused = fake_interaction(guild_id=3)
+        asyncio.run(self.client._invoke('spec', refused, {}))
+        refused.response.send_message.assert_awaited_once_with('Not here.', ephemeral=True)
+
+        self.client.on_session_needed = lambda gid: None    # 在建,但等不到
+        slow = fake_interaction(guild_id=3)
+        with mock.patch.object(dl, 'SESSION_WAIT', 0.1):
+            asyncio.run(self.client._invoke('spec', slow, {}))
+        slow.response.send_message.assert_awaited_once_with(dl.STARTING_REPLY, ephemeral=True)
+
+    def test_waits_for_a_session_that_is_still_loading(self):
+        self.a.ready = False
+        threading.Timer(0.1, lambda: setattr(self.a, 'ready', True)).start()
+        self.client.on_session_needed = mock.Mock()
+        asyncio.run(self.client._invoke('spec', fake_interaction(guild_id=1), {}))
+        self.assertEqual(self.a.got, [('invoke', 'spec', False)])
+        self.client.on_session_needed.assert_not_called()
+
+    def test_voice_events_create_sessions_only_for_the_bot_itself(self):
+        asked = []
+        self.client.on_session_needed = asked.append
+        guild = types.SimpleNamespace(id=3)
+        joined = types.SimpleNamespace(channel=types.SimpleNamespace(id=50))
+        with mock.patch.object(type(self.client.client), 'user', new_callable=mock.PropertyMock,
+                               return_value=types.SimpleNamespace(id=99)):
+            asyncio.run(self.client.on_voice_state_update(types.SimpleNamespace(id=5, guild=guild), None, joined))
+            self.assertEqual(asked, [])                 # 别人进出语音:不建会话
+            asyncio.run(self.client.on_voice_state_update(
+                types.SimpleNamespace(id=99, guild=guild), None, types.SimpleNamespace(channel=None)))
+            self.assertEqual(asked, [])
+            asyncio.run(self.client.on_voice_state_update(types.SimpleNamespace(id=99, guild=guild), None, joined))
+        self.assertEqual(asked, [3])
+
+    def test_autocomplete_warms_up_a_session(self):
+        from commands.slash import Opt, _d
+        asked = []
+        self.client.on_session_needed = asked.append
+        complete = self.client._make_autocomplete(Opt('query', _d('q', 'q', 'q'), autocomplete='library'))
+        self.assertEqual(asyncio.run(complete(fake_interaction(guild_id=3), 'lo')), [])
+        self.assertEqual(asked, [3])
+
+    def test_guild_join_and_remove_hooks(self):
+        seen = []
+        self.client.on_guild_joined = lambda gid: seen.append(('join', gid))
+        self.client.on_guild_removed = lambda gid: seen.append(('remove', gid))
+        asyncio.run(self.client.on_guild_join(types.SimpleNamespace(id=3, name='New')))
+        asyncio.run(self.client.on_guild_remove(types.SimpleNamespace(id=2, name='Old')))
+        self.assertEqual(seen, [('join', 3), ('remove', 2)])
+
+    def test_humans_in(self):
+        members = {1: types.SimpleNamespace(bot=False), 2: types.SimpleNamespace(bot=True),
+                   3: types.SimpleNamespace(bot=False)}
+        channel = types.SimpleNamespace(voice_states={1: object(), 2: object(), 3: object(), 4: object()})
+        guild = types.SimpleNamespace(get_channel=lambda cid: channel if cid == 55 else None,
+                                      get_member=members.get)
+        with mock.patch.object(self.client.client, 'get_guild', side_effect=lambda gid: guild if gid == 2 else None):
+            self.assertEqual(self.client.humans_in('2', '55'), 2)  # 不算 bot,也不算查不到的
+            self.assertEqual(self.client.humans_in(2, 56), 0)
+            self.assertEqual(self.client.humans_in(3, 55), 0)
+
     def test_presence_goes_through_the_hook(self):
         seen = []
         client, link = make_link(7)
@@ -624,6 +881,47 @@ class GuildLinkIsolationTest(unittest.TestCase):
         with mock.patch.object(self.link._client, 'get_channel', return_value=foreign):
             self.link.reply(ctx, 'late')
         foreign.send.assert_not_called()
+
+    def test_close_detaches_and_goes_quiet(self):
+        self.link.on_command = lambda ctx: None
+        self.link.on_user_joined = lambda user: None
+        self.assertTrue(self.link.ready)
+        with mock.patch.object(self.link, '_shutdown_voice', mock.AsyncMock()) as leave:
+            self.link.close('hibernated (idle)')
+        leave.assert_awaited_once()                     # 离开语音、清掉语音频道状态
+        self.assertIsNone(self.client.link(1))          # 交互 / 事件不再交给它
+        self.assertFalse(self.link.ready or self.link.alive)
+        self.assertTrue(self.link.closed)
+        self.assertIsNone(self.link.on_user_joined)
+        self.assertEqual(self.link.close_reason, 'hibernated (idle)')
+        self.assertFalse(self.link.panel_show({'title': 'x'}))
+        self.assertFalse(self.link.panel_end(None))
+        self.assertFalse(self.link.set_voice_status('x'))
+        self.assertFalse(self.link.write_audio(pcm(1)))
+
+    def test_close_leaves_a_newer_link_alone(self):
+        newer = GuildLink(self.client, 1)
+        self.client._links[1] = newer
+        with mock.patch.object(self.link, '_shutdown_voice', mock.AsyncMock()):
+            self.link.close()
+        self.assertIs(self.client.link(1), newer)
+
+    def test_text_channels(self):
+        ok = types.SimpleNamespace(view_channel=True, send_messages=True)
+        mute = types.SimpleNamespace(view_channel=True, send_messages=False)
+
+        def ch(cid, name, position, category=None, perms=ok):
+            return types.SimpleNamespace(id=cid, name=name, position=position, category=category,
+                                         permissions_for=lambda me: perms)
+
+        music = types.SimpleNamespace(position=1)
+        guild = types.SimpleNamespace(me=object(), text_channels=[
+            ch(30, 'requests', 0, music), ch(10, 'general', 0), ch(20, 'rules', 1, perms=mute), ch(11, 'chat', 2)])
+        with mock.patch.object(self.link, '_guild', return_value=guild):
+            self.assertEqual(self.link.text_channels(), [
+                {'id': '10', 'name': 'general'}, {'id': '11', 'name': 'chat'}, {'id': '30', 'name': 'requests'}])
+        with mock.patch.object(self.link, '_guild', return_value=None):
+            self.assertEqual(self.link.text_channels(), [])
 
     def test_voice_lost_after_reconnect_is_reported(self):
         moved = []

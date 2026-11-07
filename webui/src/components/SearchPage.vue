@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { postQueue as _pq, thumbnailUrl as _tn } from '../api'
+import { apiFetch, postQueue as _pq, thumbnailUrl as _tn } from '../api'
 import { formatTime, useStatus } from '../composables/useStatus'
 import AddToPlaylist from './AddToPlaylist.vue'
 import FavButton from './FavButton.vue'
+import AuthImg from './AuthImg.vue'
 import { t } from '../i18n'
 
 interface SearchResult {
@@ -45,7 +46,7 @@ async function search() {
   const mySeq = ++seq
   loading.value = true
   try {
-    const rv = await fetch(`../api/search?q=${encodeURIComponent(q)}`)
+    const rv = await apiFetch(`../api/search?q=${encodeURIComponent(q)}`)
     if (!rv.ok) throw new Error(String(rv.status))
     const data = await rv.json()
     if (mySeq !== seq) return // stale response
@@ -67,7 +68,7 @@ async function add(r: SearchResult) {
   const key = `${r.source}:${r.id}`
   added.value[key] = 'pending'
   try {
-    const rv = await fetch('../api/search/add', {
+    const rv = await apiFetch('../api/search/add', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ source: r.source, id: r.id, url: r.url }),
@@ -121,7 +122,7 @@ const SOURCE_STYLE: Record<string, { label: string; bg: string; fg: string }> = 
         :style="{ background: 'var(--c-surface)', boxShadow: 'var(--shadow-1)' }"
       >
         <div class="h-14 w-24 shrink-0 overflow-hidden rounded-lg" :style="{ background: 'var(--c-surface-2)' }">
-          <img v-if="r.thumbnail" :src="r.thumbnail" alt="" class="h-full w-full object-cover" loading="lazy" referrerpolicy="no-referrer" />
+          <AuthImg v-if="r.thumbnail" :src="r.thumbnail" alt="" class="h-full w-full object-cover" loading="lazy" referrerpolicy="no-referrer" />
         </div>
         <div class="min-w-0 flex-1">
           <p class="line-clamp-2 text-sm font-medium" :title="r.title">{{ r.title }}</p>

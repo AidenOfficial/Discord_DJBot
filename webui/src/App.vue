@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import NowPlaying from './components/NowPlaying.vue'
 import QueueList from './components/QueueList.vue'
 import SearchPage from './components/SearchPage.vue'
@@ -9,6 +9,10 @@ import PlaylistsPage from './components/PlaylistsPage.vue'
 import UserChip from './components/UserChip.vue'
 import CachePage from './components/CachePage.vue'
 import SettingsPage from './components/SettingsPage.vue'
+import GuildSwitcher from './components/GuildSwitcher.vue'
+import ActivityMini from './components/ActivityMini.vue'
+import { embedded } from './activity'
+import { useGuilds } from './composables/useGuilds'
 import { LOCALES, locale, t } from './i18n'
 import type { Key } from './i18n/en'
 
@@ -22,6 +26,7 @@ const VIEW_LABEL: Record<View, Key> = {
   home: 'nav.home', search: 'nav.search', library: 'nav.library', lists: 'nav.lists', stats: 'nav.stats', cache: 'nav.cache', settings: 'nav.settings',
 }
 const view = ref<View>('home')
+const { noAccess } = useGuilds()
 
 function applyTheme(t: Theme) {
   theme.value = t
@@ -40,27 +45,37 @@ function cycleTheme() {
   applyTheme(order[(order.indexOf(theme.value) + 1) % order.length]!)
 }
 
+// Activity 被缩成画中画小窗:只显示一条迷你播放器
+const pip = embedded ? window.matchMedia('(max-height: 300px)') : null
+const compact = ref(!!pip?.matches)
+function onPip(e: MediaQueryListEvent) { compact.value = e.matches }
+
 onMounted(() => {
   const saved = localStorage.getItem('theme')
   if (saved === 'light' || saved === 'dark') applyTheme(saved)
+  pip?.addEventListener('change', onPip)
 })
+onBeforeUnmount(() => pip?.removeEventListener('change', onPip))
 </script>
 
 <template>
-  <div class="flex min-h-full flex-col">
+  <ActivityMini v-if="compact" class="h-full" />
+  <div v-else class="flex min-h-full flex-col">
     <header
       class="sticky top-0 z-10 border-b backdrop-blur"
       :style="{ borderColor: 'var(--c-border)', background: 'color-mix(in srgb, var(--c-bg) 85%, transparent)' }"
     >
       <div class="mx-auto flex w-full max-w-5xl flex-wrap items-center justify-between gap-x-3 gap-y-2 px-4 py-3">
-        <div class="flex items-center gap-2">
+        <div class="flex min-w-0 items-center gap-2">
           <span
-            class="flex h-8 w-8 items-center justify-center rounded-full"
+            class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full"
             :style="{ background: 'var(--c-accent)', color: 'var(--c-on-accent)' }"
           >
             <Icon icon="music" class="text-sm" aria-hidden="true" />
           </span>
-          <span class="text-base font-semibold tracking-tight">DJ Bot</span>
+          <span class="hidden text-base font-semibold tracking-tight sm:inline">DJ Bot</span>
+          <!-- Activity 里服务器固定是打开它的那个 -->
+          <GuildSwitcher v-if="!embedded" />
         </div>
         <!-- 窄屏时导航换到第二行并可横向滚动 -->
         <nav
@@ -102,6 +117,12 @@ onMounted(() => {
     </header>
 
     <main class="flex-1">
+      <div v-if="noAccess" class="mx-auto mt-6 w-full max-w-3xl px-4">
+        <div class="rounded-2xl p-5" :style="{ background: 'var(--c-surface)', boxShadow: 'var(--shadow-1)' }">
+          <p class="font-medium"><Icon icon="lock" class="mr-2" :style="{ color: 'var(--c-text-muted)' }" />{{ t('guild.noAccessTitle') }}</p>
+          <p class="mt-1 text-sm" :style="{ color: 'var(--c-text-muted)' }">{{ t('guild.noAccessHint') }}</p>
+        </div>
+      </div>
       <template v-if="view === 'home'">
         <NowPlaying />
         <QueueList />
