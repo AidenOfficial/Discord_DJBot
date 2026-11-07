@@ -13,7 +13,7 @@
   idle_resume         自动暂停后有人回来就自动继续播放(1/0,默认 1)
 
 连接层的用户事件回调里只记录事件,真正的决策放到防抖定时器线程里做
-(人在频道间来回切时不会被带着乱跑)。self.link 是 bot.discord_link.DiscordLink;
+(人在频道间来回切时不会被带着乱跑)。self.link 是 bot.discord_link.GuildLink;
 本模块不 import 通信库,单测用假的 link 对象即可。
 
 Discord 的频道 dict 里多了 kind(guild / category / voice / stage)、joinable(bot 有权限进)、

@@ -6,7 +6,6 @@ import logging.handlers
 import os
 import sys
 import threading
-import time
 
 import commands
 import constants
@@ -18,7 +17,7 @@ from media.cache import MusicCache
 
 from . import logbuffer
 from .cleanup import CacheCleaner
-from .core import DJBot
+from .hub import Hub
 from .store import GuildStore
 
 
@@ -209,12 +208,13 @@ def main():
         var.cache.build_dir_cache()
 
     # ======================
-    #  Create bot instance
+    #  Connect + home session
     # ======================
-    # 播放模式、音量、上次的队列是按服务器存的:start() 连上 Discord、知道服务器之后才读
-    var.bot = DJBot(args)
-    commands.register_all_commands(var.bot)
-    var.bot.start()
+    # Hub 装好信号处理;start():连上 Discord(失败退出)-> 建主服务器的会话(var.bot)->
+    # 读它存的音量 / 播放模式 / 队列 -> 进默认频道。播放循环在最后的 run() 里各开一个线程
+    var.hub = Hub(args)
+    commands.register_all_commands(var.hub)
+    var.hub.start()
 
     # ============================
     #   Start the web interface
@@ -264,24 +264,7 @@ def main():
                 os._exit(1)
         threading.excepthook = _thread_excepthook
 
-    # Watchdog: if the main playback loop stops making progress (e.g. a stuck
-    # ffmpeg read), force an exit so the supervisor restarts a fresh process.
-    # Set [bot] watchdog_timeout = 0 to disable.
-    watchdog_timeout = var.config.getint("bot", "watchdog_timeout", fallback=0)
-    if watchdog_timeout > 0:
-        def _watchdog():
-            while not var.bot.exit:
-                time.sleep(min(15, watchdog_timeout))
-                if var.bot.exit:
-                    return
-                stalled = time.time() - var.bot.last_loop_at
-                if stalled > watchdog_timeout:
-                    bot_logger.critical(
-                        "bot: playback loop stalled for %.0fs (> %ds), exiting for restart",
-                        stalled, watchdog_timeout)
-                    os._exit(1)
-        threading.Thread(target=_watchdog, name="Watchdog", daemon=True).start()
-
-    # Start the main loop.
-    var.bot.loop()
+    # 看门狗(某个会话的播放循环卡住 -> 退出让 Docker 重启)和心跳文件由 Hub 的 Monitor 线程负责。
+    # 播放循环各在自己的线程(Player-<guild_id>)里跑,主线程等到全部退出
+    sys.exit(var.hub.run())
 

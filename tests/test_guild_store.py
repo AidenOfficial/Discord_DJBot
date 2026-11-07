@@ -250,14 +250,10 @@ class AdoptLegacyTest(Tmp):
 
 class FakeLink:
     def __init__(self, guild_id):
-        self._guild = guild_id
-        self.guild_id = None
+        self.guild_id = guild_id  # GuildLink 建出来就知道是哪个服务器;会话 start() 时才绑定
         self.users = {}
         self.my_channel_id = None
         self.channels = {}
-
-    def connect(self):
-        self.guild_id = self._guild  # 和 DiscordLink 一样:on_ready 之后才知道服务器
 
 
 class Cache(dict):
@@ -353,10 +349,9 @@ class SessionLoadTest(SessionBase):
 
     def test_exit_before_state_loaded_keeps_saved_queue(self):
         bot = self.make_bot(777)
-        bot.nb_exit = 0
         var.store.adopt_legacy('777')
         bot.bind_guild(777)
-        bot.ctrl_caught(None, None)                          # 连接中被 docker stop
+        bot.save_queue()                                     # 连接中被 docker stop(Hub 的信号处理)
         self.assertEqual(len(var.store.load_queue('777')[1]), 3)
 
 

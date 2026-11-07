@@ -1,5 +1,5 @@
 # coding=utf-8
-"""DiscordLink:音频推拉转换、斜杠命令生成、回复流程。不连真实的 Discord。"""
+"""DiscordClient / GuildLink:音频推拉转换、斜杠命令生成、回复流程、按服务器路由。不连真实的 Discord。"""
 import asyncio
 import os
 import struct
@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import discord  # noqa: E402
 
 from bot import discord_link as dl  # noqa: E402
-from bot.discord_link import CommandContext, DiscordLink, PCMStream  # noqa: E402
+from bot.discord_link import CommandContext, DiscordClient, GuildLink, PCMStream  # noqa: E402
 
 
 def pcm(value, frames=1):
@@ -128,6 +128,25 @@ class LoopThread:
         self.thread.join(2)
 
 
+def make_link(guild_id=1, loop=None, home_guild_id=None, **kw):
+    """(DiscordClient, GuildLink):不连 Discord,link 直接登记到 client 上。"""
+    client = DiscordClient('token', home_guild_id=home_guild_id or guild_id)
+    if loop is not None:
+        client._loop = loop
+    link = GuildLink(client, guild_id, **kw)
+    client._links[link.guild_id] = link
+    return client, link
+
+
+def wait_for(predicate, timeout=2.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
 def fake_interaction(user_id=42, guild_id=1, channel_id=500, voice_channel=None, admin=False, roles=()):
     perms = types.SimpleNamespace(administrator=admin, manage_guild=False)
     voice = types.SimpleNamespace(channel=types.SimpleNamespace(id=voice_channel)) if voice_channel else None
@@ -148,8 +167,7 @@ def fake_interaction(user_id=42, guild_id=1, channel_id=500, voice_channel=None,
 class LinkTest(unittest.TestCase):
     def setUp(self):
         self.lt = LoopThread()
-        self.link = DiscordLink('token', guild_id=1, admin_ids=['7'])
-        self.link._loop = self.lt.loop
+        self.client, self.link = make_link(1, self.lt.loop, admin_ids=['7'])
 
     def tearDown(self):
         self.lt.stop()
@@ -183,6 +201,7 @@ class LinkTest(unittest.TestCase):
         ctx = self.ctx()
         ctx.created_at -= dl.INTERACTION_TTL + 1
         channel = mock.MagicMock()
+        channel.guild = types.SimpleNamespace(id=1)
         channel.send = mock.AsyncMock()
         with mock.patch.object(self.link._client, 'get_channel', return_value=channel):
             self.link.reply(ctx, 'late')
@@ -210,20 +229,23 @@ class LinkTest(unittest.TestCase):
         sent = []
 
         class Ch:
-            def __init__(self, cid):
+            def __init__(self, cid, guild=1):
                 self.cid = cid
+                self.guild = types.SimpleNamespace(id=guild)
 
             async def send(self, content, **kw):
                 sent.append((self.cid, content))
 
-        channels = {500: Ch(500), 900: Ch(900)}
+        channels = {500: Ch(500), 900: Ch(900), 901: Ch(901, guild=2)}
         with mock.patch.object(self.link._client, 'get_channel', side_effect=channels.get):
             self.link.send_announcement('a')            # 没有可发的频道:丢掉
             self.link._last_command_channel = 500
             self.link.send_announcement('b')
             self.link.announce_channel_id = 900
             self.link.send_announcement('c')
-        self.assertEqual(sent, [(500, 'b'), (900, 'c')])
+            self.link.announce_channel_id = 901         # 别的服务器的频道:不认,退回最近发命令的频道
+            self.link.send_announcement('d')
+        self.assertEqual(sent, [(500, 'b'), (900, 'c'), (500, 'd')])
 
     def test_context_admin_and_options(self):
         from commands.slash import Opt, Spec, _d
@@ -248,8 +270,6 @@ class LinkTest(unittest.TestCase):
         spec = Spec('play', 'play', lambda *a: None, _d('x', 'x', 'x'))
         got = []
         self.link.on_command = got.append
-        self.link._dispatcher = threading.Thread(target=self.link._dispatch, daemon=True)
-        self.link._dispatcher.start()
 
         other_guild = fake_interaction(guild_id=2)
         self.run_coro(self.link._invoke(spec, other_guild, {}))
@@ -266,17 +286,16 @@ class LinkTest(unittest.TestCase):
         ok = fake_interaction(channel_id=777)
         self.run_coro(self.link._invoke(spec, ok, {}))
         ok.response.defer.assert_awaited_once_with(ephemeral=False, thinking=True)
-        time.sleep(0.05)
+        self.assertTrue(wait_for(lambda: got))          # 回调在共享线程池里执行
         self.assertEqual([c.command for c in got], ['play'])
         self.assertEqual(self.link._last_command_channel, 777)
-        self.link._events.put(None)
 
 
 class CommandTreeTest(unittest.TestCase):
     def test_every_spec_builds_with_localizations(self):
         import configparser
         from commands import slash
-        link = DiscordLink('token', guild_id=1, language='zh_CN')
+        link = DiscordClient('token', home_guild_id=1, language='zh_CN')
         config = configparser.ConfigParser(interpolation=None)
         link.register_commands(slash.configured_specs(config))
         commands = {c.name: c for c in link._tree.get_commands()}
@@ -303,7 +322,7 @@ class CommandTreeTest(unittest.TestCase):
 
     def test_callback_passes_option_values(self):
         from commands.slash import Opt, Spec, _d
-        link = DiscordLink('token', guild_id=1)
+        link = DiscordClient('token', home_guild_id=1)
         seen = {}
 
         async def fake_invoke(spec, interaction, kwargs):
@@ -317,10 +336,6 @@ class CommandTreeTest(unittest.TestCase):
         self.assertEqual(seen, {'query': 'lofi', 'start': None})
         self.assertEqual([p.name for p in command.parameters], ['query', 'start'])
         self.assertTrue(command.parameters[0].required)
-
-
-if __name__ == '__main__':
-    unittest.main()
 
 
 class FakeVoiceClient:
@@ -357,8 +372,7 @@ class PlayerRecoveryTest(unittest.TestCase):
 
     def setUp(self):
         self.lt = LoopThread()
-        self.link = DiscordLink('token', guild_id=1)
-        self.link._loop = self.lt.loop
+        self.client, self.link = make_link(1, self.lt.loop)
         self.vc = None
         self.link._guild = lambda: types.SimpleNamespace(voice_client=self.vc)
         self.link._pcm.set_sink(lambda: None)
@@ -433,6 +447,7 @@ class ReplyEdgeCaseTest(LinkTest):
         class Ch:
             def __init__(self, cid, perms, forbidden=False):
                 self.cid, self.perms, self.forbidden = cid, perms, forbidden
+                self.guild = types.SimpleNamespace(id=1)
 
             def permissions_for(self, member):
                 return self.perms
@@ -472,7 +487,7 @@ class ReplyEdgeCaseTest(LinkTest):
 class VoiceStateDiffTest(unittest.TestCase):
     def test_changes_of_other_members_are_not_lost(self):
         # 两条语音状态事件挤在一起:第一个处理函数重建的快照里已经有第二个人的变化
-        link = DiscordLink('token', guild_id=1)
+        link = make_link(1)[1]
         link._me_id = 99
         events = []
         link.on_user_joined = lambda u: events.append(('joined', u.session))
@@ -492,3 +507,173 @@ class VoiceStateDiffTest(unittest.TestCase):
         self.assertEqual(events[0], ('self', 5, None))  # bot 自己的变化先处理
         self.assertIn(('joined', 1), events)
         self.assertIn(('left', 2), events)
+
+
+# =========================================================================
+#   共享连接 -> 各服务器的 GuildLink
+# =========================================================================
+
+class FakeGuildLink:
+    """DiscordClient 路由用到的那部分 GuildLink 接口,记下收到了什么。"""
+
+    def __init__(self, guild_id):
+        self.guild_id = guild_id
+        self.got = []
+        self.on_autocomplete = lambda kind, ctx, current: [(f'{kind}@{guild_id}', current)]
+
+    async def _invoke(self, spec, interaction, kwargs, ephemeral=None, silent=False):
+        self.got.append(('invoke', spec, silent))
+
+    async def _on_panel_button(self, interaction, action):
+        self.got.append(('button', action))
+
+    async def on_voice_state_update(self, member, before, after):
+        self.got.append(('voice', member.id))
+
+    def _rebuild(self):
+        self.got.append(('rebuild',))
+
+    def _after_ready(self):
+        self.got.append(('ready',))
+
+    def _context(self, spec, interaction, kwargs):
+        return CommandContext(actor=interaction.user.id, name='x', username='x', command='', argument='',
+                              guild_id=self.guild_id)
+
+
+class RoutingTest(unittest.TestCase):
+    def setUp(self):
+        self.client = DiscordClient('token', home_guild_id=1)
+        self.a, self.b = FakeGuildLink(1), FakeGuildLink(2)
+        self.client._links = {1: self.a, 2: self.b}
+
+    def test_interactions_go_to_their_guild(self):
+        asyncio.run(self.client._invoke('spec', fake_interaction(guild_id=2), {}))
+        asyncio.run(self.client._on_panel_button(fake_interaction(guild_id=1), 'skip'))
+        self.assertEqual(self.a.got, [('button', 'skip')])
+        self.assertEqual(self.b.got, [('invoke', 'spec', False)])
+
+    def test_unknown_guilds_are_refused_politely(self):
+        stranger = fake_interaction(guild_id=3)
+        asyncio.run(self.client._invoke('spec', stranger, {}))
+        stranger.response.send_message.assert_awaited_once_with(dl.HOME_ONLY_REPLY, ephemeral=True)
+        del self.client._links[1]                       # 主服务器的会话还没建好
+        early = fake_interaction(guild_id=1)
+        asyncio.run(self.client._on_panel_button(early, 'skip'))
+        early.response.send_message.assert_awaited_once_with(dl.STARTING_REPLY, ephemeral=True)
+        dm = fake_interaction(guild_id=None)
+        asyncio.run(self.client._invoke('spec', dm, {}))
+        dm.response.send_message.assert_awaited_once_with(dl.HOME_ONLY_REPLY, ephemeral=True)
+
+    def test_gateway_events_go_to_their_guild(self):
+        guild = types.SimpleNamespace(id=2)
+        asyncio.run(self.client.on_voice_state_update(types.SimpleNamespace(id=5, guild=guild), None, None))
+        asyncio.run(self.client.on_guild_channel_update(None, types.SimpleNamespace(guild=guild)))
+        asyncio.run(self.client.on_guild_role_delete(types.SimpleNamespace(guild=types.SimpleNamespace(id=9))))
+        asyncio.run(self.client.on_guild_update(None, types.SimpleNamespace(id=1)))
+        self.assertEqual(self.b.got, [('voice', 5), ('rebuild',)])
+        self.assertEqual(self.a.got, [('rebuild',)])
+
+    def test_reconnect_check_runs_for_every_guild(self):
+        asyncio.run(self.client.on_shard_ready(0))
+        self.assertEqual((self.a.got, self.b.got), ([('ready',)], [('ready',)]))
+
+    def test_autocomplete_uses_the_guilds_handler(self):
+        from commands.slash import Opt, _d
+        opt = Opt('query', _d('q', 'q', 'q'), autocomplete='library')
+        complete = self.client._make_autocomplete(opt)
+        choices = asyncio.run(complete(fake_interaction(guild_id=2), 'lo'))
+        self.assertEqual([(c.name, c.value) for c in choices], [('library@2', 'lo')])
+        self.assertEqual(asyncio.run(complete(fake_interaction(guild_id=3), 'lo')), [])
+
+    def test_presence_goes_through_the_hook(self):
+        seen = []
+        client, link = make_link(7)
+        client.on_activity = lambda gid, text, state: seen.append((gid, text, state))
+        link.set_activity('Song', 'Artist')
+        link.set_activity(None)
+        self.assertEqual(seen, [(7, 'Song', 'Artist'), (7, None, '')])
+
+
+class GuildLinkIsolationTest(unittest.TestCase):
+    """GuildLink 只碰自己服务器的频道 / 消息。"""
+
+    def setUp(self):
+        self.lt = LoopThread()
+        self.client, self.link = make_link(1, self.lt.loop)
+
+    def tearDown(self):
+        self.lt.stop()
+
+    def test_adopted_panel_from_another_guild_is_ignored(self):
+        foreign = mock.MagicMock()
+        foreign.guild = types.SimpleNamespace(id=2)
+        with mock.patch.object(self.link._client, 'get_channel', return_value=foreign):
+            self.link.panel_adopt(500, 77)
+            self.assertTrue(self.link.panel_end(None))
+        foreign.get_partial_message.assert_not_called()
+        self.assertIsNone(self.link.panel_ref)
+
+    def test_expired_reply_never_goes_to_another_guild(self):
+        foreign = mock.MagicMock()
+        foreign.guild = types.SimpleNamespace(id=2)
+        foreign.send = mock.AsyncMock()
+        ctx = CommandContext(actor=42, name='Aiden', username='aiden', command='play', argument='',
+                             interaction=fake_interaction(), channel_id=500)
+        ctx.created_at -= dl.INTERACTION_TTL + 1
+        with mock.patch.object(self.link._client, 'get_channel', return_value=foreign):
+            self.link.reply(ctx, 'late')
+        foreign.send.assert_not_called()
+
+    def test_voice_lost_after_reconnect_is_reported(self):
+        moved = []
+        self.link.on_self_moved = lambda old, new: moved.append((old, new))
+        self.link._emit = lambda fn, *args: fn(*args)
+        self.link._me_id = 99
+        self.link._users = {99: dl.User(session=99, name='bot', channel_id=5)}
+        self.link._pcm.set_sink(lambda: None)
+        with mock.patch.object(self.link, '_rebuild', side_effect=lambda: setattr(self.link, '_users', {})):
+            self.link._after_ready()
+        self.assertEqual(moved, [(5, None)])
+        self.assertIsNone(self.link._pcm._sink)        # 音频输出断开,播放线程不会卡在写缓冲上
+        with mock.patch.object(self.link, '_rebuild'):
+            self.link._after_ready()                   # 没变化:不再报告
+        self.assertEqual(moved, [(5, None)])
+
+
+class ClientContractTest(unittest.TestCase):
+    """Hub 给 Web 层用的 guild_info / fetch_member 在 DiscordClient 这一侧的实现。"""
+
+    def setUp(self):
+        self.lt = LoopThread()
+        self.client = DiscordClient('token', home_guild_id=1)
+        self.client._loop = self.lt.loop
+
+    def tearDown(self):
+        self.lt.stop()
+
+    def test_guild_info(self):
+        guild = types.SimpleNamespace(id=1, name='Home', icon=types.SimpleNamespace(url='https://cdn/icon.png'))
+        bare = types.SimpleNamespace(id=2, name='Bare', icon=None)
+        guilds = {1: guild, 2: bare}
+        with mock.patch.object(self.client.client, 'get_guild', side_effect=guilds.get):
+            self.assertEqual(self.client.guild_info('1'), {'id': '1', 'name': 'Home', 'icon': 'https://cdn/icon.png'})
+            self.assertEqual(self.client.guild_info(2)['icon'], '')
+            self.assertIsNone(self.client.guild_info('3'))
+            self.assertIsNone(self.client.guild_info('nope'))
+
+    def test_fetch_member(self):
+        not_found = discord.NotFound(types.SimpleNamespace(status=404, reason='Not Found'), 'Unknown Member')
+        guild = types.SimpleNamespace(fetch_member=mock.AsyncMock())
+        with mock.patch.object(self.client.client, 'get_guild', side_effect=lambda gid: guild if gid == 1 else None):
+            self.assertIs(self.client.fetch_member('1', '42'), True)
+            guild.fetch_member.assert_awaited_once_with(42)
+            guild.fetch_member.side_effect = not_found
+            self.assertIs(self.client.fetch_member(1, 42), False)
+            guild.fetch_member.side_effect = RuntimeError('network down')
+            self.assertIsNone(self.client.fetch_member(1, 42))     # 查不了 != 不是成员
+            self.assertIs(self.client.fetch_member(5, 42), False)  # bot 不在这个服务器
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -100,6 +100,7 @@
         "prep_buffering_eta": "正在缓冲，预计 {eta} 秒后开始播放",
         "prep_connecting": "正在连接下载",
         "prep_fetching": "正在读取视频信息",
+        "presence_servers": "{count} 个服务器",
         "queue_contents": "播放列表中的曲目：",
         "queue_empty": "播放列表为空！",
         "radio": "电台",

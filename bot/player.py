@@ -683,8 +683,7 @@ class PlayerMixin(SessionQueue):
     # Main loop of the Bot
     def loop(self):
         while not self.exit and self.link.alive:
-            self.last_loop_at = time.time()
-            self._write_heartbeat()
+            self.last_loop_at = time.time()  # Hub 的看门狗 / 心跳看它
             self._autosave_playlist()
             try:
                 idle_tick = getattr(self, 'idle_tick', None)
@@ -740,19 +739,6 @@ class PlayerMixin(SessionQueue):
             self._saved_playlist_version = version
         except Exception:
             self.log.debug("bot: playlist autosave failed", exc_info=True)
-
-    def _write_heartbeat(self):
-        # Touch a heartbeat file every few seconds so an external healthcheck
-        # (e.g. Docker) can confirm the main loop is still alive.
-        now = time.time()
-        if now - self._last_heartbeat_write < 5:
-            return
-        self._last_heartbeat_write = now
-        try:
-            with open(self.heartbeat_file, "w") as f:
-                f.write(str(now))
-        except Exception:
-            pass
 
     def _send_pcm(self, pcm):
         # 发送端只缓冲 0.5 秒:写满时这里阻塞,由播放速度节流(以前是轮询缓冲大小再 sleep)。
