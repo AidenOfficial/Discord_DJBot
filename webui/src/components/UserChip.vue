@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { DISCORD_LOGIN_URL, createBindCode, fetchMe, logout, saveAlias, unbindDiscord } from '../api'
 import { useGuilds } from '../composables/useGuilds'
 import { useMe } from '../composables/useMe'
+import { embedded } from '../activity'
 import { t, tParts } from '../i18n'
 import type { Key } from '../i18n/en'
 
@@ -21,7 +22,7 @@ const initial = computed(() => (me.value?.display_name || '?').trim().charAt(0).
 const signedIn = computed(() => !!me.value?.identity)
 const viaDiscord = computed(() => me.value?.source === 'discord')
 // 配置了 Discord 登录、现在不是用 Discord 登录的:给个入口(登录完回到当前页面)
-const discordLoginHref = computed(() => me.value?.discord_login_available && !viaDiscord.value
+const discordLoginHref = computed(() => !embedded && me.value?.discord_login_available && !viaDiscord.value
   ? `${DISCORD_LOGIN_URL}?next=${encodeURIComponent(location.pathname + location.search)}`
   : null)
 
@@ -234,8 +235,9 @@ const SOURCE_LABEL: Record<string, Key> = {
         class="mt-4 flex w-full items-center justify-center rounded-lg px-3 py-1.5 text-xs font-semibold no-underline"
         :style="{ background: 'var(--c-accent)', color: 'var(--c-on-accent)' }"
       ><Icon icon="headphones" class="mr-1.5" aria-hidden="true" />{{ t('me.loginDiscord') }}</a>
+      <!-- Activity 里登录跟着 Discord,关掉 Activity 就退出 -->
       <button
-        v-if="viaDiscord"
+        v-if="viaDiscord && !embedded"
         class="mt-4 w-full cursor-pointer rounded-lg border-0 px-3 py-1.5 text-xs font-medium"
         :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
         @click="signOut"

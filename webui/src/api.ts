@@ -1,6 +1,7 @@
 // Thin typed client for the bot's JSON API (web_api.py).
 
 import { guildHeaders } from './guild'
+import { activityToken, embedded, renew } from './activity'
 
 export interface CurrentItem {
   id: string
@@ -99,11 +100,19 @@ export interface QueueResponse {
 // APIs live one level up. Relative paths keep reverse-proxy prefixes working.
 const BASE = '..'
 
-/** fetch + 当前标签页选中的服务器(X-DJ-Guild)。所有 API 请求都走这里。 */
-export function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
-  const headers = new Headers(init.headers)
-  for (const [k, v] of Object.entries(guildHeaders())) headers.set(k, v)
-  return fetch(input, { ...init, headers })
+/** fetch + 当前标签页选中的服务器(X-DJ-Guild),Activity 里再加 Bearer 令牌。所有 API 请求都走这里。 */
+export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const send = () => {
+    const headers = new Headers(init.headers)
+    for (const [k, v] of Object.entries(guildHeaders())) headers.set(k, v)
+    const token = activityToken()
+    if (token) headers.set('Authorization', `Bearer ${token}`)
+    return fetch(input, { ...init, headers })
+  }
+  const rv = await send()
+  // Activity 令牌过期 / 被撤销:重新登录一次再试(请求体是流的不能重发,比如上传分片——它自己会重试)
+  if (embedded && rv.status === 401 && !(init.body instanceof ReadableStream) && await renew()) return send()
+  return rv
 }
 
 async function getJson<T>(path: string): Promise<T> {

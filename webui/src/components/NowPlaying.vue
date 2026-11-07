@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { formatBytes, postControls, thumbnailUrl } from '../api'
 import Controls from './Controls.vue'
+import AuthImg from './AuthImg.vue'
 import AddToPlaylist from './AddToPlaylist.vue'
 import FavButton from './FavButton.vue'
 import PrepPanel from './PrepPanel.vue'
@@ -138,7 +139,7 @@ const sourceLabel = computed(() => typeLabel(current.value?.type ?? ''))
     >
       <template v-if="artSrc">
         <!-- 视频封面是 16:9:整张放进方框,后面垫一层同图的模糊放大版 -->
-        <img
+        <AuthImg
           v-if="artKind === 'video'"
           :src="artSrc"
           alt=""
@@ -146,7 +147,7 @@ const sourceLabel = computed(() => typeLabel(current.value?.type ?? ''))
           class="absolute inset-0 h-full w-full scale-125 object-cover opacity-80 blur-2xl"
         />
         <!-- 高清图还没准备好时服务器先给 100px 小图:模糊着显示,别拉伸出马赛克 -->
-        <img
+        <AuthImg
           :src="artSrc"
           alt=""
           class="relative h-full w-full transition-[filter] duration-500"

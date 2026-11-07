@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import NowPlaying from './components/NowPlaying.vue'
 import QueueList from './components/QueueList.vue'
 import SearchPage from './components/SearchPage.vue'
@@ -10,6 +10,8 @@ import UserChip from './components/UserChip.vue'
 import CachePage from './components/CachePage.vue'
 import SettingsPage from './components/SettingsPage.vue'
 import GuildSwitcher from './components/GuildSwitcher.vue'
+import ActivityMini from './components/ActivityMini.vue'
+import { embedded } from './activity'
 import { useGuilds } from './composables/useGuilds'
 import { LOCALES, locale, t } from './i18n'
 import type { Key } from './i18n/en'
@@ -43,14 +45,22 @@ function cycleTheme() {
   applyTheme(order[(order.indexOf(theme.value) + 1) % order.length]!)
 }
 
+// Activity 被缩成画中画小窗:只显示一条迷你播放器
+const pip = embedded ? window.matchMedia('(max-height: 300px)') : null
+const compact = ref(!!pip?.matches)
+function onPip(e: MediaQueryListEvent) { compact.value = e.matches }
+
 onMounted(() => {
   const saved = localStorage.getItem('theme')
   if (saved === 'light' || saved === 'dark') applyTheme(saved)
+  pip?.addEventListener('change', onPip)
 })
+onBeforeUnmount(() => pip?.removeEventListener('change', onPip))
 </script>
 
 <template>
-  <div class="flex min-h-full flex-col">
+  <ActivityMini v-if="compact" class="h-full" />
+  <div v-else class="flex min-h-full flex-col">
     <header
       class="sticky top-0 z-10 border-b backdrop-blur"
       :style="{ borderColor: 'var(--c-border)', background: 'color-mix(in srgb, var(--c-bg) 85%, transparent)' }"
@@ -64,7 +74,8 @@ onMounted(() => {
             <Icon icon="music" class="text-sm" aria-hidden="true" />
           </span>
           <span class="hidden text-base font-semibold tracking-tight sm:inline">DJ Bot</span>
-          <GuildSwitcher />
+          <!-- Activity 里服务器固定是打开它的那个 -->
+          <GuildSwitcher v-if="!embedded" />
         </div>
         <!-- 窄屏时导航换到第二行并可横向滚动 -->
         <nav

@@ -4,6 +4,7 @@ import { apiFetch, postQueue as _pq, thumbnailUrl as _tn } from '../api'
 import { formatTime, useStatus } from '../composables/useStatus'
 import AddToPlaylist from './AddToPlaylist.vue'
 import FavButton from './FavButton.vue'
+import AuthImg from './AuthImg.vue'
 import { t } from '../i18n'
 
 interface SearchResult {
@@ -121,7 +122,7 @@ const SOURCE_STYLE: Record<string, { label: string; bg: string; fg: string }> = 
         :style="{ background: 'var(--c-surface)', boxShadow: 'var(--shadow-1)' }"
       >
         <div class="h-14 w-24 shrink-0 overflow-hidden rounded-lg" :style="{ background: 'var(--c-surface-2)' }">
-          <img v-if="r.thumbnail" :src="r.thumbnail" alt="" class="h-full w-full object-cover" loading="lazy" referrerpolicy="no-referrer" />
+          <AuthImg v-if="r.thumbnail" :src="r.thumbnail" alt="" class="h-full w-full object-cover" loading="lazy" referrerpolicy="no-referrer" />
         </div>
         <div class="min-w-0 flex-1">
           <p class="line-clamp-2 text-sm font-medium" :title="r.title">{{ r.title }}</p>

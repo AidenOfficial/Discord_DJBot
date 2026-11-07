@@ -442,6 +442,18 @@ export const en = {
   'me.src.discord': "Discord login",
   'me.loginDiscord': "Log in with Discord",
   'me.logout': "Log out",
+  // ---- Discord Activity ----
+  'act.connecting': "Connecting to Discord…",
+  'act.retry': "Try again",
+  'act.failedTitle': "Could not open the control panel",
+  'act.err.not_in_voice_channel': "Join the voice channel this Activity was started in, then open it again.",
+  'act.err.not_a_member': "You are not a member of this server.",
+  'act.err.guild_not_served': "The bot is not in this server (or is not allowed to serve it).",
+  'act.err.guild_required': "Start the Activity from a voice channel in a server - the bot cannot play in DMs.",
+  'act.err.activity_disabled': "The Discord Activity is turned off on this bot.",
+  'act.err.authorize_cancelled': "Discord authorization was cancelled.",
+  'act.err.discord_auth_failed': "Discord did not accept the login. Try again.",
+  'act.err.other': "Something went wrong ({code}).",
 } satisfies Record<string, Msg>
 
 export type Key = keyof typeof en
