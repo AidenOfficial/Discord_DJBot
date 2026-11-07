@@ -17,6 +17,7 @@ from flask import Blueprint, Response, abort, jsonify, request, send_file
 import media.playlist
 import util
 import variables as var
+import web_activity
 import web_context
 import web_search
 from media import artwork, lyrics
@@ -390,6 +391,8 @@ def create_blueprint(requires_auth):
         for result in results:
             # 和 /search/add 入队后的条目同一个 id,前端据此画收藏 ♥
             result['item_id'] = _search_item_id(result)
+        # Activity 里封面经 /api/thumbnail/external 转发,只认这里登记过的地址
+        web_activity.remember_images(r.get('thumbnail') for r in results)
         return jsonify({'query': query, 'results': results, 'failed': failed})
 
     @api.route('/search/add', methods=['POST'])

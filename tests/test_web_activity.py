@@ -65,6 +65,7 @@ def env(monkeypatch, tmp_path):
     import web_auth_discord
     web_auth_discord._cache.clear()
     web_activity._image_cache.clear()
+    web_activity._known_images.clear()
     interface.web.secret_key = 'test'
     interface.bad_access_count.clear()
     interface.banned_ip.clear()
@@ -433,6 +434,11 @@ def test_image_proxy(env, monkeypatch):
     # requests 模块和 Discord 登录共用:先拿令牌再换掉 get
     monkeypatch.setattr(env.mod.requests, 'get', fake_get)
     path = '/api/thumbnail/external?url='
+    # 没登记过的地址(不是服务端发出去的):白名单图床也不取
+    assert env.client.get(path + 'https://i.ytimg.com/vi/a/1.jpg', headers=bearer(token)).status_code == 404
+    assert calls == []
+    env.mod.remember_images(list(responses) + ['https://example.com/x.jpg', '', None])
+    assert env.mod.known_image('https://example.com/x.jpg') is None
     rv = env.client.get(path + 'https://i.ytimg.com/vi/a/1.jpg', headers=bearer(token))
     assert rv.status_code == 200
     assert rv.data == b'\xff\xd8jpeg'
@@ -452,7 +458,24 @@ def test_image_proxy_size_limit(env, monkeypatch):
     big = FakeImageResp(data=b'x' * (env.mod.IMAGE_MAX_BYTES + 1))
     token = token_for(env.client)
     monkeypatch.setattr(env.mod.requests, 'get', lambda url, **kw: big)
+    env.mod.remember_images(['https://i.ytimg.com/big.jpg'])
     rv = env.client.get('/api/thumbnail/external?url=https://i.ytimg.com/big.jpg', headers=bearer(token))
     assert rv.status_code == 404
     assert big.closed
+
+
+def test_search_registers_result_thumbnails(env, monkeypatch):
+    import web_search
+    results = [{'source': 'youtube', 'id': 'abc', 'url': 'https://www.youtube.com/watch?v=abc', 'title': 't',
+                'uploader': '', 'duration': 1, 'thumbnail': 'https://i.ytimg.com/vi/abc/mqdefault.jpg'}]
+    monkeypatch.setattr(web_search, 'unified_search', lambda q, limit: ([dict(r) for r in results], []))
+    token = token_for(env.client)
+    assert env.client.get('/api/search?q=hello', headers=bearer(token)).status_code == 200
+    assert env.mod.known_image('https://i.ytimg.com/vi/abc/mqdefault.jpg') == 'https://i.ytimg.com/vi/abc/mqdefault.jpg'
+    # Activity 没开就不记
+    env.mod._known_images.clear()
+    env.config.set('webinterface', 'activity_enabled', 'False')
+    env.config.set('webinterface', 'auth_method', 'none')
+    env.client.get('/api/search?q=hello')
+    assert env.mod.known_image('https://i.ytimg.com/vi/abc/mqdefault.jpg') is None
 

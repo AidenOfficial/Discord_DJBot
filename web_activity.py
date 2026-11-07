@@ -18,6 +18,7 @@ Activity 只是个遥控器:声音照旧由 bot 推进语音频道,iframe 里显
 - [webinterface] activity_enabled = False 时这些都不存在(接口 404,Bearer 一律不认)。
 """
 
+import hashlib
 import logging
 import secrets
 import threading
@@ -337,6 +338,38 @@ def allowed_image_url(url):
     return safe_image_url(url) is not None
 
 
+# 代理只取服务端自己发出去过的图片地址(搜索结果的封面……):请求里的 url 只用来查表,
+# 真正去取的是登记时存下的那一份,所以没法让服务器去请求白名单图床上任意的路径。
+KNOWN_IMAGES_MAX = 5000
+_known_images = OrderedDict()  # sha256(前端拿到的地址) -> safe_image_url() 的结果
+
+
+def _image_key(url):
+    return hashlib.sha256((url or '').encode('utf-8', 'replace')).hexdigest()
+
+
+def remember_images(urls):
+    """登记要发给前端的外部图片地址(Activity 没开就不用记)。"""
+    if not enabled():
+        return
+    with _image_lock:
+        for url in urls:
+            safe = safe_image_url(url) if url else None
+            if safe is None:
+                continue
+            key = _image_key(url)
+            _known_images[key] = safe
+            _known_images.move_to_end(key)
+        while len(_known_images) > KNOWN_IMAGES_MAX:
+            _known_images.popitem(last=False)
+
+
+def known_image(url):
+    """登记过 → 当时存下的地址;没登记过 → None。"""
+    with _image_lock:
+        return _known_images.get(_image_key(url))
+
+
 def _fetch_image(url):
     """url 必须是 safe_image_url() 的结果。"""
     with _image_lock:
@@ -469,9 +502,12 @@ def create_blueprint(requires_auth):
     @api.route('/thumbnail/external', methods=['GET'])
     @requires_auth
     def external_thumbnail():
-        url = safe_image_url(request.args.get('url', ''))
-        if url is None:
+        wanted = request.args.get('url', '')
+        if not allowed_image_url(wanted):
             abort(400)
+        url = known_image(wanted)
+        if url is None:
+            abort(404)  # 不是我们发出去的地址(或者重启后表空了,前端重新搜索就有)
         result = _fetch_image(url)
         if result is None:
             abort(404)
