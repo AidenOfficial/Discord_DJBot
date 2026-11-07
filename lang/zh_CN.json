@@ -156,6 +156,14 @@
         "token": "令牌",
         "token_required": "需要登录令牌",
         "token_required_message": "你现在在访问{name}的网络控制面板。\n根据设置，你需要一个令牌才能登录。<br />\n请在 Discord 里使用 \"{command}\" 获取你的登录令牌。",
-        "submit": "提交"
+        "submit": "提交",
+        "login_with_discord": "用 Discord 登录",
+        "logout": "退出登录",
+        "logged_out": "已退出登录",
+        "logged_out_message": "你已退出网页控制面板。",
+        "discord_login_failed": "Discord 登录失败",
+        "discord_login_failed_message": "登录没有完成(可能取消了、链接过期了,或者 Discord 没有响应)。请重试。",
+        "discord_not_member": "无权访问",
+        "discord_not_member_message": "你的 Discord 账号不在这个 bot 服务的服务器里。加入服务器后再试,或换一个账号登录。"
     }
 }

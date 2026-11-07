@@ -156,6 +156,14 @@
         "token": "Token",
         "token_required": "Token Required",
         "token_required_message": "You are accessing the web interface of {name}.\nA token is needed to grant you access.<br />\nPlease use \"{command}\" in Discord to get one.",
-        "submit": "Submit"
+        "submit": "Submit",
+        "login_with_discord": "Log in with Discord",
+        "logout": "Log out",
+        "logged_out": "Logged out",
+        "logged_out_message": "You have been logged out of the web interface.",
+        "discord_login_failed": "Discord login failed",
+        "discord_login_failed_message": "The login could not be completed (it was cancelled, expired or Discord did not respond). Please try again.",
+        "discord_not_member": "Access denied",
+        "discord_not_member_message": "Your Discord account is not in a server this bot serves. Join the server, or log in with another account."
     }
 }

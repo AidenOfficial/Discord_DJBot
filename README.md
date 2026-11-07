@@ -74,7 +74,7 @@ It is the Discord port of [Mumble-DJBot](https://github.com/AidenOfficial/Mumble
 
 ### Personal playlists
 
-- Users are identified by the email address that Cloudflare Access passes through, and can set a display alias.
+- Users are identified by the email address that Cloudflare Access passes through, or by their Discord account when they [log in with Discord](#log-in-with-discord), and can set a display alias.
 - Each user has their own playlists, which can be played, shuffled or appended to the queue.
 - Playlists can be imported from YouTube, NetEase Cloud Music, QQ Music and Spotify.
 - A Discord account can be linked to the web identity with a one-time code (`/bind`). Linked users can use their playlists from Discord with `/mylist` and `/fav`.
@@ -181,6 +181,26 @@ The recommended way to expose the web interface is Cloudflare Tunnel with Cloudf
 
 For detailed instructions, see [`deploy/WEBUI.md`](deploy/WEBUI.md).
 
+### Log in with Discord
+
+The web interface can also sign users in with their Discord account (OAuth2, scopes `identify guilds`). Someone who already linked their account with `/bind` keeps their playlists and favorites. Everyone else gets a new web identity tied to their Discord account, so `/bind` is no longer needed.
+
+1. In the [Developer Portal](https://discord.com/developers/applications), open your application → **OAuth2** and add the redirect `<public_url>/auth/discord/callback` (for example `https://music.example.com/auth/discord/callback`).
+2. Copy the **Client ID** and **Client Secret** into `configuration.ini`:
+
+   ```ini
+   [webinterface]
+   auth_method = discord        ; require Discord login (or keep token/none and use it optionally)
+   discord_client_id = <client id>
+   discord_client_secret =      ; or set DISCORD_CLIENT_SECRET in .env instead
+   public_url = https://music.example.com
+   ```
+
+3. Restart the bot. With `auth_method = discord`, unauthenticated pages redirect to Discord, `/api/*` returns 401, and only accounts that are in a server the bot serves are let in. With `auth_method = token`, the token page shows a **Log in with Discord** button as an alternative.
+
+> [!CAUTION]
+> The client secret is a credential. Never commit it to git. The `DISCORD_CLIENT_SECRET` environment variable overrides the ini value.
+
 ## Security Considerations
 
 > [!WARNING]
@@ -189,7 +209,7 @@ For detailed instructions, see [`deploy/WEBUI.md`](deploy/WEBUI.md).
 - **Keep the bot token secret.** If it leaks, reset it in the Developer Portal immediately.
 - **Do not expose port 8181** to the internet or to untrusted networks.
 - **Enable Access JWT verification** by setting `access_team_domain` and `access_aud` under `[webinterface]`, so traffic that bypasses the tunnel cannot impersonate a user.
-- **Change `flask_secret`** to a long random value if you switch to `auth_method = token`, since it signs the session cookies.
+- **`flask_secret` signs the session cookies** (`token` and `discord` logins). If you leave it unset, a random secret is generated once and kept in the settings database. If you set it, use a long random value.
 - Administrators and bans are keyed by Discord user and role IDs, which cannot be spoofed by changing a nickname.
 
 ## Usage
