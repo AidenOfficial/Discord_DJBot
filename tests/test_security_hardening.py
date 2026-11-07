@@ -591,3 +591,16 @@ def test_default_config_lists_new_options(config):
     assert config.getboolean('webinterface', 'rate_limit')
     assert config.getint('webinterface', 'ban_minutes') == 15
     assert config.get('webinterface', 'frame_ancestors') == web_security.DEFAULT_FRAME_ANCESTORS
+
+
+def test_activity_endpoints_are_rate_limited():
+    # 合并加固和 Activity 后:换令牌(登录前,按 IP 且放宽)和外部图片代理(按身份)都有限流
+    import web_security
+    assert web_security.RULES['activity_token'] == (('ip', 120, 60),)
+    assert web_security.RULES['image_proxy'][0][0] == 'client'
+    import web_activity
+    from interface import web
+    views = {rule.rule: web.view_functions[rule.endpoint] for rule in web.url_map.iter_rules()}
+    for path in ('/api/activity/token', '/api/thumbnail/external'):
+        assert hasattr(views[path], '__wrapped__'), path
+    assert web_activity  # 模块已加载

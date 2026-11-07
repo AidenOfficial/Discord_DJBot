@@ -3,6 +3,7 @@ import { thumbnailUrl, type QueueAction, type QueueItem } from '../api'
 import { formatTime } from '../composables/useStatus'
 import AddToPlaylist from './AddToPlaylist.vue'
 import FavButton from './FavButton.vue'
+import AuthImg from './AuthImg.vue'
 import { t, typeLabel } from '../i18n'
 
 // 队列里的一行。拖拽事件由父组件挂在根元素上(属性透传)。
@@ -37,7 +38,7 @@ const emit = defineEmits<{ act: [body: QueueAction] }>()
     <Icon icon="grip-vertical" class="shrink-0 select-none text-xs" :style="{ color: 'var(--c-text-faint)' }" aria-hidden="true" />
     <!-- art -->
     <div class="h-10 w-10 shrink-0 overflow-hidden rounded-lg" :style="{ background: 'var(--c-surface-2)' }">
-      <img v-if="props.item.has_thumbnail" :src="thumbnailUrl(props.item.id, { small: true })" alt="" class="h-full w-full object-cover" loading="lazy" />
+      <AuthImg v-if="props.item.has_thumbnail" :src="thumbnailUrl(props.item.id, { small: true })" alt="" class="h-full w-full object-cover" loading="lazy" />
       <div v-else class="flex h-full w-full items-center justify-center opacity-40">
         <Icon icon="music" />
       </div>

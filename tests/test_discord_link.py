@@ -406,15 +406,28 @@ class FakeSyncState:
 
 
 class CommandSyncTest(unittest.TestCase):
-    def make(self, state, named=None, home=None, **kw):
+    def make(self, state, named=None, home=None, remote=(), **kw):
+        """remote:Discord 上现有的全局命令(get_global_commands 的返回)。"""
         client = DiscordClient('token', home_guild_id=home)
         client.register_commands(named or all_specs(), sync_state=state, **kw)
+        client.client._connection.application_id = 777
         client._tree.sync = mock.AsyncMock(return_value=[])
+        client.client.http.get_global_commands = mock.AsyncMock(return_value=[dict(c) for c in remote])
+        client.client.http.bulk_upsert_global_commands = mock.AsyncMock(
+            side_effect=lambda app_id, payload: list(payload))
         return client
 
     @staticmethod
     def synced(client):
-        return [getattr(c.kwargs.get('guild'), 'id', None) for c in client._tree.sync.await_args_list]
+        """同步到了哪些地方(None = 全局),按调用顺序。"""
+        targets = [None] * client.client.http.bulk_upsert_global_commands.await_count
+        return targets + [c.kwargs['guild'].id for c in client._tree.sync.await_args_list]
+
+    @staticmethod
+    def global_payload(client):
+        call = client.client.http.bulk_upsert_global_commands.await_args
+        assert call.args[0] == 777
+        return call.kwargs['payload']
 
     def test_sync_only_when_the_commands_changed(self):
         state = FakeSyncState()
@@ -433,7 +446,7 @@ class CommandSyncTest(unittest.TestCase):
     def test_failed_sync_is_retried_on_next_start(self):
         state = FakeSyncState()
         client = self.make(state)
-        client._tree.sync = mock.AsyncMock(side_effect=RuntimeError('429'))
+        client.client.http.bulk_upsert_global_commands = mock.AsyncMock(side_effect=RuntimeError('429'))
         asyncio.run(client._sync_commands())
         self.assertEqual(state.data, {})
         retry = self.make(state)
@@ -449,6 +462,59 @@ class CommandSyncTest(unittest.TestCase):
         again = self.make(state, home=5)
         asyncio.run(again._sync_commands())
         again._tree.sync.assert_not_awaited()
+
+    # ---- Activity 的入口命令(PRIMARY_ENTRY_POINT,type 4)-------------------------
+
+    ENTRY = {'id': '1', 'application_id': '777', 'version': '9', 'name': 'launch', 'type': 4,
+             'handler': 2, 'description': 'Launch the panel', 'integration_types': [0, 1],
+             'contexts': [0, 1, 2], 'name_localizations': None, 'default_member_permissions': None}
+
+    def test_global_sync_keeps_the_entry_point_command(self):
+        # Discord 上已经有入口命令(开 Activity 时 Portal 自动建的):整体覆盖时原样带上,不然会被删 / 被拒
+        remote = [{'id': '2', 'name': 'play', 'type': 1, 'description': 'old'}, self.ENTRY]
+        client = self.make(FakeSyncState(), remote=remote)
+        asyncio.run(client._sync_commands())
+        payload = self.global_payload(client)
+        entries = [p for p in payload if p.get('type') == dl.ENTRY_POINT_TYPE]
+        self.assertEqual(entries, [{'name': 'launch', 'type': 4, 'handler': 2, 'description': 'Launch the panel',
+                                    'integration_types': [0, 1], 'contexts': [0, 1, 2]}])
+        # 其余是我们自己的斜杠命令,旧的 play 被新的替换,不重复
+        self.assertEqual(sum(1 for p in payload if p['name'] == 'play'), 1)
+        self.assertGreater(len(payload), 10)
+
+    def test_entry_point_kept_even_with_activity_disabled(self):
+        client = self.make(FakeSyncState(), remote=[self.ENTRY], entry_point=False)
+        asyncio.run(client._sync_commands())
+        self.assertEqual(sum(1 for p in self.global_payload(client) if p.get('type') == 4), 1)
+
+    def test_default_entry_point_registered_when_activity_enabled(self):
+        client = self.make(FakeSyncState(), remote=[], entry_point=True)
+        asyncio.run(client._sync_commands())
+        entries = [p for p in self.global_payload(client) if p.get('type') == 4]
+        self.assertEqual(entries, [dl.default_entry_point()])
+        self.assertEqual(entries[0]['handler'], dl.ENTRY_POINT_HANDLER_DISCORD)
+
+    def test_no_entry_point_without_activity(self):
+        client = self.make(FakeSyncState(), remote=[])
+        asyncio.run(client._sync_commands())
+        self.assertFalse(any(p.get('type') == 4 for p in self.global_payload(client)))
+
+    def test_turning_activity_on_triggers_a_resync(self):
+        state = FakeSyncState()
+        asyncio.run(self.make(state)._sync_commands())
+        enabled = self.make(state, entry_point=True)
+        asyncio.run(enabled._sync_commands())
+        self.assertEqual(self.synced(enabled), [None])
+        again = self.make(state, entry_point=True)
+        asyncio.run(again._sync_commands())
+        self.assertEqual(self.synced(again), [])
+
+    def test_guild_sync_never_carries_the_entry_point(self):
+        # 入口命令只能是全局的;开发服务器那份照旧走 discord.py 的 sync
+        client = self.make(FakeSyncState(), remote=[self.ENTRY], dev_guild_id=888)
+        asyncio.run(client._sync_commands())
+        self.assertEqual(self.synced(client), [None, 888])
+        client._tree.sync.assert_awaited_once()
 
 
 class FakeVoiceClient:

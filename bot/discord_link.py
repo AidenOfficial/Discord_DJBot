@@ -298,6 +298,32 @@ class _Translator(app_commands.Translator):
 #: 设置库(botamusique 表)里记"上次同步的命令内容摘要"的 section;键是 "<应用 ID>:<服务器 ID 或 global>"
 SYNC_SECTION = 'command_sync'
 
+#: Activity 的入口命令(PRIMARY_ENTRY_POINT)。discord.py 的命令树不认这种类型,全局同步是整体覆盖,
+#: 不带上它的话 Discord 要么删掉它,要么直接拒绝(50240:不能删除主入口命令),所以同步时自己拼进去。
+ENTRY_POINT_TYPE = 4
+#: handler 2 = DISCORD_LAUNCH_ACTIVITY:由 Discord 直接打开 Activity,bot 不用回应交互
+ENTRY_POINT_HANDLER_DISCORD = 2
+_ENTRY_POINT_FIELDS = ('name', 'name_localizations', 'description', 'description_localizations', 'type',
+                       'handler', 'integration_types', 'contexts', 'default_member_permissions', 'nsfw')
+
+
+def default_entry_point():
+    """开了 Activity、Discord 上又还没有入口命令时登记的那条(在 Developer Portal 里也能改)。"""
+    return {
+        'name': 'launch',
+        'description': 'Open the DJ Bot control panel',
+        'description_localizations': {'zh-CN': '打开 DJ Bot 控制面板', 'ja': 'DJ Bot のコントロールパネルを開く'},
+        'type': ENTRY_POINT_TYPE,
+        'handler': ENTRY_POINT_HANDLER_DISCORD,
+        'integration_types': [0],   # 装在服务器里
+        'contexts': [0],            # 只在服务器里(bot 没法在私信里放歌)
+    }
+
+
+def entry_point_payload(command):
+    """从 Discord 返回的命令里挑出重新提交需要的字段(保留名字、本地化和 Portal 里的设置)。"""
+    return {k: command[k] for k in _ENTRY_POINT_FIELDS if command.get(k) is not None}
+
 
 def _default_permissions(spec):
     """命令默认谁看得到(服务器可以在"服务器设置 → 整合"里改)。执行时 bot 还会再查一次权限。"""
@@ -383,6 +409,7 @@ class DiscordClient:
         self.owner_guild_id: Optional[int] = None
         self.dev_guild_id: Optional[int] = None
         self._sync_state: Any = None
+        self.entry_point = False
         #: GuildLink.set_activity 汇总到这里(Hub 决定账号显示什么);没设置就直接改状态
         self.on_activity: Optional[Callable[[Optional[int], Optional[str], str], None]] = None
         #: 交互来自还没有会话的服务器:请 Hub 建一个(在事件循环里调用,必须马上返回)。
@@ -394,14 +421,17 @@ class DiscordClient:
 
     # ---- 生命周期 ----------------------------------------------------------
 
-    def register_commands(self, named_specs, owner_guild_id=None, dev_guild_id=None, sync_state=None):
+    def register_commands(self, named_specs, owner_guild_id=None, dev_guild_id=None, sync_state=None,
+                          entry_point=False):
         """[(slash 名, Spec)];必须在 connect() 之前调用。
 
         命令注册成全局的(每个服务器都有)。bot 主人命令(spec.owner_only)只注册在 owner_guild_id;
         没配就也注册成全局的,但默认只有"管理员"权限的人看得到(执行时 bot 还会核对是不是主人)。
         dev_guild_id:另外同步一份到这个服务器,改了命令立刻生效(全局命令要等 Discord 传播)。
-        sync_state:有 get/set 的设置库(database.SettingsDatabase),记着上次同步的内容,没变就不同步。"""
+        sync_state:有 get/set 的设置库(database.SettingsDatabase),记着上次同步的内容,没变就不同步。
+        entry_point:开了 Discord Activity。Discord 上还没有入口命令时登记一条(已有的总是原样保留)。"""
         self._specs = list(named_specs)
+        self.entry_point = bool(entry_point)
         self._spec_by_key = {spec.key: (name, spec) for name, spec in self._specs}
         self.owner_guild_id = int(owner_guild_id) if owner_guild_id else None
         self.dev_guild_id = int(dev_guild_id) if dev_guild_id else None
@@ -526,6 +556,21 @@ class DiscordClient:
                 count += 1
         return count
 
+    def voice_channel_of(self, guild_id, user_id):
+        """按网关的语音状态,这个用户在服务器的哪个语音频道(int id);不在语音里 → None。
+        还没有会话的服务器也能查。"""
+        try:
+            guild = self.client.get_guild(int(guild_id))
+            uid = int(user_id)
+        except (TypeError, ValueError):
+            return None
+        if guild is None:
+            return None
+        for channel in list(guild.voice_channels) + list(guild.stage_channels):
+            if uid in channel.voice_states:
+                return channel.id
+        return None
+
     def guild_info(self, guild_id):
         """{'id', 'name', 'icon'}(icon 是 CDN 地址,没有图标为 '');bot 不在这个服务器返回 None。"""
         try:
@@ -647,6 +692,9 @@ class DiscordClient:
         payload = [await command.get_translated_payload(self._tree, translator)
                    for command in self._tree.get_commands(guild=guild)]
         payload.sort(key=lambda p: p.get('name', ''))
+        if guild_id is None:
+            # 开 / 关 Activity 也算变了:要登记入口命令
+            payload.append({'entry_point': self.entry_point})
         return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode('utf-8')).hexdigest()
 
     def _sync_key(self, guild_id):
@@ -664,12 +712,33 @@ class DiscordClient:
                 if state is not None and state.get(SYNC_SECTION, key, fallback=None) == digest:
                     log.info("discord: slash commands for %s unchanged, not syncing", where)
                     continue
-                synced = await self._tree.sync(guild=discord.Object(id=guild_id) if guild_id else None)
+                if guild_id:
+                    synced = await self._tree.sync(guild=discord.Object(id=guild_id))
+                else:
+                    synced = await self._sync_global()
                 if state is not None:
                     state.set(SYNC_SECTION, key, digest)
                 log.info("discord: synced %d slash commands to %s", len(synced), where)
             except Exception:
                 log.exception("discord: could not sync slash commands to %s", where)
+
+    async def _sync_global(self):
+        """和 CommandTree.sync(guild=None) 一样整体覆盖全局命令,但先读一次 Discord 上现有的,
+        把 Activity 的入口命令一起提交上去;没有入口命令而开了 Activity 就登记默认的那条。"""
+        app_id = self.client.application_id
+        if app_id is None:
+            raise app_commands.MissingApplicationID
+        translator = self._tree.translator or _Translator()
+        payload = [await command.get_translated_payload(self._tree, translator)
+                   for command in self._tree.get_commands()]
+        http = self.client.http
+        existing = await http.get_global_commands(app_id)
+        entry = [entry_point_payload(c) for c in existing or [] if c.get('type') == ENTRY_POINT_TYPE]
+        if not entry and self.entry_point:
+            entry = [default_entry_point()]
+            log.info("discord: registering the Activity entry point command /%s", entry[0]['name'])
+        payload.extend(entry)
+        return await http.bulk_upsert_global_commands(app_id, payload=payload)
 
     async def on_shard_ready(self, shard_id):
         # 单个分片重新 IDENTIFY 时不一定再触发 on_ready

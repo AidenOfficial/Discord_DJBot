@@ -420,4 +420,16 @@ export const zhCN: Record<Key, Msg> = {
   'me.src.discord': "Discord 登录",
   'me.loginDiscord': "用 Discord 登录",
   'me.logout': "退出登录",
+  // ---- Discord Activity ----
+  'act.connecting': "正在连接 Discord…",
+  'act.retry': "重试",
+  'act.failedTitle': "打不开控制面板",
+  'act.err.not_in_voice_channel': "请先进入启动这个 Activity 的语音频道,再重新打开。",
+  'act.err.not_a_member': "你不是这个服务器的成员。",
+  'act.err.guild_not_served': "bot 不在这个服务器(或不允许服务这个服务器)。",
+  'act.err.guild_required': "请在服务器的语音频道里启动 Activity,bot 没法在私信里放歌。",
+  'act.err.activity_disabled': "这个 bot 没有开启 Discord Activity。",
+  'act.err.authorize_cancelled': "Discord 授权被取消了。",
+  'act.err.discord_auth_failed': "Discord 没有通过这次登录,请重试。",
+  'act.err.other': "出错了({code})。",
 }

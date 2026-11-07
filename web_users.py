@@ -115,7 +115,9 @@ def resolve_identity(auth_user=None):
 
     email = None
     source = 'anonymous'
-    if jwt_verification_enabled():
+    # Activity 经 Discord 的代理访问,带不了 Cloudflare Access 的 JWT;Bearer 令牌本身已经验过
+    activity = getattr(g, 'activity_claims', None) is not None
+    if jwt_verification_enabled() and not activity:
         token = request.headers.get('Cf-Access-Jwt-Assertion', '')
         if not token:
             abort(403)
@@ -125,7 +127,7 @@ def resolve_identity(auth_user=None):
             log.warning("web: rejected Cloudflare Access JWT from %s: %s", request.remote_addr, e)
             abort(403)
         source = 'cloudflare-jwt'
-    else:
+    elif not activity:
         header = var.config.get('webinterface', 'access_email_header',
                                 fallback='Cf-Access-Authenticated-User-Email').strip()
         if header:

@@ -71,6 +71,7 @@ Discord-DJBot 进入 Discord 服务器的语音频道，播放来自 YouTube、B
 - **曲库：** 支持浏览与分片上传，单文件默认上限 4 GB，可断点续传；视频文件只保留音轨。
 - **缓存：** 显示存储占用与播放次数，常听的曲目可固定或转存至曲库。
 - **统计：** 最常播放的曲目、点歌最多的用户、最活跃的时段以及最常被跳过的曲目。
+- **Discord Activity：** 同一个面板可以在 Discord 的语音频道里直接打开（见 [Discord Activity](#discord-activity)）。
 
 ### 个人歌单
 
@@ -200,6 +201,24 @@ Web 界面也可以用 Discord 账号登录（OAuth2，scope 为 `identify guild
 
 > [!CAUTION]
 > Client Secret 是凭据，绝不能提交到 git。环境变量 `DISCORD_CLIENT_SECRET` 优先于 ini 里的值。
+
+### Discord Activity
+
+控制面板也能在 Discord 里打开：在语音频道点 **Activities（火箭图标）**，就能看到这个服务器的队列、搜索和播放控制。声音照旧由 bot 推进语音频道，Activity 只是遥控器。
+
+1. 在 [Developer Portal](https://discord.com/developers/applications) 的 **Activities → Settings** 打开 **Enable Activities**，Discord 会建好入口命令（`Launch`）。
+2. **Activities → URL Mappings**：Root Mapping 设成 `/` → 公网主机名（例如 `music.example.com`，不带 `https://` 和路径）。
+3. **OAuth2**：和"用 Discord 登录"用同一对 Client ID / Client Secret；Redirects 至少要有一条，`<public_url>/auth/discord/callback` 就行。
+4. `configuration.ini`：
+
+   ```ini
+   [webinterface]
+   activity_enabled = True
+   discord_client_id = <client id>
+   public_url = https://music.example.com
+   ```
+
+不管 `auth_method` 设的是什么，Activity 都用自己的短期令牌登录。签发令牌前，服务端会核对用户确实是这个服务器的成员，并且此刻就在这个语音频道里。bot 同步全局斜杠命令时会保留入口命令，因为 Discord 会拒绝删掉它的整体覆盖。Discord 的代理要能访问公网主机名，所以它不能放在 Cloudflare Access 的交互登录后面。完整步骤和上线前检查清单见 [deploy/WEBUI.md](deploy/WEBUI.md#discord-activity在-discord-里打开控制面板可选)。
 
 ## 安全注意事项
 

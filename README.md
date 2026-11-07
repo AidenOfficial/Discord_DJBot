@@ -71,6 +71,7 @@ It is the Discord port of [Mumble-DJBot](https://github.com/AidenOfficial/Mumble
 - **Library:** browsing and resumable chunked uploads (up to 4 GB per file by default). Audio is extracted from video files.
 - **Cache:** storage use and play counts; frequently played tracks can be pinned or saved to the library.
 - **Statistics:** most played tracks, top requesters, busiest hours and most skipped tracks.
+- **Discord Activity:** the same panel opens inside Discord from the voice channel (see [Discord Activity](#discord-activity)).
 
 ### Personal playlists
 
@@ -200,6 +201,24 @@ The web interface can also sign users in with their Discord account (OAuth2, sco
 
 > [!CAUTION]
 > The client secret is a credential. Never commit it to git. The `DISCORD_CLIENT_SECRET` environment variable overrides the ini value.
+
+### Discord Activity
+
+The control panel can also open inside Discord: users click the **Activities** (rocket) button in a voice channel and get the queue, search and playback controls for that server. Audio still comes from the bot in the voice channel; the Activity is only a remote control.
+
+1. In the [Developer Portal](https://discord.com/developers/applications), open **Activities → Settings** and turn on **Enable Activities**. This creates the Entry Point command (`Launch`).
+2. **Activities → URL Mappings**: set the root mapping `/` to your public hostname (for example `music.example.com`, with no scheme or path).
+3. **OAuth2**: keep the same Client ID and Client Secret as Discord login. At least one redirect must exist; `<public_url>/auth/discord/callback` is enough.
+4. In `configuration.ini`:
+
+   ```ini
+   [webinterface]
+   activity_enabled = True
+   discord_client_id = <client id>
+   public_url = https://music.example.com
+   ```
+
+The Activity signs in with its own short-lived tokens, whatever `auth_method` is set to. Before issuing a token, the server checks that the user really is in that server and in that voice channel right now. When the bot syncs its global slash commands, it keeps the Entry Point command, because Discord rejects a bulk overwrite that drops it. The public hostname must be reachable by Discord's proxy, so it cannot sit behind an interactive Cloudflare Access login. For the full setup and the pre-launch checklist, see [deploy/WEBUI.md](deploy/WEBUI.md#discord-activity在-discord-里打开控制面板可选).
 
 ## Security Considerations
 

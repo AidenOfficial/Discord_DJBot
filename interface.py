@@ -54,6 +54,7 @@ class ReverseProxied(object):
         return self.app(environ, start_response)
 
 
+import web_activity
 import web_api
 import web_auth_discord
 import web_cache
@@ -154,6 +155,15 @@ def _with_identity(f, auth_user, args, kwargs):
 def requires_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        # Discord Activity 的 Bearer 令牌:开了 Activity 就认,不管 auth_method 是什么。
+        # 这里不按 IP 封禁:Activity 的请求都来自 Discord 代理的 IP,封一个 IP 等于封所有人;
+        # 输错令牌 / 密码的 IP 封禁只拦登录尝试(见下面各分支)
+        bearer = web_activity.check_bearer()
+        if bearer is True:
+            return _with_identity(f, None, args, kwargs)
+        if bearer is not None:
+            return bearer
+
         auth_method = var.config.get("webinterface", "auth_method")
 
         if auth_method == 'discord':
@@ -228,6 +238,20 @@ def _security_headers(response):
     return web_security.apply_security_headers(response)
 
 
+def requires_auth_or_activity_shell(f):
+    """页面外壳(index.html、打包的静态资源):Activity 的 iframe 第一次打开时还没有令牌,放行;
+    其余照旧要登录。"""
+    authed = requires_auth(f)
+
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if web_activity.serves_shell():
+            return f(*args, **kwargs)
+        return authed(*args, **kwargs)
+
+    return decorated
+
+
 # 用 Discord 登录(/auth/discord/login、/auth/discord/callback、/auth/logout),不经过 requires_auth
 web.register_blueprint(web_auth_discord.create_blueprint())
 # JSON API for the new web interface (all routes under /api/)
@@ -239,6 +263,8 @@ web.register_blueprint(web_channels.create_blueprint(requires_auth))
 web.register_blueprint(web_guilds.create_blueprint(requires_auth))
 web.register_blueprint(web_library.create_blueprint(requires_auth))
 web.register_blueprint(web_logs.create_blueprint(requires_auth))
+# Discord Activity:/api/activity/*(换令牌)和外部图片代理 /api/thumbnail/external
+web.register_blueprint(web_activity.create_blueprint(requires_auth))
 
 
 # The web interface: webui/ (Vue + Vite), built into webui/dist.
@@ -246,7 +272,7 @@ webui_dist = os.path.join(root_dir, "webui", "dist")
 
 
 @web.route("/", methods=['GET'])
-@requires_auth
+@requires_auth_or_activity_shell
 def index():
     if not os.path.isfile(os.path.join(webui_dist, "index.html")):
         return "Web interface not built (run `npm ci && npm run build` in webui/).", 404
@@ -254,7 +280,7 @@ def index():
 
 
 @web.route("/assets/<path:path>", methods=['GET'])
-@requires_auth
+@requires_auth_or_activity_shell
 def webui_assets(path):
     return send_from_directory(os.path.join(webui_dist, "assets"), path)
 

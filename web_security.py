@@ -93,6 +93,11 @@ RULES = {
     'discord_auth': (('client', 30, 60),),
     # 令牌校验(?token=):登录前,只能按 IP
     'token': (('ip', 30, 60),),
+    # Activity 换令牌(code -> 我们的令牌,每次要调 2~3 次 Discord API):还没身份,只能按 IP,
+    # 而 Activity 的请求都来自 Discord 代理的少数几个 IP,所以上限放宽,只防刷
+    'activity_token': (('ip', 120, 60),),
+    # Activity 里的外部图片代理(搜索结果封面等):每张图都是一次出站请求
+    'image_proxy': (('client', 240, 60),),
 }
 
 PRUNE_EVERY = 500

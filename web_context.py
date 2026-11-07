@@ -9,6 +9,8 @@ Web 代码不直接用 var.bot / var.playlist,统一从这里取。
     * 用 Discord 登录 → 自己所在的服务器 ∩ bot 所在的服务器;有 管理员 / 管理服务器 权限的能管理;
     * 其他登录方式(令牌 / 密码 / Cloudflare)但 /bind 过 Discord → 自己是成员的服务器,不能管理;
     * 令牌用户 → 发 /web 的那个服务器(web_token_guild 里记着;之前发的令牌算主服务器);
+    * Discord Activity 的 Bearer 令牌 → 和 Discord 登录一样,另外打开 Activity 的服务器一定在内,
+      也是默认服务器;
     * 都不是 → 没有。
 - 没有 Hub(var.hub 为 None,旧的单服务器部署 / 测试)时只有 var.bot 一个会话,
   所有通过了登录门禁的人照旧都能操作它,请求头里的服务器不看。
@@ -24,6 +26,7 @@ from flask import abort, g, has_request_context, jsonify, make_response, request
 from flask import session as flask_session
 
 import variables as var
+import web_activity
 
 log = logging.getLogger("bot")
 
@@ -135,6 +138,10 @@ def _compute_access():
     token_gid = token_guild_id()
     if token_gid and token_gid in bot_ids:
         guilds.setdefault(token_gid, False)
+    # Activity 令牌:签发时核对过这个服务器(成员 + 在语音频道里)
+    activity_gid = web_activity.current_guild_id()
+    if activity_gid and activity_gid in bot_ids:
+        guilds.setdefault(activity_gid, False)
     # 按 Hub 给的顺序
     return Access({gid: guilds[gid] for gid in bot_ids if gid in guilds}, names=names)
 
@@ -175,6 +182,9 @@ def requested_guild_id():
 
 def default_guild_id(acc=None):
     acc = acc or access()
+    activity_gid = web_activity.current_guild_id()
+    if activity_gid and acc.allows(activity_gid):
+        return activity_gid
     h = hub()
     home = str(h.home_guild_id) if h is not None and h.home_guild_id else None
     if home and acc.allows(home):

@@ -140,7 +140,8 @@ class Hub:
             self.named_specs,
             owner_guild_id=var.config.get("discord", "owner_guild_id", fallback='') or None,
             dev_guild_id=var.config.get("discord", "dev_guild_id", fallback='') or None,
-            sync_state=var.db)
+            sync_state=var.db,
+            entry_point=var.config.getboolean("webinterface", "activity_enabled", fallback=False))
         try:
             self.client.connect()
         except Exception as e:
@@ -604,6 +605,23 @@ class Hub:
         """{'id', 'name', 'icon'}(icon 是 CDN 地址或 '');bot 不在这个服务器返回 None。"""
         client = self.client
         return client.guild_info(guild_id) if client is not None else None
+
+    def voice_channel_of(self, guild_id, user_id):
+        """这个用户现在在哪个语音频道(int id 或 None)。有会话就用它 GuildLink 的 users 快照,
+        没有(休眠 / 还没建)就直接看网关缓存。"""
+        gid = str(guild_id or '')
+        try:
+            uid = int(user_id)
+        except (TypeError, ValueError):
+            return None
+        with self._lock:
+            session = self._sessions.get(gid)
+        link = getattr(session, 'link', None) if session is not None else None
+        if link is not None:
+            user = link.users.get(uid)
+            return user.channel_id if user is not None else None
+        client = self.client
+        return client.voice_channel_of(gid, uid) if client is not None else None
 
     def is_member(self, guild_id, user_id):
         """user 是不是这个服务器的成员(REST 查询,不需要 members intent,结果缓存几分钟)。"""

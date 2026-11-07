@@ -420,4 +420,16 @@ export const ja: Record<Key, Msg> = {
   'me.src.discord': "Discord ログイン",
   'me.loginDiscord': "Discord でログイン",
   'me.logout': "ログアウト",
+  // ---- Discord Activity ----
+  'act.connecting': "Discord に接続中…",
+  'act.retry': "再試行",
+  'act.failedTitle': "コントロールパネルを開けませんでした",
+  'act.err.not_in_voice_channel': "この Activity を起動したボイスチャンネルに参加してから、もう一度開いてください。",
+  'act.err.not_a_member': "このサーバーのメンバーではありません。",
+  'act.err.guild_not_served': "このサーバーには bot がいません(または利用が許可されていません)。",
+  'act.err.guild_required': "サーバーのボイスチャンネルから Activity を起動してください。DM では再生できません。",
+  'act.err.activity_disabled': "この bot では Discord Activity が無効になっています。",
+  'act.err.authorize_cancelled': "Discord の認可がキャンセルされました。",
+  'act.err.discord_auth_failed': "Discord のログインに失敗しました。もう一度お試しください。",
+  'act.err.other': "エラーが発生しました({code})。",
 }

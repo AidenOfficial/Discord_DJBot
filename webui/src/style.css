@@ -129,3 +129,14 @@ body {
   -webkit-font-smoothing: antialiased;
   transition: background-color 160ms ease, color 160ms ease;
 }
+
+/* Discord Activity(iframe):手机版 Discord 用这些变量告诉页面刘海 / 底部手势条占了多少 */
+html.embedded body {
+  padding:
+    var(--discord-safe-area-inset-top, 0px)
+    var(--discord-safe-area-inset-right, 0px)
+    var(--discord-safe-area-inset-bottom, 0px)
+    var(--discord-safe-area-inset-left, 0px);
+  box-sizing: border-box;
+  overscroll-behavior: contain;
+}
