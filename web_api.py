@@ -115,9 +115,25 @@ def _status_payload():
 status_payload = _status_payload
 
 
+def _max_volume(session):
+    """这个服务器的最大音量(0..1):管理员设过的(/maxvolume 或 Web)优先,否则配置文件的。"""
+    limit = 1.0
+    if var.config is not None:
+        limit = var.config.getfloat('bot', 'max_volume', fallback=1.0)
+    setting = getattr(session, 'setting', None)
+    if setting is not None:
+        try:
+            saved = setting('max_volume')
+            if saved is not None:
+                limit = float(saved)
+        except (TypeError, ValueError):
+            pass
+    return max(0.0, min(1.0, limit))
+
+
 def _set_volume(value):
-    value = max(0.0, min(1.0, round(float(value), 2)))
     session = web_context.session()
+    value = max(0.0, min(_max_volume(session), round(float(value), 2)))
     session.volume_helper.set_volume(value)
     session.save_setting('volume', str(session.volume_helper.plain_volume_set))
 
@@ -224,6 +240,28 @@ def _search_item_id(result):
     except Exception:
         return ''
     return hashlib.md5(url.encode()).hexdigest() if url else ''
+
+
+def _stats_scope():
+    """统计哪个服务器:?guild=<id>,?guild=all 是全部(只有 bot 主人)。不给就是当前选的服务器。
+    加 guild_id 列之前的旧记录只算给主服务器。没有 Hub 的单服务器旧模式统计全部(和以前一样)。"""
+    hub = web_context.hub()
+    wanted = (request.args.get('guild') or '').strip()
+    if wanted == 'all':
+        if hub is not None and not web_context.is_owner():
+            abort(403)
+        return {}
+    if hub is None:
+        return {}
+    if wanted:
+        # 统计页自己的筛选优先于请求头里选的服务器
+        if not wanted.isdigit() or not web_context.access().allows(wanted):
+            abort(403)
+        gid = wanted
+    else:
+        gid = web_context.guild_id()
+    home = str(hub.home_guild_id or '')
+    return {'guild_id': gid, 'include_unscoped': bool(home) and gid == home}
 
 
 def create_blueprint(requires_auth):
@@ -376,7 +414,7 @@ def create_blueprint(requires_auth):
     def api_stats():
         if var.play_history is None:
             abort(503)
-        stats = var.play_history.stats()
+        stats = var.play_history.stats(**_stats_scope())
         if var.user_db is not None:
             # 绑定了 Discord 的人:聊天点歌(记的是 Discord 名)和网页点歌(记的是别名)合并成一行
             names = var.user_db.requester_display_names()

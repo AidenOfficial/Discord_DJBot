@@ -55,6 +55,7 @@ import web_api
 import web_auth_discord
 import web_cache
 import web_channels
+import web_guilds
 import web_library
 import web_logs
 import web_upload
@@ -209,6 +210,7 @@ web.register_blueprint(web_users.create_blueprint(requires_auth))
 web.register_blueprint(web_cache.create_blueprint(requires_auth))
 web.register_blueprint(web_upload.create_blueprint(requires_auth))
 web.register_blueprint(web_channels.create_blueprint(requires_auth))
+web.register_blueprint(web_guilds.create_blueprint(requires_auth))
 web.register_blueprint(web_library.create_blueprint(requires_auth))
 web.register_blueprint(web_logs.create_blueprint(requires_auth))
 

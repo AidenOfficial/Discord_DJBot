@@ -319,13 +319,26 @@ def can_manage(guild):
 
 
 def bot_guild_ids():
-    """bot 服务的服务器 id(字符串集合);bot 还没连上时为空。"""
+    """bot 服务的服务器 id(字符串集合);bot 还没连上时为空。有 Hub 时是 Hub 管的全部服务器。"""
+    hub = getattr(var, 'hub', None)
+    if hub is not None:
+        return {str(gid) for gid in hub.guild_ids()}
     link = getattr(getattr(var, 'bot', None), 'link', None)
     guild_id = getattr(link, 'guild_id', None)
     return {str(guild_id)} if guild_id else set()
 
 
+def is_bot_owner(identity=None):
+    """[bot] admin 里列了这个 Discord 账号:bot 主人,和 bot 不在同一服务器也能进。"""
+    import web_context
+
+    user_id = discord_user_id(identity)
+    return bool(user_id) and user_id in web_context.owner_ids()
+
+
 def shares_guild_with_bot(identity=None):
+    if is_bot_owner(identity):
+        return True
     bot_ids = bot_guild_ids()
     return bool(bot_ids) and any(g['id'] in bot_ids for g in discord_guilds(identity))
 

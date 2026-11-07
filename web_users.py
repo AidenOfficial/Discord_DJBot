@@ -368,6 +368,14 @@ class UserDatabase:
                                (identity,)).fetchone()
             return dict(row) if row else None
 
+    def discord_id_for(self, identity):
+        """这个 Web 身份绑定的 Discord user id(字符串);没绑定是 None。"""
+        with self._conn() as conn:
+            row = conn.execute("SELECT discord_key FROM discord_link WHERE identity=?",
+                               (identity,)).fetchone()
+        key = row['discord_key'] if row else ''
+        return key.split(':', 1)[1] if key.startswith('discord:') and key[8:].isdigit() else None
+
     def unlink_identity(self, identity):
         with self._conn() as conn:
             return conn.execute("DELETE FROM discord_link WHERE identity=?", (identity,)).rowcount > 0
@@ -876,7 +884,7 @@ def create_blueprint(requires_auth):
         if not ident.key or var.user_db is None:
             abort(403)
         code, expires_at = var.user_db.create_bind_code(ident.key)
-        command_name = getattr(web_context.session(), 'command_name', None)
+        command_name = getattr(web_context.any_session(), 'command_name', None)
         name = command_name('bind') if command_name else 'bind'
         return jsonify({'code': code, 'expires_at': expires_at, 'command': f"/{name} code:{code}"})
 
