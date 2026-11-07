@@ -40,7 +40,9 @@ apply() {
     # DNS 服务器(默认 bridge 网络上 resolv.conf 可能直接是路由器的地址)
     local key ns _rest
     while read -r key ns _rest; do
-        [ "$key" = nameserver ] && [ -n "$ns" ] || continue
+        if [ "$key" != nameserver ] || [ -z "$ns" ]; then
+            continue
+        fi
         case "$ns" in
             *:*) [ "$family" = 6 ] || continue ;;
             *) [ "$family" = 4 ] || continue ;;
