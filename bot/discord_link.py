@@ -15,14 +15,16 @@ bot 其余部分是线程模型,discord.py 是 asyncio:这里把 discord.py 放�
 回调在共享线程池(bot.executor.KeyedExecutor)里按 (guild_id, 'evt') 依次调用,不在事件循环线程里;
 on_precheck / on_autocomplete 要在 3 秒内给 Discord 答复,在各自的小线程池里同步执行,应当很快返回。
 
-现在还是只服务主服务器(配置的 guild_id,没配就用 bot 加入的第一个):斜杠命令只同步到这个服务器,
-其他服务器里的交互礼貌拒绝。
+斜杠命令是全局的;bot 主人命令只注册在 [discord] owner_guild_id。现在还是只服务主服务器(配置的
+guild_id,没配就用 bot 加入的第一个),其他服务器里的交互礼貌拒绝。
 """
 
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
+import json
 import logging
 import threading
 import time
@@ -289,6 +291,19 @@ class _Translator(app_commands.Translator):
         return table.get(key) if key else None
 
 
+#: 设置库(botamusique 表)里记"上次同步的命令内容摘要"的 section;键是 "<应用 ID>:<服务器 ID 或 global>"
+SYNC_SECTION = 'command_sync'
+
+
+def _default_permissions(spec):
+    """命令默认谁看得到(服务器可以在"服务器设置 → 整合"里改)。执行时 bot 还会再查一次权限。"""
+    if getattr(spec, 'owner_only', False):
+        return discord.Permissions(administrator=True)
+    if getattr(spec, 'admin', False):
+        return discord.Permissions(manage_guild=True)
+    return None
+
+
 def _desc(text_by_locale, default_locale='en'):
     base = text_by_locale.get(default_locale) or text_by_locale['en']
     return app_commands.locale_str(base[:100], i18n={k: v[:100] for k, v in text_by_locale.items()})
@@ -309,7 +324,8 @@ class DiscordClient:
 
     交互(斜杠命令、自动补全、预检查、面板按钮)和网关事件(语音状态、频道 / 身份组 / 服务器变化)
     按 guild_id 交给那个服务器的 GuildLink;没有 GuildLink 的服务器:主服务器回"还在启动",
-    其他服务器礼貌拒绝。斜杠命令现在只同步到主服务器(即时生效,不用等全局命令的缓存)。
+    其他服务器礼貌拒绝。斜杠命令全局注册(bot 主人命令只在 [discord] owner_guild_id),每次启动只在
+    内容变了时才同步;[discord] dev_guild_id 另外同步一份,改了立刻生效。
     """
 
     def __init__(self, token, home_guild_id=None, language='en_US', debug=False, executor=None):
@@ -357,17 +373,36 @@ class DiscordClient:
         self._links: Dict[int, 'GuildLink'] = {}
         self._specs: List[Tuple[str, Any]] = []
         self._spec_by_key: Dict[str, Any] = {}
+        # 命令注册(register_commands 设置)
+        self.owner_guild_id: Optional[int] = None
+        self.dev_guild_id: Optional[int] = None
+        self._sync_state: Any = None
         #: GuildLink.set_activity 汇总到这里(Hub 决定账号显示什么);没设置就直接改状态
         self.on_activity: Optional[Callable[[Optional[int], Optional[str], str], None]] = None
 
     # ---- 生命周期 ----------------------------------------------------------
 
-    def register_commands(self, named_specs):
-        """[(slash 名, Spec)];必须在 connect() 之前调用。"""
+    def register_commands(self, named_specs, owner_guild_id=None, dev_guild_id=None, sync_state=None):
+        """[(slash 名, Spec)];必须在 connect() 之前调用。
+
+        命令注册成全局的(每个服务器都有)。bot 主人命令(spec.owner_only)只注册在 owner_guild_id;
+        没配就也注册成全局的,但默认只有"管理员"权限的人看得到(执行时 bot 还会核对是不是主人)。
+        dev_guild_id:另外同步一份到这个服务器,改了命令立刻生效(全局命令要等 Discord 传播)。
+        sync_state:有 get/set 的设置库(database.SettingsDatabase),记着上次同步的内容,没变就不同步。"""
         self._specs = list(named_specs)
         self._spec_by_key = {spec.key: (name, spec) for name, spec in self._specs}
+        self.owner_guild_id = int(owner_guild_id) if owner_guild_id else None
+        self.dev_guild_id = int(dev_guild_id) if dev_guild_id else None
+        self._sync_state = sync_state
+        owner_guild = discord.Object(id=self.owner_guild_id) if self.owner_guild_id else None
         for name, spec in self._specs:
-            self._tree.add_command(self._build_command(name, spec))
+            command = self._build_command(name, spec)
+            if getattr(spec, 'owner_only', False) and owner_guild is not None:
+                self._tree.add_command(command, guild=owner_guild)
+            else:
+                self._tree.add_command(command)
+        if self.dev_guild_id:
+            self._tree.copy_global_to(guild=discord.Object(id=self.dev_guild_id))
 
     def connect(self, timeout=60):
         """登录并等到 guild 数据同步完。失败时抛异常(token 错误、超时……)。"""
@@ -556,20 +591,57 @@ class DiscordClient:
         if home is None and self.home_guild_id is not None:
             log.error("discord: server %s not found; is the bot invited to it?", self.home_guild_id)
         self._check_links()
-        if home is not None and not self._synced:
-            try:
-                self._tree.copy_global_to(guild=home)
-                synced = await self._tree.sync(guild=home)
-                self._synced = True
-                log.info("discord: synced %d slash commands to %s", len(synced), home.name)
-            except Exception:
-                log.exception("discord: could not sync slash commands")
+        if not self._synced:
+            self._synced = True
+            await self._sync_commands()
         if self._panel_view is None:
             # 持久按钮:custom_id 固定,bot 重启后旧面板上的按钮照样能用;所有服务器共用一个 View
             self._panel_view = _PanelView(self)
             self.client.add_view(self._panel_view)
         log.info("discord: logged in as %s, serving %s", self.client.user, home.name if home else '-')
         self._ready.set()
+
+    # ---- 命令同步 ----------------------------------------------------------
+
+    def _sync_targets(self):
+        """[(guild id 或 None = 全局)]:全局、bot 主人的服务器、开发服务器;再加上以前(只同步到主服务器时)
+        的主服务器,同步一份空的过去把旧的服务器命令清掉,否则那里每条命令会出现两次。"""
+        targets = [None]
+        for gid in (self.owner_guild_id, self.dev_guild_id, getattr(self, 'home_guild_id', None)):
+            if gid and gid not in targets:
+                targets.append(gid)
+        return targets
+
+    async def _command_digest(self, guild_id):
+        """这一份命令(全局或某个服务器)同步给 Discord 的内容的摘要。"""
+        guild = discord.Object(id=guild_id) if guild_id else None
+        translator = _Translator()
+        payload = [await command.get_translated_payload(self._tree, translator)
+                   for command in self._tree.get_commands(guild=guild)]
+        payload.sort(key=lambda p: p.get('name', ''))
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode('utf-8')).hexdigest()
+
+    def _sync_key(self, guild_id):
+        app = self.client.application_id or getattr(self.client.user, 'id', None) or 0
+        return f"{app}:{guild_id or 'global'}"
+
+    async def _sync_commands(self):
+        """每次启动调用一次:内容和上次同步的一样就跳过(同步有频率限制,全局命令改了要等 Discord 传播)。"""
+        state = self._sync_state
+        for guild_id in self._sync_targets():
+            where = f"server {guild_id}" if guild_id else "all servers"
+            try:
+                digest = await self._command_digest(guild_id)
+                key = self._sync_key(guild_id)
+                if state is not None and state.get(SYNC_SECTION, key, fallback=None) == digest:
+                    log.info("discord: slash commands for %s unchanged, not syncing", where)
+                    continue
+                synced = await self._tree.sync(guild=discord.Object(id=guild_id) if guild_id else None)
+                if state is not None:
+                    state.set(SYNC_SECTION, key, digest)
+                log.info("discord: synced %d slash commands to %s", len(synced), where)
+            except Exception:
+                log.exception("discord: could not sync slash commands to %s", where)
 
     async def on_shard_ready(self, shard_id):
         # 单个分片重新 IDENTIFY 时不一定再触发 on_ready
@@ -673,6 +745,7 @@ class DiscordClient:
         command = app_commands.Command(name=name, description=_desc(spec.desc, self.default_locale),
                                        callback=callback)
         command.guild_only = True
+        command.default_permissions = _default_permissions(spec)
         for opt in spec.options:
             if opt.autocomplete:
                 command.autocomplete(opt.name)(self._make_autocomplete(opt))

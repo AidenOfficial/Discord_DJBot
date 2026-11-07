@@ -37,7 +37,8 @@ class Spec:
     handler: Callable
     desc: dict
     options: Tuple[Opt, ...] = ()
-    admin: bool = False
+    admin: bool = False       # 服务器管理员(默认要"管理服务器"权限才看得到,服务器可在"整合"里改)
+    owner_only: bool = False  # bot 主人([bot] admin 里的用户 ID);只注册在 [discord] owner_guild_id
     ephemeral: bool = False   # 回复只给发命令的人看
     outside_channel: bool = False  # 不在 bot 所在语音频道也能用
     joins_voice: bool = False  # bot 不在语音频道时先进发命令的人所在的频道
@@ -58,6 +59,9 @@ def specs():
 
     def opt_url(required=True):
         return Opt('url', _d('URL', '链接', 'URL'), required=required)
+
+    def opt_user(required=False):
+        return Opt('user', _d('User', '用户', 'ユーザー'), kind='user', required=required)
 
     def opt_index(desc=None, required=False, autocomplete='queue'):
         return Opt('index', desc or _d('Position in the queue', '队列中的序号', 'キュー内の番号'),
@@ -242,57 +246,84 @@ def specs():
         Spec('version', 'version', admin.cmd_version, group='other', ephemeral=True, outside_channel=True,
              desc=_d('Show the bot version', '显示版本', 'バージョンを表示')),
 
-        # ---- 管理员 ----
+        # ---- 服务器管理员:只管本服务器 ----
         Spec('max_volume', 'maxvolume', volume.cmd_max_volume, group='admin', admin=True,
-             desc=_d('Show or set the maximum volume', '查看或设置最大音量', '最大音量を表示・設定'),
+             desc=_d('Show or set the maximum volume in this server', '查看或设置本服务器的最大音量',
+                     'このサーバーの最大音量を表示・設定'),
              options=(Opt('percent', _d('0–100', '0–100', '0–100'), kind='int', min=0, max=100),)),
         Spec('user_ban', 'userban', admin.cmd_user_ban, group='admin', admin=True, ephemeral=True,
              outside_channel=True,
-             desc=_d('Ban a user from using the bot; no argument lists bans', '禁止某人使用 bot;不填列出已封禁',
-                     'ユーザーの利用を禁止。引数なしで一覧'),
-             options=(Opt('user', _d('User', '用户', 'ユーザー'), kind='user'),)),
+             desc=_d('Ban a user from using the bot in this server', '禁止某人在本服务器使用 bot',
+                     'このサーバーでのユーザーの利用を禁止'),
+             options=(opt_user(required=True),)),
         Spec('user_unban', 'userunban', admin.cmd_user_unban, group='admin', admin=True, ephemeral=True,
              outside_channel=True,
-             desc=_d('Lift a user ban', '解除封禁', '利用禁止を解除'),
-             options=(Opt('user', _d('User', '用户', 'ユーザー'), kind='user', required=True),)),
-        Spec('url_ban', 'urlban', admin.cmd_url_ban, group='admin', admin=True,
-             desc=_d('Ban a URL (the current song by default) and remove it from the library',
-                     '封禁链接(默认当前歌曲)并从曲库删除', 'URL を禁止(既定は再生中の曲)し、ライブラリから削除'),
+             desc=_d("Lift a user's ban in this server", '解除某人在本服务器的封禁', 'このサーバーでの利用禁止を解除'),
+             options=(opt_user(required=True),)),
+        Spec('url_ban', 'urlban', admin.cmd_url_ban, group='admin', admin=True, ephemeral=True,
+             outside_channel=True,
+             desc=_d('Ban a URL in this server (the current song by default)', '在本服务器封禁链接(默认当前歌曲)',
+                     'このサーバーで URL を禁止(既定は再生中の曲)'),
              options=(opt_url(required=False),)),
-        Spec('url_unban', 'urlunban', admin.cmd_url_unban, group='admin', admin=True,
-             desc=_d('Unban a URL', '解封链接', 'URL の禁止を解除'), options=(opt_url(),)),
-        Spec('url_ban_list', 'urlbanlist', admin.cmd_url_ban_list, group='admin', admin=True, ephemeral=True,
-             desc=_d('List banned URLs', '列出被封禁的链接', '禁止 URL の一覧')),
-        Spec('url_whitelist', 'urlwhitelist', admin.cmd_url_whitelist, group='admin', admin=True,
-             desc=_d('Whitelist a URL', '把链接加入白名单', 'URL をホワイトリストに追加'), options=(opt_url(),)),
-        Spec('url_unwhitelist', 'urlunwhitelist', admin.cmd_url_unwhitelist, group='admin', admin=True,
+        Spec('url_unban', 'urlunban', admin.cmd_url_unban, group='admin', admin=True, ephemeral=True,
+             outside_channel=True,
+             desc=_d('Unban a URL in this server', '解封本服务器封禁的链接', 'このサーバーでの URL の禁止を解除'),
+             options=(opt_url(),)),
+        Spec('ban_list', 'banlist', admin.cmd_ban_list, group='admin', admin=True, ephemeral=True,
+             outside_channel=True,
+             desc=_d("List this server's banned users and URLs", '列出本服务器封禁的用户和链接',
+                     'このサーバーで禁止中のユーザーと URL の一覧')),
+
+        # ---- bot 主人:全局 / 运维 ----
+        Spec('global_ban', 'globalban', admin.cmd_global_ban, group='owner', owner_only=True, ephemeral=True,
+             outside_channel=True,
+             desc=_d('Ban a user and/or URL in every server (no argument: the current song)',
+                     '在所有服务器封禁用户和 / 或链接(都不填:当前歌曲)',
+                     '全サーバーでユーザー/URL を禁止(引数なしで再生中の曲)'),
+             options=(opt_user(), opt_url(required=False))),
+        Spec('global_unban', 'globalunban', admin.cmd_global_unban, group='owner', owner_only=True,
+             ephemeral=True, outside_channel=True,
+             desc=_d('Lift a global user and/or URL ban', '解除全局的用户 / 链接封禁', '全体の利用禁止/URL 禁止を解除'),
+             options=(opt_user(), opt_url(required=False))),
+        Spec('global_ban_list', 'globalbanlist', admin.cmd_global_ban_list, group='owner', owner_only=True,
+             ephemeral=True, outside_channel=True,
+             desc=_d('List global bans and the URL whitelist', '列出全局封禁和链接白名单',
+                     '全体の禁止リストと URL ホワイトリスト')),
+        Spec('url_whitelist', 'urlwhitelist', admin.cmd_url_whitelist, group='owner', owner_only=True,
+             ephemeral=True, outside_channel=True,
+             desc=_d('Whitelist a URL everywhere (exempt from the length limit)', '把链接加入全局白名单(不受时长限制)',
+                     'URL を全体のホワイトリストに追加(長さ制限の対象外)'), options=(opt_url(),)),
+        Spec('url_unwhitelist', 'urlunwhitelist', admin.cmd_url_unwhitelist, group='owner', owner_only=True,
+             ephemeral=True, outside_channel=True,
              desc=_d('Remove a URL from the whitelist', '把链接移出白名单', 'URL をホワイトリストから削除'),
              options=(opt_url(),)),
-        Spec('url_whitelist_list', 'urlwhitelistlist', admin.cmd_url_whitelist_list, group='admin', admin=True,
-             ephemeral=True,
-             desc=_d('List whitelisted URLs', '列出白名单', 'ホワイトリストの一覧')),
-        Spec('rescan', 'rescan', library.cmd_refresh_cache, group='admin', admin=True,
+        Spec('rescan', 'rescan', library.cmd_refresh_cache, group='owner', owner_only=True, ephemeral=True,
+             outside_channel=True,
              desc=_d('Rescan the local music folder', '重新扫描本地音乐文件夹', 'ローカル音楽フォルダを再スキャン')),
-        Spec('drop_database', 'dropdatabase', library.cmd_drop_database, group='admin', admin=True, ephemeral=True,
-             desc=_d('Wipe all settings and the music library', '清空所有设置和曲库', '全設定とライブラリを消去')),
-        Spec('add_webinterface_user', 'webuseradd', web.cmd_web_user_add, group='admin', admin=True, ephemeral=True,
+        Spec('drop_database', 'dropdatabase', library.cmd_drop_database, group='owner', owner_only=True,
+             ephemeral=True, outside_channel=True,
+             desc=_d('Wipe all settings (every server) and the music library', '清空所有设置(所有服务器)和曲库',
+                     '全設定(全サーバー)とライブラリを消去')),
+        Spec('add_webinterface_user', 'webuseradd', web.cmd_web_user_add, group='owner', owner_only=True,
+             ephemeral=True, outside_channel=True,
              desc=_d('Allow a user to log in to the web UI (password auth)', '允许某人登录网页(密码认证模式)',
                      'Web UI へのログインを許可(パスワード認証)'),
              options=(Opt('name', _d('Discord username (not the server nickname)', 'Discord 用户名(不是服务器昵称)', 'Discord のユーザー名(サーバーのニックネームではない)'), required=True),)),
-        Spec('remove_webinterface_user', 'webuserdel', web.cmd_web_user_remove, group='admin', admin=True,
-             ephemeral=True,
+        Spec('remove_webinterface_user', 'webuserdel', web.cmd_web_user_remove, group='owner', owner_only=True,
+             ephemeral=True, outside_channel=True,
              desc=_d('Revoke web UI access (password auth)', '取消某人的网页登录权限(密码认证模式)',
                      'Web UI へのアクセスを取り消す(パスワード認証)'),
              options=(Opt('name', _d('Discord username (not the server nickname)', 'Discord 用户名(不是服务器昵称)', 'Discord のユーザー名(サーバーのニックネームではない)'), required=True),)),
-        Spec('list_webinterface_user', 'webuserlist', web.cmd_web_user_list, group='admin', admin=True,
-             ephemeral=True,
+        Spec('list_webinterface_user', 'webuserlist', web.cmd_web_user_list, group='owner', owner_only=True,
+             ephemeral=True, outside_channel=True,
              desc=_d('List users allowed to use the web UI (password auth)', '列出可以登录网页的人(密码认证模式)',
                      'Web UI を使えるユーザーの一覧(パスワード認証)')),
-        Spec('update', 'update', admin.cmd_update, group='admin', admin=True, ephemeral=True,
+        Spec('update', 'update', admin.cmd_update, group='owner', owner_only=True, ephemeral=True,
+             outside_channel=True,
              desc=_d('Upgrade yt-dlp and spotdl (restart to apply)', '升级 yt-dlp 和 spotdl(重启后生效)',
                      'yt-dlp と spotdl を更新(再起動で反映)')),
-        Spec('kill', 'kill', admin.cmd_kill, group='admin', admin=True, ephemeral=True, outside_channel=True,
-             desc=_d('Shut the bot down', '关闭 bot', 'ボットを終了')),
+        Spec('kill', 'kill', admin.cmd_kill, group='owner', owner_only=True, ephemeral=True, outside_channel=True,
+             desc=_d('Shut the bot down (every server)', '关闭 bot(所有服务器)', 'ボットを終了(全サーバー)')),
     ]
 
 
@@ -329,15 +360,19 @@ GROUP_TITLES = {
     'library': _d('Music library', '本地曲库', 'ライブラリ'),
     'personal': _d('Personal playlists', '个人歌单', 'マイプレイリスト'),
     'other': _d('Other', '其他', 'その他'),
-    'admin': _d('Admin', '管理员', '管理者'),
+    'admin': _d('Server admin', '服务器管理员', 'サーバー管理者'),
+    'owner': _d('Bot owner', 'bot 主人', 'ボットのオーナー'),
 }
 
 
-def help_lines(language, include_admin=False, config=None):
-    """/help 的内容(HTML,交给 GuildLink 转 Markdown)。按分组列出命令和参数。"""
+def help_lines(language, include_admin=False, config=None, include_owner=False):
+    """/help 的内容(HTML,交给 GuildLink 转 Markdown)。按分组列出命令和参数。
+    服务器管理员命令只给管理员看,bot 主人命令只给 bot 主人看。"""
     import html
     groups = {}
     for name, spec in configured_specs(config):
+        if spec.owner_only and not include_owner:
+            continue
         if spec.admin and not include_admin:
             continue
         groups.setdefault(spec.group, []).append((name, spec))

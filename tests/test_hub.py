@@ -270,7 +270,7 @@ class LifecycleTest(HubCase):
             def __init__(self, *a, **kw):
                 self.home_guild_id = None
 
-            def register_commands(self, named):
+            def register_commands(self, named, **kw):
                 pass
 
             def connect(self):

@@ -212,7 +212,9 @@ NAS 部署、cookies 配置与日常维护参见 [`deploy/DOCKER.md`](deploy/DOC
 | `/bind` / `/mylist` / `/fav` | 个人歌单（绑定码在 Web 界面中生成） |
 | `/lyrics` / `/web` / `/help` / `/version` | 其他 |
 
-管理员（`[bot] admin` 里列出的用户或身份组，加上有「管理员」或「管理服务器」权限的成员，可用 `[discord] admin_by_permission = False` 关掉后者）还可以使用 `/kill`、`/update`、`/urlban`、`/userban`、`/maxvolume`、`/rescan` 以及 Web 用户相关命令。
+服务器管理员（有「管理员」或「管理服务器」权限的成员，可用 `[discord] admin_by_permission = False` 关掉；以及 `[bot] admin` 里列出的身份组）可以用 `/maxvolume`、`/userban`、`/userunban`、`/urlban`、`/urlunban`、`/banlist` 管理自己的服务器。这些命令默认只有「管理服务器」权限的人看得到，服务器可以在「服务器设置 → 整合」里改。
+
+bot 主人（`[bot] admin` 里的用户 ID）在所有服务器都是管理员，另外还有全局封禁（`/globalban`、`/globalunban`、`/globalbanlist`、`/urlwhitelist`、`/urlunwhitelist`）和运维命令（`/kill`、`/update`、`/rescan`、`/dropdatabase`、Web 用户相关命令）。这些命令只注册在 `[discord] owner_guild_id`（留空则注册成全局命令，默认只有「管理员」看得到），每次执行都会核对主人的用户 ID。
 
 默认只有和 bot 在同一个语音频道的人能控制播放（见 `[bot] allow_other_channel_message`）。
 

@@ -320,6 +320,47 @@ class CommandTreeTest(unittest.TestCase):
         ban = asyncio.run(payload('userban'))['options'][0]
         self.assertEqual(ban['type'], discord.AppCommandOptionType.user.value)
 
+    def test_default_permissions_and_owner_guild_split(self):
+        named = all_specs()
+        client = DiscordClient('token', home_guild_id=1)
+        client.register_commands(named, owner_guild_id=999)
+        owner_guild = discord.Object(id=999)
+        global_names = {c.name for c in client._tree.get_commands()}
+        owner_names = {c.name for c in client._tree.get_commands(guild=owner_guild)}
+        owner_specs = {name for name, spec in named if spec.owner_only}
+        self.assertIn('kill', owner_specs)
+        self.assertEqual(owner_names, owner_specs)                 # 主人命令只在主人的服务器
+        self.assertFalse(global_names & owner_specs)
+        self.assertEqual(global_names | owner_names, {name for name, _ in named})
+
+        commands = {c.name: c for c in client._tree.get_commands()}
+        manage = discord.Permissions(manage_guild=True)
+        for name, spec in named:
+            if spec.admin:
+                self.assertEqual(commands[name].default_permissions, manage, name)
+            elif not spec.owner_only:
+                self.assertIsNone(commands[name].default_permissions, name)
+        self.assertTrue(client._tree.get_command('kill', guild=owner_guild).default_permissions.administrator)
+        data = asyncio.run(commands['userban'].get_translated_payload(client._tree, dl._Translator()))
+        self.assertEqual(int(data['default_member_permissions']), manage.value)
+
+    def test_without_owner_guild_owner_commands_are_global_but_hidden(self):
+        named = all_specs()
+        client = DiscordClient('token', home_guild_id=1)
+        client.register_commands(named)
+        self.assertEqual(len(client._tree.get_commands()), len(named))
+        kill = client._tree.get_command('kill')
+        self.assertEqual(kill.default_permissions, discord.Permissions(administrator=True))
+
+    def test_dev_guild_gets_every_command(self):
+        named = all_specs()
+        client = DiscordClient('token', home_guild_id=1)
+        client.register_commands(named, owner_guild_id=999, dev_guild_id=888)
+        self.assertEqual({c.name for c in client._tree.get_commands(guild=discord.Object(id=888))},
+                         {name for name, spec in named if not spec.owner_only})
+        # 全局、主人的服务器、开发服务器,再加以前的主服务器(清掉旧的服务器命令)
+        self.assertEqual(client._sync_targets(), [None, 999, 888, 1])
+
     def test_callback_passes_option_values(self):
         from commands.slash import Opt, Spec, _d
         link = DiscordClient('token', home_guild_id=1)
@@ -336,6 +377,74 @@ class CommandTreeTest(unittest.TestCase):
         self.assertEqual(seen, {'query': 'lofi', 'start': None})
         self.assertEqual([p.name for p in command.parameters], ['query', 'start'])
         self.assertTrue(command.parameters[0].required)
+
+
+def all_specs(renames=None):
+    import configparser
+    from commands import slash
+    config = configparser.ConfigParser(interpolation=None)
+    if renames:
+        config.read_dict({'commands': renames})
+    return slash.configured_specs(config)
+
+
+class FakeSyncState:
+    """SettingsDatabase 的 get / set。"""
+
+    def __init__(self):
+        self.data = {}
+
+    def get(self, section, option, fallback=None):
+        return self.data.get((section, option), fallback)
+
+    def set(self, section, option, value):
+        self.data[(section, option)] = value
+
+
+class CommandSyncTest(unittest.TestCase):
+    def make(self, state, named=None, home=None, **kw):
+        client = DiscordClient('token', home_guild_id=home)
+        client.register_commands(named or all_specs(), sync_state=state, **kw)
+        client._tree.sync = mock.AsyncMock(return_value=[])
+        return client
+
+    @staticmethod
+    def synced(client):
+        return [getattr(c.kwargs.get('guild'), 'id', None) for c in client._tree.sync.await_args_list]
+
+    def test_sync_only_when_the_commands_changed(self):
+        state = FakeSyncState()
+        first = self.make(state, owner_guild_id=999)
+        asyncio.run(first._sync_commands())
+        self.assertEqual(self.synced(first), [None, 999])
+
+        again = self.make(state, owner_guild_id=999)              # 重启,命令没变:不调用 Discord
+        asyncio.run(again._sync_commands())
+        again._tree.sync.assert_not_awaited()
+
+        renamed = self.make(state, all_specs({'play': 'p'}), owner_guild_id=999)
+        asyncio.run(renamed._sync_commands())
+        self.assertEqual(self.synced(renamed), [None])             # 只有全局那份变了
+
+    def test_failed_sync_is_retried_on_next_start(self):
+        state = FakeSyncState()
+        client = self.make(state)
+        client._tree.sync = mock.AsyncMock(side_effect=RuntimeError('429'))
+        asyncio.run(client._sync_commands())
+        self.assertEqual(state.data, {})
+        retry = self.make(state)
+        asyncio.run(retry._sync_commands())
+        self.assertEqual(self.synced(retry), [None])
+
+    def test_old_home_guild_commands_are_cleared_once(self):
+        state = FakeSyncState()
+        client = self.make(state, home=5)
+        asyncio.run(client._sync_commands())
+        self.assertEqual(self.synced(client), [None, 5])
+        self.assertEqual(client._tree.get_commands(guild=discord.Object(id=5)), [])  # 同步一份空的过去
+        again = self.make(state, home=5)
+        asyncio.run(again._sync_commands())
+        again._tree.sync.assert_not_awaited()
 
 
 class FakeVoiceClient:

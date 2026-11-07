@@ -382,6 +382,8 @@ OBSOLETE_CONFIG = {
     ('bot', 'auto_check_update'),  # 上游 azlux 的版本检查
     ('bot', 'target_version'),     # 上游 azlux 的 stable/testing 更新通道
     ('bot', 'pip3_path'),          # !update 改用当前解释器的 pip
+    ('commands', 'url_ban_list'),        # 并入 /banlist(本服务器)和 /globalbanlist
+    ('commands', 'url_whitelist_list'),  # 并入 /globalbanlist
 }
 
 

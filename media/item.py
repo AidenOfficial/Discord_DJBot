@@ -1,3 +1,5 @@
+import contextlib
+import contextvars
 import logging
 
 item_builders = {}
@@ -37,6 +39,30 @@ def dict_to_item(music_dict):
 class ValidationFailedError(Exception):
     def __init__(self, msg = None):
         self.msg = msg
+
+
+class BlockedHereError(ValidationFailedError):
+    """只在当前这个服务器不能放(本服务器封禁了这个链接):只从这个服务器的队列拿掉,
+    不删缓存 / 文件 / 曲库记录,别的服务器照常。"""
+
+
+#: 校验线程 / 下载线程正在为哪个服务器校验(guild id,'' = 不知道)。条目对象是各服务器共用的,
+#: 本服务器的封禁和限额只能这样传进 validate()。
+_validating_for = contextvars.ContextVar('validating_for', default='')
+
+
+@contextlib.contextmanager
+def validating_for(guild_id):
+    token = _validating_for.set(str(guild_id or ''))
+    try:
+        yield
+    finally:
+        _validating_for.reset(token)
+
+
+def validation_guild():
+    return _validating_for.get()
+
 
 class PreparationFailedError(Exception):
     def __init__(self, msg = None):

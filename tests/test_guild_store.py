@@ -166,6 +166,10 @@ class StoreTest(Tmp):
         self.assertFalse(s.has_rule('url_ban', 'https://bad.example/x', '200'))
         self.assertFalse(s.has_rule('url_ban', 'https://bad.example/x'))
         self.assertFalse(s.has_rule('url_whitelist', 'https://bad.example/x', '100'))
+        # 只看本服务器
+        self.assertFalse(s.has_rule('user_ban', '42', '100', include_global=False))
+        self.assertTrue(s.has_rule('url_ban', 'https://bad.example/x', '100', include_global=False))
+        self.assertFalse(s.has_rule('url_ban', 'https://bad.example/x', '', include_global=False))
 
         rules = s.list_rules('user_ban')
         self.assertEqual([(r['value'], r['note'], r['created_by']) for r in rules], [('42', 'Troll', '7')])
@@ -356,31 +360,151 @@ class SessionLoadTest(SessionBase):
 
 
 class AdminCommandsTest(SessionBase):
-    def test_ban_commands_write_global_rules(self):
+    """服务器管理员的封禁只写本服务器;bot 主人的 /globalban 等写全局。"""
+
+    def setUp(self):
+        super().setUp()
         import constants
-        from commands import admin
         constants.load_lang('en_US')
-        var.store.adopt_legacy('777')
-        bot = self.make_bot(777)
-        bot.bind_guild(777)
-        bot.send_msg = mock.Mock()
+        var.store.adopt_legacy('777')          # 旧版的封禁成了全局规则:user 42、https://bad.example/x
+        self.bot = self.make_bot(777)
+        self.bot.bind_guild(777)
+        self.bot.send_msg = mock.Mock()
+        self.bot.drop_from_queue = mock.Mock()
+
+    def sent(self):
+        return [c[0][0] for c in self.bot.send_msg.call_args_list]
+
+    def test_server_ban_commands_only_touch_this_guild(self):
+        from commands import admin
+        bot = self.bot
         ctx = mock.Mock(actor=5, options={'user_name': 'Mallory'})
         admin.cmd_user_ban(bot, 'admin', ctx, 'userban', '66')
-        self.assertTrue(var.store.has_rule('user_ban', '66'))            # 全局,不是 777
-        self.assertEqual(var.store.list_rules('user_ban')[-1]['created_by'], '5')
-        admin.cmd_user_ban(bot, 'admin', ctx, 'userban', '')
-        self.assertIn('Mallory', bot.send_msg.call_args[0][0])
+        self.assertTrue(var.store.has_rule('user_ban', '66', '777', include_global=False))
+        self.assertFalse(var.store.has_rule('user_ban', '66'))              # 不是全局
+        self.assertFalse(var.store.has_rule('user_ban', '66', '888'))       # 别的服务器不受影响
+        self.assertEqual(var.store.list_rules('user_ban', '777')[-1]['created_by'], '5')
+
+        admin.cmd_url_ban(bot, 'admin', ctx, 'urlban', 'https://bad.example/z')
+        self.assertTrue(var.store.has_rule('url_ban', 'https://bad.example/z', '777', include_global=False))
+        self.assertFalse(var.store.has_rule('url_ban', 'https://bad.example/z'))
+        bot.drop_from_queue.assert_called_once()                            # 只从本服务器的队列拿掉
+
+        admin.cmd_ban_list(bot, 'admin', ctx, 'banlist', '')
+        listing = self.sent()[-1]
+        self.assertIn('Mallory', listing)
+        self.assertIn('https://bad.example/z', listing)
+        self.assertNotIn('https://bad.example/x', listing)                  # 全局的不在本服务器的列表里
+
         admin.cmd_user_unban(bot, 'admin', ctx, 'userunban', '66')
         self.assertFalse(var.store.has_rule('user_ban', '66', '777'))
+        admin.cmd_url_unban(bot, 'admin', ctx, 'urlunban', 'https://bad.example/z')
+        self.assertFalse(var.store.has_rule('url_ban', 'https://bad.example/z', '777'))
 
-        admin.cmd_url_whitelist(bot, 'admin', ctx, 'urlwhitelist', 'https://ok.example/a')
+    def test_server_unban_cannot_lift_a_global_ban(self):
+        import constants
+        from commands import admin
+        ctx = mock.Mock(actor=5, options={'user_name': 'Troll'})
+        admin.cmd_user_unban(self.bot, 'admin', ctx, 'userunban', '42')
+        self.assertTrue(var.store.has_rule('user_ban', '42'))
+        self.assertIn(constants.tr_cli('still_banned_globally', target='Troll'), self.sent())
+        admin.cmd_url_unban(self.bot, 'admin', ctx, 'urlunban', 'https://bad.example/x')
+        self.assertTrue(var.store.has_rule('url_ban', 'https://bad.example/x'))
+
+    def test_unbound_session_does_not_write_global_rules(self):
+        from commands import admin
+        bot = self.make_bot(888)                                            # 还没绑定服务器
+        bot.send_msg = mock.Mock()
+        admin.cmd_user_ban(bot, 'admin', mock.Mock(actor=5, options={}), 'userban', '66')
+        self.assertFalse(var.store.has_rule('user_ban', '66'))
+
+    def test_global_ban_commands(self):
+        import constants
+        from commands import admin
+        bot = self.bot
+        ctx = mock.Mock(actor=5, options={'user': '66', 'user_name': 'Mallory'})
+        with mock.patch('commands.admin.discard_everywhere') as discard:
+            admin.cmd_global_ban(bot, 'owner', ctx, 'globalban', '66')
+        self.assertTrue(var.store.has_rule('user_ban', '66'))
+        discard.assert_not_called()                                         # 只封了人
+
+        ctx = mock.Mock(actor=5, options={'url': 'https://worse.example/q'})
+        with mock.patch('commands.admin.discard_everywhere') as discard:
+            admin.cmd_global_ban(bot, 'owner', ctx, 'globalban', 'https://worse.example/q')
+        self.assertTrue(var.store.has_rule('url_ban', 'https://worse.example/q'))
+        discard.assert_called_once()                                        # 所有队列、缓存、曲库都删
+
+        admin.cmd_url_whitelist(bot, 'owner', ctx, 'urlwhitelist', 'https://ok.example/a')
         self.assertTrue(var.store.has_rule('url_whitelist', 'https://ok.example/a'))
-        admin.cmd_url_unwhitelist(bot, 'admin', ctx, 'urlunwhitelist', 'https://ok.example/a')
+        admin.cmd_global_ban_list(bot, 'owner', ctx, 'globalbanlist', '')
+        listing = self.sent()[-1]
+        for text in ('Mallory', 'Troll', 'https://worse.example/q', 'https://ok.example/a'):
+            self.assertIn(text, listing)
+        admin.cmd_url_unwhitelist(bot, 'owner', ctx, 'urlunwhitelist', 'https://ok.example/a')
         self.assertFalse(var.store.has_rule('url_whitelist', 'https://ok.example/a'))
-        admin.cmd_url_unban(bot, 'admin', ctx, 'urlunban', 'https://bad.example/x')
-        self.assertFalse(var.store.has_rule('url_ban', 'https://bad.example/x'))  # adopt 的那条
-        admin.cmd_url_ban_list(bot, 'admin', ctx, 'urlbanlist', '')
-        self.assertNotIn('bad.example', bot.send_msg.call_args[0][0])
+        self.assertIn(constants.tr_cli('url_unwhitelist_success', url='https://ok.example/a'), self.sent())
+
+        ctx = mock.Mock(actor=5, options={'user': '66', 'user_name': 'Mallory', 'url': 'https://worse.example/q'})
+        admin.cmd_global_unban(bot, 'owner', ctx, 'globalunban', '')
+        self.assertFalse(var.store.has_rule('user_ban', '66'))
+        self.assertFalse(var.store.has_rule('url_ban', 'https://worse.example/q'))
+        admin.cmd_global_unban(bot, 'owner', mock.Mock(actor=5, options={}), 'globalunban', '')
+        self.assertEqual(self.sent()[-1], constants.tr_cli('bad_parameter', command='globalunban'))
+
+
+class DropDatabaseTest(SessionBase):
+    def setUp(self):
+        super().setUp()
+        import constants
+        constants.load_lang('en_US')
+        self._saved_paths = (var.music_db, var.settings_db_path)
+        var.music_db = self.music
+        var.settings_db_path = self.path
+        var.store.adopt_legacy('777')
+        var.store.set('777', 'volume', '0.5')
+        var.store.add_rule('777', 'user_ban', '1')
+        var.store.save_queue('777', 0, [{'id': 'a', 'user': 'x'}])
+        var.config.set('bot', 'admin', '111')
+        self.bot = self.make_bot(777)
+        self.bot.bind_guild(777)
+        self.bot.send_msg = mock.Mock()
+
+    def tearDown(self):
+        var.music_db, var.settings_db_path = self._saved_paths
+        super().tearDown()
+
+    def rows(self, table):
+        conn = sqlite3.connect(self.path)
+        try:
+            return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        finally:
+            conn.close()
+
+    def ctx(self, actor, admin=False):
+        from bot.discord_link import CommandContext
+        return CommandContext(actor=actor, name='x', username='x', command='drop_database', argument='',
+                              is_admin=admin)
+
+    def test_guild_admin_cannot_drop(self):
+        from commands import library
+        library.cmd_drop_database(self.bot, 'x', self.ctx(5, admin=True), 'dropdatabase', '')
+        self.assertEqual(self.rows('guild_settings') > 0, True)
+        self.assertEqual(self.rows('access_rule') > 0, True)
+
+    def test_owner_drop_clears_guild_tables_and_keeps_db_paths(self):
+        from commands import library
+        library.cmd_drop_database(self.bot, 'x', self.ctx(111), 'dropdatabase', '')
+        for table in GuildStore.TABLES:
+            self.assertEqual(self.rows(table), 0, table)
+        # 以前 music_db 被重建成指向 settings 库
+        self.assertEqual(var.music_db.db_path, self.music.db_path)
+        self.assertNotEqual(var.music_db.db_path, var.settings_db_path)
+        self.assertEqual(var.db.db_path, self.path)
+        # 表按当前版本重新建好,马上能用
+        self.assertIn('music', tables(self.music.db_path))
+        self.assertEqual(var.db.get('bot', 'db_version'), str(SETTING_DB_VERSION))
+        var.store.set('777', 'volume', '0.2')
+        self.assertEqual(var.store.get('777', 'volume'), '0.2')
 
 
 if __name__ == '__main__':

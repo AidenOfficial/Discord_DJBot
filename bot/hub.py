@@ -101,7 +101,11 @@ class Hub:
             token, home_guild_id=home or None, language=var.language,
             debug=var.config.getboolean('debug', 'discord_connection'), executor=self.executor)
         self.client.on_activity = self.report_activity
-        self.client.register_commands(self.named_specs)
+        self.client.register_commands(
+            self.named_specs,
+            owner_guild_id=var.config.get("discord", "owner_guild_id", fallback='') or None,
+            dev_guild_id=var.config.get("discord", "dev_guild_id", fallback='') or None,
+            sync_state=var.db)
         try:
             self.client.connect()
         except Exception as e:

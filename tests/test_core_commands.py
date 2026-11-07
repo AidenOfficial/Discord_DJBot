@@ -73,7 +73,8 @@ class CoreTest(unittest.TestCase):
         for spec in (Spec('play', 'play', handler, _d('x', 'x', 'x'), joins_voice=True),
                      Spec('queue', 'queue', handler, _d('x', 'x', 'x')),
                      Spec('help', 'help', handler, _d('x', 'x', 'x'), outside_channel=True),
-                     Spec('kill', 'kill', handler, _d('x', 'x', 'x'), admin=True),
+                     Spec('kill', 'kill', handler, _d('x', 'x', 'x'), owner_only=True),
+                     Spec('maxvol', 'maxvolume', handler, _d('x', 'x', 'x'), admin=True),
                      Spec('skip', 'skip', boom, _d('x', 'x', 'x'))):
             bot.cmd_handle[spec.key] = {'handle': spec.handler, 'spec': spec, 'name': spec.name}
             bot.slash_names[spec.key] = spec.name
@@ -91,12 +92,54 @@ class CoreTest(unittest.TestCase):
 
     def test_precheck_admin_and_ban(self):
         b = self.bot
-        self.assertEqual(b.precheck(self.ctx('kill')), constants.tr_cli('not_admin'))
-        self.assertIsNone(b.precheck(self.ctx('kill', admin=True)))
+        self.assertEqual(b.precheck(self.ctx('maxvol')), constants.tr_cli('not_admin'))
+        self.assertIsNone(b.precheck(self.ctx('maxvol', admin=True)))
         var.store.add_rule('', 'user_ban', '42', note='Aiden')
         self.assertEqual(b.precheck(self.ctx('queue')), constants.tr_cli('user_ban'))
-        self.assertIsNone(b.precheck(self.ctx('queue', admin=True)))   # 管理员不受封禁影响
+        # 全局封禁是 bot 主人定的:服务器管理员也管
+        self.assertEqual(b.precheck(self.ctx('queue', admin=True)), constants.tr_cli('user_ban'))
         self.assertIsNone(b.precheck(self.ctx('queue', actor=43)))
+        var.config.set('bot', 'admin', '42')                             # 只有 bot 主人自己不受影响
+        self.assertIsNone(b.precheck(self.ctx('queue')))
+
+    def test_guild_ban_does_not_apply_to_that_guilds_admins(self):
+        b = self.bot
+        b.bind_guild(777)
+        var.store.add_rule('777', 'user_ban', '42')
+        var.store.add_rule('777', 'url_ban', 'https://bad.example/g')
+        self.assertEqual(b.precheck(self.ctx('queue')), constants.tr_cli('user_ban'))
+        self.assertIsNone(b.precheck(self.ctx('queue', admin=True)))
+        self.assertIsNone(b.precheck(self.ctx('play', 'https://bad.example/g', voice=1, admin=True)))
+        var.store.add_rule('', 'url_ban', 'https://bad.example/g')      # 全局也封了:管理员也不行
+        self.assertIn('https://bad.example/g',
+                      b.precheck(self.ctx('play', 'https://bad.example/g', voice=1, admin=True)))
+
+    def test_owner_only_commands_refuse_guild_admins(self):
+        b = self.bot
+        var.config.set('bot', 'admin', '111;222')
+        # 服务器管理员(管理服务器权限)不是 bot 主人
+        self.assertEqual(b.precheck(self.ctx('kill', admin=True)), constants.tr_cli('not_owner'))
+        self.assertIsNone(b.precheck(self.ctx('kill', actor=222)))
+        # 执行前再查一次:预检查没拦住也跑不起来
+        b._handle_command(self.ctx('kill', admin=True))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(b.link.replies, [constants.tr_cli('not_owner')])
+        b._handle_command(self.ctx('kill', actor=111))
+        self.assertEqual(len(self.calls), 1)
+        # bot 主人在每个服务器都算管理员
+        self.assertIsNone(b.precheck(self.ctx('maxvol', actor=111)))
+        self.assertTrue(b.is_owner('111'))
+        self.assertFalse(b.is_owner(self.ctx('queue', admin=True)))
+
+    def test_queue_full_is_reported(self):
+        import media.playlist
+
+        def full(*a):
+            raise media.playlist.QueueFullError(3)
+
+        self.bot.cmd_handle['queue']['handle'] = full
+        self.bot._handle_command(self.ctx('queue'))
+        self.assertEqual(self.bot.link.replies, [constants.tr_cli('queue_full', max=3)])
 
     def test_precheck_url_ban(self):
         var.store.add_rule('', 'url_ban', 'https://bad.example/x')
@@ -156,10 +199,10 @@ class CoreTest(unittest.TestCase):
 
     def test_admin_is_rechecked_when_the_command_runs(self):
         # 预检查超时 / 出错时也不能让管理员命令跑起来
-        self.bot._handle_command(self.ctx('kill'))
+        self.bot._handle_command(self.ctx('maxvol'))
         self.assertEqual(self.calls, [])
         self.assertEqual(self.bot.link.replies, [constants.tr_cli('not_admin')])
-        self.bot._handle_command(self.ctx('kill', admin=True))
+        self.bot._handle_command(self.ctx('maxvol', admin=True))
         self.assertEqual(len(self.calls), 1)
 
     def test_banned_user_is_rechecked(self):

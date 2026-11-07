@@ -212,7 +212,9 @@ Type `/` in the server to browse every command with its options. `/help` lists t
 | `/bind` / `/mylist` / `/fav` | Personal playlists (generate the code in the web interface) |
 | `/lyrics` / `/web` / `/help` / `/version` | Other |
 
-Administrators — users or roles listed in `[bot] admin`, plus members with *Administrator* or *Manage Server* unless `[discord] admin_by_permission = False` — also have `/kill`, `/update`, `/urlban`, `/userban`, `/maxvolume`, `/rescan` and the web user commands.
+Server admins — members with *Administrator* or *Manage Server* (unless `[discord] admin_by_permission = False`) and roles listed in `[bot] admin` — manage their own server with `/maxvolume`, `/userban`, `/userunban`, `/urlban`, `/urlunban` and `/banlist`. Discord shows these only to members with *Manage Server* by default; a server can change that under *Server Settings → Integrations*.
+
+The bot owner — the user IDs in `[bot] admin` — is an admin everywhere and also has the global ban list (`/globalban`, `/globalunban`, `/globalbanlist`, `/urlwhitelist`, `/urlunwhitelist`) and the operations commands (`/kill`, `/update`, `/rescan`, `/dropdatabase`, web user commands). These are registered only in `[discord] owner_guild_id` (or globally, visible to administrators, when it is empty), and the bot checks the owner's ID every time they run.
 
 By default only people in the bot's voice channel can control playback (`[bot] allow_other_channel_message`).
 
