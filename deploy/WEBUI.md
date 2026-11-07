@@ -114,6 +114,84 @@ access_aud = <Access 应用 Overview 页的 Application Audience (AUD) Tag>
   用 Discord 登录后,身份优先于 Access 邮箱头(JWT 校验仍然照常要求)。
 - 会话 Cookie 由 `flask_secret` 签名;不配置时随机生成一次存进 settings 库,重启不掉登录。
 
+## Discord Activity(在 Discord 里打开控制面板,可选)
+
+在语音频道里点 **Activities(火箭图标)** 就能打开 bot 的控制面板:队列、搜索、播放控制,
+和网页版是同一个界面。声音照旧由 bot 推进语音频道,Activity 只是遥控器;面板固定操作
+**打开它的那个服务器**,不显示服务器切换。
+
+下文的 `<PUBLIC_HOST>` 是以后对外的 HTTPS 主机名(例如 `music.example.com`,还没定)。
+
+### 工作方式
+
+1. Discord 在 iframe 里打开 `https://<应用 ID>.discordsays.com/?frame_id=…&instance_id=…`,
+   经 Discord 的代理转到 `https://<PUBLIC_HOST>/`。带着这两个启动参数时,首页和打包的静态资源
+   不需要登录(里面没有数据)。
+2. 前端用 Embedded App SDK 的 `authorize()` 拿到 code(scope `identify guilds`),
+   `POST /api/activity/token {code, guild_id, channel_id}`。
+3. 服务端用 Client Secret 换 Discord access token,读 `/users/@me` 和 `/users/@me/guilds`,然后
+   **不信 SDK 给的上下文**,逐项核对:bot 在这个服务器;用户是成员(OAuth 服务器列表,或 bot 查成员);
+   按 bot 网关的语音状态,用户此刻就在这个语音频道里。都对了才签发我们自己的短期令牌
+   (`activity_token_ttl` 秒,默认 15 分钟,用 `flask_secret` 签名,可撤销)。
+4. 前端调 SDK 的 `authenticate()`,之后所有 API 请求带 `Authorization: Bearer <令牌>`。
+   令牌只在内存里,不写 localStorage,不用 Cookie。快到期时 `POST /api/activity/refresh`
+   换新令牌(会再核对一次语音频道,人已经离开就不续);关闭时 `POST /api/activity/logout` 作废。
+5. 权限和用 Discord 登录网页版一样(`web_context` 的规则:bot 主人、管理服务器权限……),
+   打开 Activity 的服务器是默认服务器。`auth_method` 是什么都不影响 Activity。
+6. 外部图片(搜索结果封面、头像)经 `/api/thumbnail/external` 转发(只代理 YouTube / Bilibili /
+   Discord CDN 等图床),所以 **不需要** 给图床另外登记 URL Mapping,也用不着 `patchUrlMappings`。
+
+### Developer Portal 配置(应用 ID `1568438278825181214`)
+
+1. **Activities → Settings**:打开 **Enable Activities**。Discord 会自动建一条入口命令
+   (Entry Point,`PRIMARY_ENTRY_POINT`,默认叫 `Launch`)。Supported Platforms 勾上
+   Web / Desktop / iOS / Android;手机的方向锁定选 Unlocked(竖屏横屏都适配了)。
+2. **Activities → URL Mappings**:Root Mapping 设成 `/` → `<PUBLIC_HOST>`(只填主机名,
+   不带 `https://`、不带路径)。不需要别的映射。
+3. **OAuth2**:
+   - 记下 Client ID 和 Client Secret(和"用 Discord 登录"是同一对)。
+   - Redirects 至少要有一条(SDK 授权本身不用跳转):已经配了 `<public_url>/auth/discord/callback`
+     就够了,没有的话加一条 `https://127.0.0.1` 当占位。
+   - scope 不用在 Portal 里设:前端请求 `identify` 和 `guilds`,用户第一次打开时 Discord 弹窗确认。
+4. **入口命令**:Portal 里自动建的那条可以改名字和描述。bot 同步全局斜杠命令时会读出现有的入口命令
+   原样一起提交(Discord 的全局同步是整体覆盖,不带上会被拒:错误码 50240);如果 Discord 上一条都没有、
+   而 `activity_enabled = True`,bot 会登记一条 `/launch`(由 Discord 直接打开 Activity)。
+5. **Installation**:保持 Guild Install(bot 本来就要装进服务器)。
+
+### bot 配置
+
+```ini
+[webinterface]
+activity_enabled = True
+activity_token_ttl = 900
+discord_client_id = 1568438278825181214
+public_url = https://<PUBLIC_HOST>
+; Client Secret 放 .env 的 DISCORD_CLIENT_SECRET
+```
+
+改完重启 bot:日志里会看到全局斜杠命令重新同步一次(开关 Activity 也算命令变了)。
+
+### 网络 / 安全响应头
+
+- `<PUBLIC_HOST>` 要能从公网直接访问:Discord 的代理在它自己的服务器上取页面,
+  **不能挡在 Cloudflare Access 的交互登录后面**(Tunnel 本身没问题)。
+- 响应头(加固那边负责):CSP 的 `frame-ancestors` 要放行 `https://discord.com`、
+  `https://*.discord.com`、`https://*.discordsays.com`;`img-src` 要允许 `blob:`(Activity 里的图片
+  是带令牌取回来再用 blob URL 显示的);`connect-src 'self'` 就够。不能发 `X-Frame-Options: DENY`。
+
+### 上线前检查清单
+
+- [ ] 公网域名定了,`<PUBLIC_HOST>` 已替换进 URL Mapping 和 `public_url`,`https://<PUBLIC_HOST>/api/activity/config` 返回 `enabled: true`。
+- [ ] Portal 里 Activities 已开启,入口命令存在;bot 重启后日志显示全局命令同步成功,入口命令还在(客户端的 App Launcher 里能看到)。
+- [ ] Client Secret 只在 `.env`,没进 git;`flask_secret` 不是默认值(令牌用它签名,换了就全部失效)。
+- [ ] 桌面客户端:进语音频道 → 火箭图标 → 打开 → 第一次弹授权 → 看到当前服务器的队列,能播放 / 暂停 / 跳过 / 搜索点歌,声音从 bot 出来。
+- [ ] 手机客户端(竖屏):布局不溢出,刘海和底部手势条不挡按钮;缩成画中画时只剩迷你播放条。
+- [ ] 不在语音频道的人打开(或从别的频道转发的邀请)被拒,提示"先进入语音频道"。
+- [ ] 离开语音频道后,最多一个 `activity_token_ttl` 内面板提示需要重新打开。
+- [ ] 搜索结果封面、队列封面在 Activity 里都显示(外部图片走代理)。
+- [ ] 浏览器开发者工具里没有 CSP / frame-ancestors 报错。
+- [ ] 应用要对外公开前:按 Discord 的要求完成应用验证(未验证的应用,Activity 的可用范围有限制)。
+
 ## 语音频道与跟随(Settings 页)
 
 - 实时显示服务器的语音频道(按分类分组,和 Discord 里的顺序一致)和每个频道里的人
@@ -230,3 +308,4 @@ access_aud = <Access 应用 Overview 页的 Application Audience (AUD) Tag>
 - [ ] 上传大小上限 `max_upload_file_size` 符合预期;上传一个 >100MB 的视频能成功并只剩音轨。
 - [ ] 右上角显示的是自己的 Access 邮箱;设置别名后点一首歌,队列里显示别名。
 - [ ] bot 不在语音频道时,Now Playing 顶部有提示;Settings 里能让 bot 进出频道。
+- [ ] 开了 Discord Activity 的话:按上面"Discord Activity → 上线前检查清单"逐项过一遍。
