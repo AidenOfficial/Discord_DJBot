@@ -820,7 +820,8 @@ def _entries_from_source(payload):
         url = (payload.get('url') or '').strip()
         if payload.get('provider') == 'bilibili':
             url = util.get_bilibili_url_from_input(payload.get('id') or url)
-        if not url or not url.lower().startswith(('http://', 'https://')) or len(url) > 2048                 or not util.is_public_url(url):
+        if not url or not url.lower().startswith(('http://', 'https://')) or len(url) > 2048 \
+                or not util.is_public_url(url):
             abort(400)
         try:
             duration = float(payload.get('duration') or 0)

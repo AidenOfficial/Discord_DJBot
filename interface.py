@@ -130,14 +130,19 @@ def _ip_banned(ip):
     return True
 
 
+def _log_safe(value):
+    # 用户名、IP(来自请求头)都是访问者给的:去掉换行,免得伪造出多行日志
+    return str(value).replace('\r', '').replace('\n', '')[:200]
+
+
 def _record_failure(ip, what):
     count = bad_access_count.get(ip, 0) + 1
     bad_access_count[ip] = count
-    log.info(f"web: {what} from ip {ip}, {count} attempts.")
+    log.info("web: %s from ip %s, %d attempts.", _log_safe(what), _log_safe(ip), count)
     if count > var.config.getint("webinterface", "max_attempts", fallback=10):
         seconds = web_security.ban_seconds()
         banned_ip[ip] = time.monotonic() + seconds
-        log.info(f"web: login attempts from {ip} blocked for {seconds // 60} min")
+        log.info("web: login attempts from %s blocked for %d min", _log_safe(ip), seconds // 60)
 
 
 def _with_identity(f, auth_user, args, kwargs):

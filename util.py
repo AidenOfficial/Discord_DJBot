@@ -187,10 +187,17 @@ def _is_bilibili_host(host):
 
 
 def resolve_redirects(url, host_ok, max_hops=5, method='HEAD', headers=None):
-    """一跳一跳地跟随 HTTP 跳转,每一跳的主机都要 host_ok(hostname) 通过,否则返回 None。
-    requests 的 allow_redirects=True 会先把每一跳都请求了才让我们检查,精心构造的短链就能
-    让 bot 去请求内网地址(SSRF)。"""
+    """一跳一跳地跟随 HTTP 跳转,每一跳(包括第一跳)都要是 http(s)、主机通过 host_ok(hostname)、
+    并且解析到公网地址,否则返回 None。requests 的 allow_redirects=True 会先把每一跳都请求了
+    才让我们检查,精心构造的短链就能让 bot 去请求内网地址(SSRF)。"""
     for _ in range(max_hops):
+        try:
+            parts = urlparse(url)
+            host = (parts.hostname or '').lower()
+        except ValueError:
+            return None
+        if parts.scheme.lower() not in ("http", "https") or not host_ok(host) or not is_public_url(url):
+            return None
         try:
             resp = requests.request(method, url, allow_redirects=False, timeout=10, headers=headers,
                                     stream=True)
@@ -200,10 +207,7 @@ def resolve_redirects(url, host_ok, max_hops=5, method='HEAD', headers=None):
         location = resp.headers.get("Location") if resp.is_redirect else None
         if not location:
             return url
-        location = urljoin(url, location)
-        if urlparse(location).scheme.lower() not in ("http", "https")                 or not host_ok((urlparse(location).hostname or '').lower()):
-            return None
-        url = location
+        url = urljoin(url, location)
     return None
 
 

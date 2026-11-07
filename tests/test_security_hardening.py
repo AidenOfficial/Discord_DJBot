@@ -379,6 +379,19 @@ def test_resolve_redirects_checks_each_hop(monkeypatch):
     assert util.resolve_redirects('https://163cn.tv/evil', ok) is None
     assert seen == ['https://163cn.tv/evil']  # 内网那一跳没有被请求
     assert util.resolve_redirects('https://163cn.tv/loop', ok, max_hops=3) is None
+    # 第一跳也要过检查:不在白名单 / 解析到内网的链接一次都不请求
+    seen.clear()
+    assert util.resolve_redirects('https://evil.example/', ok) is None
+    monkeypatch.setattr(util, 'resolve_host', lambda host: ['10.0.0.1'])
+    assert util.resolve_redirects('https://163cn.tv/abc', ok) is None
+    assert seen == []
+
+
+def test_failure_log_strips_newlines(interface, caplog):
+    with caplog.at_level(logging.INFO, logger='bot'):
+        interface._record_failure('203.0.113.1\nFAKE', 'failed login attempt, user: a\r\nweb: forged')
+    message = caplog.records[-1].getMessage()
+    assert '\n' not in message and '\r' not in message
 
 
 def test_url_item_refuses_private_url(config, monkeypatch, tmp_path):
