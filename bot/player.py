@@ -22,14 +22,17 @@ class PlayerMixin:
     # Consecutive dead reconnect attempts before a live stream is given up on.
     LIVESTREAM_MAX_RETRIES = 3
 
-    def update_activity(self, title):
-        """bot 的 Discord 状态显示正在播的歌(None = 清除)。只在变化时发,不阻塞播放线程。"""
-        if title == getattr(self, '_activity', None):
+    def update_activity(self, title, artist=''):
+        """bot 的 Discord 状态显示正在播的歌(None = 清除):第一行歌名,第二行歌手。
+        只在变化时发,不阻塞播放线程。"""
+        state = (title, artist or '') if title else None
+        if state == getattr(self, '_activity', None):
             return
-        self._activity = title
+        self._activity = state
         link = getattr(self, 'link', None)
         if link is not None and hasattr(link, 'set_activity'):
-            threading.Thread(target=link.set_activity, args=(title,), name="Presence", daemon=True).start()
+            threading.Thread(target=link.set_activity, args=(title, artist or ''), name="Presence",
+                             daemon=True).start()
 
     def _livestream_retry(self, ffmpeg_rc):
         """Live streams drop for reasons that have nothing to do with the
@@ -250,7 +253,12 @@ class PlayerMixin:
         panel = getattr(getattr(self, 'now_playing', None), 'panel_enabled', False)
         if var.config.getboolean('bot', 'announce_current_music') and not quiet and not panel:
             self.send_channel_msg(music_wrapper.format_current_playing())
-        self.update_activity(music_wrapper.format_title())
+        try:
+            item = music_wrapper.item()
+            self.update_activity(getattr(item, 'track', '') or music_wrapper.format_title(),
+                                 getattr(item, 'artist', '') or '')
+        except Exception:
+            self.update_activity(music_wrapper.format_title())
 
         if var.config.getboolean('debug', 'ffmpeg'):
             ffmpeg_debug = "debug"

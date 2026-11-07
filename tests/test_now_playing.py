@@ -19,7 +19,7 @@ import discord  # noqa: E402
 import constants  # noqa: E402
 import variables as var  # noqa: E402
 from bot import now_playing as np  # noqa: E402
-from bot.discord_link import DiscordLink  # noqa: E402
+from bot.discord_link import DiscordLink, User  # noqa: E402
 from database import SettingsDatabase  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -71,6 +71,7 @@ class FakeBot:
         self.playhead = 0.0
         self.volume_helper = types.SimpleNamespace(plain_volume_set=0.4)
         self.waiting = set()
+        self.thread = object()  # ffmpeg 在跑 = 真的在出声
 
     def is_waiting_for(self, item_id):
         return item_id in self.waiting
@@ -268,13 +269,21 @@ class ControllerTest(_VarCase):
         n.tick(now=203)
         self.assertEqual(len(link.ends), 1)
 
-    def test_paused_restore_does_not_post(self):
-        self.bot.is_pause = True                            # 启动时恢复了上次的队列
+    def test_restored_queue_does_not_post_until_audio_starts(self):
+        self.bot.is_pause = True                            # 启动时恢复了上次的队列(暂停着)
         self.np.tick(now=1)
-        self.assertEqual(self.link.shows, [])
         self.bot.is_pause = False
+        self.bot.thread = None                              # 没暂停,但 ffmpeg 没在跑:还没开始放
         self.np.tick(now=2)
+        self.assertEqual(self.link.shows, [])
+        self.assertEqual(self.link.statuses, ['⏸ One — A', '🎵 One — A'])  # 频道状态照常
+        self.bot.thread = object()
+        self.np.tick(now=3)
         self.assertEqual(len(self.link.shows), 1)
+        self.bot.thread = None                              # 歌与歌之间的空档:面板已经在了,照常更新
+        var.playlist.current_index = 1
+        self.np.tick(now=4)
+        self.assertEqual(len(self.link.shows), 2)
 
     def test_failure_backs_off(self):
         self.link.ok = False
@@ -453,6 +462,25 @@ class LinkPanelTest(unittest.TestCase):
         sent = self.channel.sent[0]
         self.assertNotIn('file', sent)
         self.assertIsNone(sent['embed'].thumbnail.url)
+
+    def test_web_playback_uses_panel_channel_then_system_channel(self):
+        # 网页点歌:没有配置公告频道、也没有"最近发命令的频道"。语音频道自带的文字区排在最后
+        voice_chat = FakeChannel(3)
+        self.link.announce_channel_id = None
+        self.link._users = {99: User(session=99, name='bot', channel_id=3)}
+        self.link._me_id = 99
+        self.guild.system_channel = self.channel
+        channels = {500: self.channel, 3: voice_chat}
+        with mock.patch.object(self.link._client, 'get_channel', side_effect=channels.get):
+            self.link.panel_show(panel(), new_track=True)
+            self.assertEqual((len(self.channel.sent), voice_chat.sent), (1, []))
+            self.guild.system_channel = None                # 系统频道没了:面板留在原来的频道
+            self.channel.latest = FakeMessage(self.channel, 5)
+            self.link.panel_show(panel(title='Next'), new_track=True)
+            self.assertEqual((len(self.channel.sent), voice_chat.sent), (2, []))
+            self.link._panel_msg = None                     # 什么都没有了才用语音频道的文字区
+            self.link.panel_show(panel(title='Last'), new_track=True)
+            self.assertEqual(len(voice_chat.sent), 1)
 
     def test_no_embed_permission_means_no_panel(self):
         self.channel.perms.embed_links = False

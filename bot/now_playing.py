@@ -27,7 +27,7 @@ TICK = 1.0
 #: 播放中刷新进度条的间隔(秒)。频道消息编辑的限速大约是每 5 秒 5 次,远用不完
 PROGRESS_EVERY = 10.0
 #: 更新失败后多久再试(秒),免得频道没权限时每秒打一次 API
-RETRY_AFTER = 30.0
+RETRY_AFTER = 10.0
 BAR_WIDTH = 18
 LIVE_TYPES = ('radio', 'livestream')
 #: Discord 语音频道状态的长度上限
@@ -120,12 +120,15 @@ def snapshot(bot):
         status = 'loading'
     else:
         status = 'playing'
+    # 真的在出声(或在为这首做准备)。启动时恢复的队列 is_pause 是 False,但 ffmpeg 没在跑,不算在放
+    active = status == 'loading' or (status == 'playing' and getattr(bot, 'thread', None) is not None)
     cover_key, cover_path, cover_b64 = _cover_source(item)
     url = getattr(item, 'url', '') or ''
     volume = getattr(getattr(bot, 'volume_helper', None), 'plain_volume_set', None)
     return {
         'id': item.id,
         'status': status,
+        'active': active,
         'title': getattr(item, 'track', '') or item.format_title(),
         'artist': getattr(item, 'artist', '') or '',
         'album': getattr(item, 'album', '') or '',
@@ -309,7 +312,7 @@ class NowPlaying:
     def _update_panel(self, snap, now):
         if now < self._retry_at:
             return
-        if self._stale and (snap is None or snap['status'] == 'paused'):
+        if self._stale and (snap is None or not snap['active']):
             # 上次运行留下的面板:按钮还在,状态是旧的。先把按钮收掉,开始放歌时再接着用这条消息
             self._stale = False
             self.link.panel_end(None)
@@ -325,8 +328,8 @@ class NowPlaying:
                     self._retry_at = now + RETRY_AFTER
             return
         new_track = snap['id'] != self._track
-        if new_track and snap['status'] == 'paused' and not self._shown:
-            # 启动时恢复了上次的队列(暂停着):等真正开始放再发面板
+        if new_track and not self._shown and not snap['active']:
+            # 启动时恢复了上次的队列(暂停着,或还没开始放):等真正出声再发面板
             return
         key = tuple(snap[k] for k in ('id', 'status', 'title', 'artist', 'album', 'mode', 'index',
                                       'total', 'volume', 'requester', 'cover_key', 'duration'))

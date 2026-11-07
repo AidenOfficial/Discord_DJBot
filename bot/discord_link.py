@@ -896,13 +896,13 @@ class DiscordLink:
         except Exception:
             log.warning("discord: could not send an announcement", exc_info=True)
 
-    def _announce_channels(self, need=()):
-        """能发公告的频道,按优先级:配置的 announce_channel → 最近一次发命令的频道 → bot 所在语音频道的文字区。
-        need:除了"看得到、能发言"之外还要的权限(如 embed_links)。"""
+    def _announce_channels(self, need=(), prefer=()):
+        """能发公告的频道,按优先级:配置的 announce_channel → 最近一次发命令的频道 → prefer →
+        bot 所在语音频道的文字区。need:除了"看得到、能发言"之外还要的权限(如 embed_links)。"""
         guild = self._guild()
         me = guild.me if guild is not None else None
         tried = set()
-        for cid in (self.announce_channel_id, self._last_command_channel, self.my_channel_id):
+        for cid in (self.announce_channel_id, self._last_command_channel, *prefer, self.my_channel_id):
             if not cid or cid in tried:
                 continue
             tried.add(cid)
@@ -991,6 +991,18 @@ class DiscordLink:
             embed.set_thumbnail(url=f'attachment://{PANEL_COVER_NAME}')
         return embed
 
+    def _panel_channel(self):
+        """面板发在哪。网页点歌时没有"最近发命令的频道":先留在面板原来的频道(重启后也记得),
+        再用服务器的系统频道,最后才是语音频道自带的文字区(大家一般不看那里)。"""
+        prefer = []
+        if self._panel_msg is not None:
+            prefer.append(self._panel_msg.channel.id)
+        guild = self._guild()
+        system = getattr(guild, 'system_channel', None) if guild is not None else None
+        if system is not None:
+            prefer.append(system.id)
+        return next(self._announce_channels(need=('embed_links',), prefer=prefer), None)
+
     def _cover_file(self):
         return discord.File(BytesIO(self._panel_cover), filename=PANEL_COVER_NAME)
 
@@ -1012,7 +1024,7 @@ class DiscordLink:
         msg = self._panel_msg
         target = None
         if new_track or msg is None:
-            target = next(self._announce_channels(need=('embed_links',)), None)
+            target = self._panel_channel()
             if msg is not None and not await self._panel_is_latest(msg, target):
                 try:
                     await msg.delete()
@@ -1035,7 +1047,7 @@ class DiscordLink:
                 return False
 
         if target is None:
-            target = next(self._announce_channels(need=('embed_links',)), None)
+            target = self._panel_channel()
         if target is None:
             log.debug("discord: no channel to post the now-playing panel in")
             return False
@@ -1047,6 +1059,7 @@ class DiscordLink:
         if attach:
             kwargs['file'] = self._cover_file()
         self._panel_msg = await target.send(**kwargs)
+        log.info("discord: now-playing panel posted in #%s", getattr(target, 'name', target.id))
         return True
 
     async def _panel_end(self, panel):
@@ -1114,9 +1127,13 @@ class DiscordLink:
         except discord.HTTPException:
             log.debug("discord: could not clear the voice channel status", exc_info=True)
 
-    def set_activity(self, text):
-        """bot 的状态:"正在听 {text}";None 清除。"""
-        activity = discord.Activity(type=discord.ActivityType.listening, name=text[:128]) if text else None
+    def set_activity(self, text, state=''):
+        """bot 的状态:"正在听 {text}",第二行 state(歌手);text 为 None 清除。
+        bot 账号的活动 Discord 只显示 name 和 state 两行:details、时间戳(进度条)、图片都不显示。"""
+        activity = None
+        if text:
+            activity = discord.Activity(type=discord.ActivityType.listening, name=text[:128],
+                                        state=(state or '')[:128] or None)
         try:
             self._call(self._client.change_presence(activity=activity), timeout=10)
         except Exception:
