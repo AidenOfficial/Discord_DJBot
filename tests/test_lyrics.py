@@ -427,6 +427,8 @@ class EnsureTest(StoreTestCase):
 
 class CommandTest(StoreTestCase):
     class Bot:
+        playlist = property(lambda self: var.playlist)
+
         def __init__(self):
             self.sent = []
             self.link = type('M', (), {'max_message_length': 5000})()

@@ -132,7 +132,7 @@ def cmd_my_playlist(bot, user, text, command, parameter):
         return
     if len(wrappers) > 1:
         tag_group(wrappers, pl['name'], 'playlist', pl['id'])
-    var.playlist.extend(wrappers)
+    bot.playlist.extend(wrappers)
     bot.async_download_next()
     bot.send_msg(tr('mylist_queued', name=pl['name'], count=len(wrappers)), text)
 
@@ -141,7 +141,7 @@ def cmd_favorite(bot, user, text, command, parameter):
     identity = _require_identity(bot, text)
     if identity is None:
         return
-    if len(var.playlist) == 0 or not var.playlist.current_item():
+    if len(bot.playlist) == 0 or not bot.playlist.current_item():
         bot.send_msg(tr('queue_empty'), text)
         return
     name = (parameter or '').strip()[:web_users.NAME_MAX_LEN] or FAV_DEFAULT
@@ -152,7 +152,7 @@ def cmd_favorite(bot, user, text, command, parameter):
     except ValueError:
         bot.send_msg(tr('mylist_too_many'), text)
         return
-    current = var.playlist.current_item()
+    current = bot.playlist.current_item()
     entry = web_users.entry_from_item(current.item())
     added = var.user_db.add_items(identity, playlist_id, [entry])
     key = 'fav_added' if added else 'fav_exists'

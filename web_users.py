@@ -23,6 +23,7 @@ from flask import Blueprint, abort, g, jsonify, request
 
 import util
 import variables as var
+import web_context
 
 log = logging.getLogger("bot")
 
@@ -729,7 +730,7 @@ def _entries_from_source(payload):
     source = payload.get('source')
     entries = []
     if source == 'current':
-        wrapper = var.playlist.current_item() if len(var.playlist) else None
+        wrapper = web_context.playlist().current_item() if len(web_context.playlist()) else None
         if not wrapper:
             abort(400)
         entries.append(entry_from_item(wrapper.item()))
@@ -738,11 +739,11 @@ def _entries_from_source(payload):
             index = int(payload.get('index', -1))
         except (TypeError, ValueError):
             abort(400)
-        if not 0 <= index < len(var.playlist):
+        if not 0 <= index < len(web_context.playlist()):
             abort(400)
-        entries.append(entry_from_item(var.playlist[index].item()))
+        entries.append(entry_from_item(web_context.playlist()[index].item()))
     elif source == 'all_queue':
-        for wrapper in list(var.playlist):
+        for wrapper in list(web_context.playlist()):
             try:
                 entries.append(entry_from_item(wrapper.item()))
             except Exception:
@@ -787,22 +788,22 @@ def enqueue(wrappers, mode):
         # 队列里就全是悬空引用(ItemNotCachedError,一首首被跳过)。
         # 先取出条目,清空后再放回缓存。
         items = [w.item() for w in wrappers]
-        var.bot.clear()
+        web_context.session().clear()
         for item in items:
             var.cache[item.id] = item
-        var.playlist.extend(wrappers)
+        web_context.playlist().extend(wrappers)
         # 不走 resume():current_index 为 -1 时它会先 next() 一次,
         # 主循环再 next() 一次,第一首就被跳过了
-        var.bot.is_pause = False
+        web_context.session().is_pause = False
     elif mode == 'next':
-        index = var.playlist.current_index + 1
+        index = web_context.playlist().current_index + 1
         for offset, wrapper in enumerate(wrappers):
-            var.playlist.insert(index + offset, wrapper)
+            web_context.playlist().insert(index + offset, wrapper)
     else:
-        var.playlist.extend(wrappers)
+        web_context.playlist().extend(wrappers)
     # 与旧接口一致:成了"下一首"的话立刻开始预下载
     try:
-        var.bot.async_download_next()
+        web_context.session().async_download_next()
     except Exception:
         log.debug("web: async_download_next failed", exc_info=True)
 
@@ -831,7 +832,7 @@ def create_blueprint(requires_auth):
         if not ident.key or var.user_db is None:
             abort(403)
         code, expires_at = var.user_db.create_bind_code(ident.key)
-        command_name = getattr(var.bot, 'command_name', None)
+        command_name = getattr(web_context.session(), 'command_name', None)
         name = command_name('bind') if command_name else 'bind'
         return jsonify({'code': code, 'expires_at': expires_at, 'command': f"/{name} code:{code}"})
 

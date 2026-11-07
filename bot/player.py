@@ -10,8 +10,10 @@ from constants import tr_cli as tr
 from media import lyrics, sponsorblock
 from media.item import ValidationFailedError, PreparationFailedError
 
+from .session_queue import SessionQueue
 
-class PlayerMixin:
+
+class PlayerMixin(SessionQueue):
     """Playback half of DJBot: ffmpeg decoding, the send loop,
     download orchestration, volume and transport control."""
 
@@ -39,9 +41,9 @@ class PlayerMixin:
         broadcast being over (expired segment URLs, network hiccups). Return
         True to relaunch the current livestream item - uri() resolves a fresh
         stream URL - instead of letting the loop discard it as a dead track."""
-        if var.playlist.current_index == -1:
+        if self.playlist.current_index == -1:
             return False
-        current = var.playlist.current_item()
+        current = self.playlist.current_item()
         if not current:
             return False
         try:
@@ -169,9 +171,9 @@ class PlayerMixin:
         playhead. Any other outcome means this container cannot be decoded
         while growing (e.g. mp4 with a trailing moov atom): flag the item so
         it waits for the full download instead of retrying forever."""
-        if not self._stream_enabled() or var.playlist.current_index == -1:
+        if not self._stream_enabled() or self.playlist.current_index == -1:
             return False
-        current = var.playlist.current_item()
+        current = self.playlist.current_item()
         if not current:
             return False
         try:
@@ -342,11 +344,11 @@ class PlayerMixin:
         # Function start if the next music isn't ready
         # Do nothing in case the next music is already downloaded
         self.log.debug("bot: Async download next asked ")
-        while var.playlist.next_item():
+        while self.playlist.next_item():
             # usually, all validation will be done when adding to the list.
             # however, for performance consideration, youtube playlist won't be validate when added.
             # the validation has to be done here.
-            next = var.playlist.next_item()
+            next = self.playlist.next_item()
             try:
                 if not next.is_ready():
                     self.async_download(next)
@@ -354,7 +356,7 @@ class PlayerMixin:
                 break
             except ValidationFailedError as e:
                 self.send_channel_msg(e.msg)
-                var.playlist.remove_by_id(next.id)
+                self.playlist.remove_by_id(next.id)
                 var.cache.free_and_delete(next.id)
 
         self._prefetch_upcoming()
@@ -368,7 +370,7 @@ class PlayerMixin:
         count = var.config.getint('bot', 'prefetch_count', fallback=2)
         if count <= 1:
             return
-        for wrapper in var.playlist.upcoming_items(count)[1:]:
+        for wrapper in self.playlist.upcoming_items(count)[1:]:
             with self._download_lock:
                 if len(self._active_downloads) >= self.PREFETCH_MAX_CONCURRENT:
                     break
@@ -378,7 +380,7 @@ class PlayerMixin:
             except ValidationFailedError as e:
                 # same cleanup path async_download_next uses
                 self.send_channel_msg(e.msg)
-                var.playlist.remove_by_id(wrapper.id)
+                self.playlist.remove_by_id(wrapper.id)
                 var.cache.free_and_delete(wrapper.id)
 
     def async_download(self, item):
@@ -449,11 +451,11 @@ class PlayerMixin:
         主循环没在等这首时(正在播或刚播完),接下来它会 next();删掉当前曲后
         指针已经指向原来的下一首,要让那次 next() 原地不动,否则下一首会被
         跳过(one-shot 模式下是直接被删掉)。"""
-        var.playlist.remove_by_id(item_id, rewind=not self.wait_for_ready)
+        self.playlist.remove_by_id(item_id, rewind=not self.wait_for_ready)
 
     def remove_from_queue(self, index):
         """用户删除队列第 index 首(/remove、Web 队列)。返回被删的条目。"""
-        playlist = var.playlist
+        playlist = self.playlist
         if index != playlist.current_index:
             return playlist.remove(index)
 
@@ -470,7 +472,7 @@ class PlayerMixin:
 
     def remove_group_from_queue(self, key):
         """把队列里同一组(一次入队的整张歌单)全部删掉。返回删掉的条数。"""
-        playlist = var.playlist
+        playlist = self.playlist
         with playlist.playlist_lock:
             indexes = [i for i, w in enumerate(playlist)
                        if (getattr(w, 'group', None) or {}).get('key') == key]
@@ -510,7 +512,7 @@ class PlayerMixin:
             try:
                 item.prepare()
                 if item.version > ver:
-                    var.playlist.version += 1
+                    self.playlist.version += 1
                 return True
             except PreparationFailedError as e:
                 self.send_channel_msg(e.msg)
@@ -546,9 +548,9 @@ class PlayerMixin:
 
     def is_waiting_for(self, item_id):
         """bot 正在等这首歌准备好(还没出声)。"""
-        if self.is_pause or not self.wait_for_ready or len(var.playlist) == 0:
+        if self.is_pause or not self.wait_for_ready or len(self.playlist) == 0:
             return False
-        current = var.playlist.current_item()
+        current = self.playlist.current_item()
         return bool(current) and current.id == item_id
 
     def prep_status(self, wrapper):
@@ -713,7 +715,7 @@ class PlayerMixin:
             if var.config.getboolean('bot', 'save_playlist') \
                     and var.config.get("bot", "save_music_library"):
                 self.log.info("bot: save playlist into database")
-                var.playlist.save()
+                self.playlist.save()
 
     def _autosave_playlist(self):
         # 队列以前只在正常退出时保存:一旦崩溃/被看门狗重启,整条队列就丢了。
@@ -724,11 +726,11 @@ class PlayerMixin:
         self._last_playlist_save = now
         if not var.config.getboolean('bot', 'save_playlist', fallback=True):
             return
-        version = (id(var.playlist), var.playlist.version, var.playlist.current_index)
+        version = (id(self.playlist), self.playlist.version, self.playlist.current_index)
         if version == getattr(self, '_saved_playlist_version', None):
             return
         try:
-            var.playlist.save()
+            self.playlist.save()
             self._saved_playlist_version = version
         except Exception:
             self.log.debug("bot: playlist autosave failed", exc_info=True)
@@ -837,8 +839,8 @@ class PlayerMixin:
             # (SIGKILL=-9 / SIGTERM=-15) means the track failed to decode - an
             # unsupported codec, or a corrupt / truncated file.
             if ffmpeg_rc is not None and ffmpeg_rc not in (0, -9, -15) \
-                    and var.playlist.current_index != -1:
-                current = var.playlist.current_item()
+                    and self.playlist.current_index != -1:
+                current = self.playlist.current_item()
                 if current:
                     self.log.error("bot: cannot play music %s (ffmpeg exit %s)",
                                    current.format_debug_string(), ffmpeg_rc)
@@ -851,8 +853,8 @@ class PlayerMixin:
 
             # move to the next song.
             if not self.wait_for_ready:  # if wait_for_ready flag is not true, move to the next song.
-                if var.playlist.next():
-                    current = var.playlist.current_item()
+                if self.playlist.next():
+                    current = self.playlist.current_item()
                     self._quiet_relaunch = False  # 换了新歌,跳片段留下的静默标记作废
                     self.log.debug(f"bot: next into the song: {current.format_debug_string()}")
                     try:
@@ -872,7 +874,7 @@ class PlayerMixin:
             else:
                 # if wait_for_ready flag is true, means the pointer is already
                 # pointing to target song. start playing
-                current = var.playlist.current_item()
+                current = self.playlist.current_item()
                 if current:
                     if current.is_ready():
                         self.wait_for_ready = False
@@ -960,9 +962,9 @@ class PlayerMixin:
         self._quiet_relaunch = False
 
         if index != -1:
-            var.playlist.point_to(index)
+            self.playlist.point_to(index)
 
-        current = var.playlist.current_item()
+        current = self.playlist.current_item()
         if not current:
             return
 
@@ -975,7 +977,7 @@ class PlayerMixin:
     def seek(self, position):
         """跳到当前曲目的 position 秒(网页拖进度条)。暂停中只改位置,恢复播放时从这里开始。
         直播/电台、没有时长的条目不能跳,返回 False。"""
-        current = var.playlist.current_item() if len(var.playlist) > 0 else None
+        current = self.playlist.current_item() if len(self.playlist) > 0 else None
         if not current:
             return False
         item = current.item()
@@ -994,14 +996,14 @@ class PlayerMixin:
     def clear(self):
         # Kill the ffmpeg thread and empty the playlist
         self.interrupt()
-        var.playlist.clear()
+        self.playlist.clear()
         self.wait_for_ready = False
         self.log.info("bot: music stopped. playlist trashed.")
 
     def stop(self):
         self.interrupt()
         self.is_pause = True
-        if len(var.playlist) > 0:
+        if len(self.playlist) > 0:
             self.wait_for_ready = True
         else:
             self.wait_for_ready = False
@@ -1024,19 +1026,19 @@ class PlayerMixin:
         self.interrupt()
         self.is_pause = True
         self.song_start_at = -1
-        current = var.playlist.current_item() if len(var.playlist) > 0 else None
+        current = self.playlist.current_item() if len(self.playlist) > 0 else None
         if current:
             self.pause_at_id = current.id
             self.log.info(f"bot: music paused at {self.playhead:.2f} seconds.")
 
     def resume(self):
         self.is_pause = False
-        if var.playlist.current_index == -1:
-            var.playlist.next()
+        if self.playlist.current_index == -1:
+            self.playlist.next()
             self.playhead = 0
             return
 
-        music_wrapper = var.playlist.current_item()
+        music_wrapper = self.playlist.current_item()
 
         if not music_wrapper or not music_wrapper.id == self.pause_at_id or \
                 not (music_wrapper.is_ready() or self._stream_playable(music_wrapper)):

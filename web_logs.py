@@ -18,6 +18,7 @@ import time
 from flask import Blueprint, Response, abort, jsonify, request
 
 import variables as var
+import web_context
 from bot.logbuffer import buffer
 from web_users import current_identity
 
@@ -65,7 +66,7 @@ def _format_entry(e):
 def _environment_lines():
     lines = []
     try:
-        lines.append(f"version: {var.bot.get_version()}")
+        lines.append(f"version: {web_context.session().get_version()}")
     except Exception:
         pass
     lines.append(f"python: {sys.version.split()[0]} · {platform.platform()}")
@@ -75,8 +76,8 @@ def _environment_lines():
     except Exception:
         pass
     try:
-        lines.append(f"playback: mode={var.playlist.mode} queue={len(var.playlist)} "
-                     f"index={var.playlist.current_index} paused={var.bot.is_pause}")
+        lines.append(f"playback: mode={web_context.playlist().mode} queue={len(web_context.playlist())} "
+                     f"index={web_context.playlist().current_index} paused={web_context.session().is_pause}")
     except Exception:
         pass
     return lines

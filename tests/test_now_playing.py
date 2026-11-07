@@ -68,6 +68,9 @@ class FakePlaylist(list):
 
 
 class FakeBot:
+    # 测试替身:会话的队列就是全局 var.playlist
+    playlist = property(lambda self: var.playlist)
+
     def __init__(self):
         self.is_pause = False
         self.playhead = 0.0

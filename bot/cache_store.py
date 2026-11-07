@@ -75,8 +75,7 @@ def set_pinned(item_id, pinned):
 def protected_ids():
     """在播放队列里或正在下载的条目 id。"""
     ids = set()
-    playlist = getattr(var, 'playlist', None)
-    if playlist is not None:
+    for playlist in var.all_playlists():
         for wrapper in list(playlist):
             ids.add(getattr(wrapper, 'id', None))
     cache = getattr(var, 'cache', None)

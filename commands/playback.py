@@ -56,11 +56,11 @@ def cmd_play(bot, user, text, command, parameter):
     if len(params) > 0 and not params[0].isdigit():
         # Discord 习惯:/play 歌名 或 /play 链接 直接点歌
         _play_query(bot, user, text, command, parameter.strip())
-        if bot.is_pause and len(var.playlist) > 0:
+        if bot.is_pause and len(bot.playlist) > 0:
             bot.resume()
         return
     if len(params) > 0:
-        if params[0].isdigit() and 1 <= int(params[0]) <= len(var.playlist):
+        if params[0].isdigit() and 1 <= int(params[0]) <= len(bot.playlist):
             index = int(params[0])
         else:
             bot.send_msg(tr('invalid_index', index=parameter), text)
@@ -73,14 +73,14 @@ def cmd_play(bot, user, text, command, parameter):
                 bot.send_msg(tr('bad_parameter', command=command), text)
                 return
 
-    if len(var.playlist) > 0:
+    if len(bot.playlist) > 0:
         if index != -1:
             bot.play(int(index) - 1, start_at)
 
         elif bot.is_pause:
             bot.resume()
-        elif var.playlist.current_item():
-            bot.send_msg(var.playlist.current_item().format_current_playing(), text)
+        elif bot.playlist.current_item():
+            bot.send_msg(bot.playlist.current_item().format_current_playing(), text)
     else:
         bot.is_pause = False
         bot.send_msg(tr('queue_empty'), text)
@@ -95,7 +95,7 @@ def cmd_pause(bot, user, text, command, parameter):
 
 def cmd_stop(bot, user, text, command, parameter):
     if var.config.getboolean("bot", "clear_when_stop_in_oneshot") \
-            and var.playlist.mode == 'one-shot':
+            and bot.playlist.mode == 'one-shot':
         cmd_clear(bot, user, text, command, parameter)
     else:
         bot.stop()
@@ -103,17 +103,17 @@ def cmd_stop(bot, user, text, command, parameter):
 
 
 def cmd_clear(bot, user, text, command, parameter):
-    _cancel_spotify_feeders()
+    _cancel_spotify_feeders(bot)
     bot.clear()
     bot.send_msg(tr('cleared'), text)
 
 
 
 def cmd_stop_and_getout(bot, user, text, command, parameter):
-    _cancel_spotify_feeders()
+    _cancel_spotify_feeders(bot)
     bot.stop()
-    if var.playlist.mode == "one-shot":
-        var.playlist.clear()
+    if bot.playlist.mode == "one-shot":
+        bot.playlist.clear()
     bot.update_activity(None)
     bot.send_msg(tr('left_channel'), text)
     bot.leave_voice()
@@ -121,7 +121,7 @@ def cmd_stop_and_getout(bot, user, text, command, parameter):
 
 
 def cmd_current_music(bot, user, text, command, parameter):
-    current = var.playlist.current_item()  # 还没开始播(指针 -1)时没有当前曲
+    current = bot.playlist.current_item()  # 还没开始播(指针 -1)时没有当前曲
     if current:
         bot.send_msg(current.format_current_playing(), text)
     else:
@@ -136,7 +136,7 @@ def cmd_lyrics(bot, user, text, command, parameter):
     if not lyrics.enabled():
         bot.send_msg(tr('lyrics_disabled'), text)
         return
-    current = var.playlist.current_item()
+    current = bot.playlist.current_item()
     if not current:
         bot.send_msg(tr('not_playing'), text)
         return
@@ -175,39 +175,39 @@ def cmd_skip(bot, user, text, command, parameter):
     # statistics: an explicit skip flags the current play as skipped
     if var.play_history is not None and not bot.is_pause:
         try:
-            current = var.playlist.current_item()
+            current = bot.playlist.current_item()
             if current:
                 var.play_history.mark_skipped(current.id)
         except Exception:
             pass
 
-    var.playlist.skip_current()  # in single-loop mode, break out for one step
+    bot.playlist.skip_current()  # in single-loop mode, break out for one step
     if not bot.is_pause:
         bot.interrupt()
     else:
-        var.playlist.next()
+        bot.playlist.next()
         bot.wait_for_ready = True
 
-    if len(var.playlist) == 0:
+    if len(bot.playlist) == 0:
         bot.send_msg(tr('queue_empty'), text)
 
 
 def cmd_last(bot, user, text, command, parameter):
-    if len(var.playlist) > 0:
+    if len(bot.playlist) > 0:
         bot.interrupt()
-        var.playlist.point_to(len(var.playlist) - 1 - 1)
+        bot.playlist.point_to(len(bot.playlist) - 1 - 1)
     else:
         bot.send_msg(tr('queue_empty'), text)
 
 
 def cmd_remove(bot, user, text, command, parameter):
     # Allow to remove specific music into the queue with a number
-    if parameter and parameter.isdigit() and 0 < int(parameter) <= len(var.playlist):
+    if parameter and parameter.isdigit() and 0 < int(parameter) <= len(bot.playlist):
 
         index = int(parameter) - 1
 
-        if index == var.playlist.current_index:
-            removed = var.playlist[index]
+        if index == bot.playlist.current_index:
+            removed = bot.playlist[index]
             bot.send_msg(tr('removing_item',
                                       item=removed.format_title()), text)
             log.info("cmd: delete from playlist: " + removed.format_debug_string())
@@ -220,16 +220,16 @@ def cmd_remove(bot, user, text, command, parameter):
 
 
 def cmd_queue(bot, user, text, command, parameter):
-    if len(var.playlist) == 0:
+    if len(bot.playlist) == 0:
         msg = tr('queue_empty')
         bot.send_msg(msg, text)
     else:
         msgs = [tr('queue_contents')]
-        for i, music in enumerate(var.playlist):
+        for i, music in enumerate(bot.playlist):
             tags = ''
             if len(music.item().tags) > 0:
                 tags = "<sup>{}</sup>".format(", ".join(music.item().tags))
-            if i == var.playlist.current_index:
+            if i == bot.playlist.current_index:
                 newline = "<b style='color:orange'>{} ({}) {} </b> {}".format(i + 1, music.display_type(),
                                                                               music.format_title(), tags)
             else:
@@ -243,7 +243,7 @@ def cmd_queue(bot, user, text, command, parameter):
 
 def cmd_random(bot, user, text, command, parameter):
     bot.interrupt()
-    var.playlist.randomize()
+    bot.playlist.randomize()
 
 
 # !repeat 一次最多插入几遍;以前没有上限,!repeat 999999999 会卡住命令线程并吃光内存
@@ -258,11 +258,11 @@ def cmd_repeat(bot, user, text, command, parameter):
         bot.send_msg(tr('bad_parameter', command=command), text)
         return
 
-    music = var.playlist.current_item()
+    music = bot.playlist.current_item()
     if music:
         for _ in range(repeat):
-            var.playlist.insert(
-                var.playlist.current_index + 1,
+            bot.playlist.insert(
+                bot.playlist.current_index + 1,
                 music
             )
             log.info("bot: add to playlist: " + music.format_debug_string())
@@ -274,16 +274,16 @@ def cmd_repeat(bot, user, text, command, parameter):
 
 def cmd_mode(bot, user, text, command, parameter):
     if not parameter:
-        bot.send_msg(tr("current_mode", mode=var.playlist.mode), text)
+        bot.send_msg(tr("current_mode", mode=bot.playlist.mode), text)
         return
     mode = MODE_ALIASES.get(parameter.strip().lower())
     if mode is None:
         bot.send_msg(tr('unknown_mode', mode=parameter), text)
     else:
         var.db.set('playlist', 'playback_mode', mode)
-        var.playlist = media.playlist.get_playlist(mode, var.playlist)
+        bot.set_playlist(media.playlist.get_playlist(mode, bot.playlist))
         log.info(f"command: playback mode changed to {mode}.")
-        bot.send_msg(tr("change_mode", mode=var.playlist.mode,
+        bot.send_msg(tr("change_mode", mode=bot.playlist.mode,
                                   user=user), text)
         if mode == "random":
             bot.interrupt()

@@ -107,7 +107,7 @@ def _cover_source(item):
 
 def snapshot(bot):
     """当前播放状态 -> dict。队列空、没指向任何一首时返回 None。"""
-    playlist = var.playlist
+    playlist = bot.playlist
     if playlist is None or len(playlist) == 0 or playlist.current_index == -1:
         return None
     wrapper = playlist.current_item()
@@ -381,7 +381,7 @@ class NowPlaying:
         if action == 'stop':
             return 'stop', {}
         if action == 'mode':
-            return 'mode', {'mode': next_mode(var.playlist.mode)}
+            return 'mode', {'mode': next_mode(self.bot.playlist.mode)}
         return None
 
     # ---- 重启后接着用上次的面板 ----

@@ -30,7 +30,7 @@ def cmd_play_tags(bot, user, text, command, parameter):
 
     if count != 0:
         msgs.append("</ul>")
-        var.playlist.extend(music_wrappers)
+        bot.playlist.extend(music_wrappers)
         send_multi_lines_in_channel(bot, msgs, "")
     else:
         bot.send_msg(tr("no_file"), text)
@@ -48,20 +48,20 @@ def cmd_add_tag(bot, user, text, command, parameter):
         index = "*"
         tags = list(map(lambda t: t.strip(), params[1].split(",")))
     else:
-        index = str(var.playlist.current_index + 1)
+        index = str(bot.playlist.current_index + 1)
         tags = list(map(lambda t: t.strip(), parameter.split(",")))
 
     if tags[0]:
-        if index.isdigit() and 1 <= int(index) <= len(var.playlist):
-            var.playlist[int(index) - 1].add_tags(tags)
-            log.info(f"cmd: add tags {', '.join(tags)} to song {var.playlist[int(index) - 1].format_debug_string()}")
+        if index.isdigit() and 1 <= int(index) <= len(bot.playlist):
+            bot.playlist[int(index) - 1].add_tags(tags)
+            log.info(f"cmd: add tags {', '.join(tags)} to song {bot.playlist[int(index) - 1].format_debug_string()}")
             bot.send_msg(tr("added_tags",
                                       tags=", ".join(tags),
-                                      song=var.playlist[int(index) - 1].format_title()), text)
+                                      song=bot.playlist[int(index) - 1].format_title()), text)
             return
 
         elif index == "*":
-            for item in var.playlist:
+            for item in bot.playlist:
                 item.add_tags(tags)
                 log.info(f"cmd: add tags {', '.join(tags)} to song {item.format_debug_string()}")
             bot.send_msg(tr("added_tags_to_all", tags=", ".join(tags)), text)
@@ -82,34 +82,34 @@ def cmd_remove_tag(bot, user, text, command, parameter):
         index = "*"
         tags = list(map(lambda t: t.strip(), params[1].split(",")))
     else:
-        index = str(var.playlist.current_index + 1)
+        index = str(bot.playlist.current_index + 1)
         tags = list(map(lambda t: t.strip(), parameter.split(",")))
 
     if tags[0]:
-        if index.isdigit() and 1 <= int(index) <= len(var.playlist):
+        if index.isdigit() and 1 <= int(index) <= len(bot.playlist):
             if tags[0] != "*":
-                var.playlist[int(index) - 1].remove_tags(tags)
-                log.info(f"cmd: remove tags {', '.join(tags)} from song {var.playlist[int(index) - 1].format_debug_string()}")
+                bot.playlist[int(index) - 1].remove_tags(tags)
+                log.info(f"cmd: remove tags {', '.join(tags)} from song {bot.playlist[int(index) - 1].format_debug_string()}")
                 bot.send_msg(tr("removed_tags",
                                           tags=", ".join(tags),
-                                          song=var.playlist[int(index) - 1].format_title()), text)
+                                          song=bot.playlist[int(index) - 1].format_title()), text)
                 return
             else:
-                var.playlist[int(index) - 1].clear_tags()
-                log.info(f"cmd: clear tags from song {var.playlist[int(index) - 1].format_debug_string()}")
+                bot.playlist[int(index) - 1].clear_tags()
+                log.info(f"cmd: clear tags from song {bot.playlist[int(index) - 1].format_debug_string()}")
                 bot.send_msg(tr("cleared_tags",
-                                          song=var.playlist[int(index) - 1].format_title()), text)
+                                          song=bot.playlist[int(index) - 1].format_title()), text)
                 return
 
         elif index == "*":
             if tags[0] != "*":
-                for item in var.playlist:
+                for item in bot.playlist:
                     item.remove_tags(tags)
                     log.info(f"cmd: remove tags {', '.join(tags)} from song {item.format_debug_string()}")
                 bot.send_msg(tr("removed_tags_from_all", tags=", ".join(tags)), text)
                 return
             else:
-                for item in var.playlist:
+                for item in bot.playlist:
                     item.clear_tags()
                     log.info(f"cmd: clear tags from song {item.format_debug_string()}")
                 bot.send_msg(tr("cleared_tags_from_all"), text)
@@ -131,7 +131,7 @@ def cmd_find_tagged(bot, user, text, command, parameter):
     tags = list(map(lambda t: t.strip(), tags))
 
     music_dicts = var.music_db.query_music_by_tags(tags)
-    _shared.song_shortlist = music_dicts
+    _shared.set_shortlist(bot, music_dicts)
 
     for i, music_dict in enumerate(music_dicts):
         item = dict_to_item(music_dict)
@@ -167,13 +167,13 @@ def cmd_search_library(bot, user, text, command, parameter):
     music_dicts = var.music_db.query_music_by_keywords(keywords)
     if music_dicts:
         items = dicts_to_items(music_dicts)
-        _shared.song_shortlist = music_dicts
+        _shared.set_shortlist(bot, music_dicts)
 
         if len(items) == 1:
             music_wrapper = get_cached_wrapper(items[0], user)
-            var.playlist.append(music_wrapper)
+            bot.playlist.append(music_wrapper)
             log.info("cmd: add to playlist: " + music_wrapper.format_debug_string())
-            send_item_added_message(bot, music_wrapper, len(var.playlist) - 1, text)
+            send_item_added_message(bot, music_wrapper, len(bot.playlist) - 1, text)
         else:
             for item in items:
                 count += 1
@@ -200,14 +200,14 @@ def cmd_shortlist(bot, user, text, command, parameter):
     if parameter.strip() == "*":
         msgs = [tr('multiple_file_added') + "<ul>"]
         music_wrappers = []
-        for kwargs in _shared.song_shortlist:
+        for kwargs in _shared.shortlist(bot):
             kwargs['user'] = user
             music_wrapper = get_cached_wrapper_from_scrap(**kwargs)
             music_wrappers.append(music_wrapper)
             log.info("cmd: add to playlist: " + music_wrapper.format_debug_string())
             msgs.append("<li>[{}] <b>{}</b></li>".format(music_wrapper.item().type, music_wrapper.item().title))
 
-        var.playlist.extend(music_wrappers)
+        bot.playlist.extend(music_wrappers)
 
         msgs.append("</ul>")
         send_multi_lines_in_channel(bot, msgs, "")
@@ -223,32 +223,32 @@ def cmd_shortlist(bot, user, text, command, parameter):
         msgs = [tr('multiple_file_added') + "<ul>"]
         music_wrappers = []
         for index in indexes:
-            if 1 <= index <= len(_shared.song_shortlist):
-                kwargs = _shared.song_shortlist[index - 1]
+            if 1 <= index <= len(_shared.shortlist(bot)):
+                kwargs = _shared.shortlist(bot)[index - 1]
                 kwargs['user'] = user
                 music_wrapper = get_cached_wrapper_from_scrap(**kwargs)
                 music_wrappers.append(music_wrapper)
                 log.info("cmd: add to playlist: " + music_wrapper.format_debug_string())
                 msgs.append("<li>[{}] <b>{}</b></li>".format(music_wrapper.item().type, music_wrapper.item().title))
             else:
-                var.playlist.extend(music_wrappers)
+                bot.playlist.extend(music_wrappers)
                 bot.send_msg(tr('bad_parameter', command=command), text)
                 return
 
-        var.playlist.extend(music_wrappers)
+        bot.playlist.extend(music_wrappers)
 
         msgs.append("</ul>")
         send_multi_lines_in_channel(bot, msgs, "")
         return
     elif len(indexes) == 1:
         index = indexes[0]
-        if 1 <= index <= len(_shared.song_shortlist):
-            kwargs = _shared.song_shortlist[index - 1]
+        if 1 <= index <= len(_shared.shortlist(bot)):
+            kwargs = _shared.shortlist(bot)[index - 1]
             kwargs['user'] = user
             music_wrapper = get_cached_wrapper_from_scrap(**kwargs)
-            var.playlist.append(music_wrapper)
+            bot.playlist.append(music_wrapper)
             log.info("cmd: add to playlist: " + music_wrapper.format_debug_string())
-            send_item_added_message(bot, music_wrapper, len(var.playlist) - 1, text)
+            send_item_added_message(bot, music_wrapper, len(bot.playlist) - 1, text)
             return
 
     bot.send_msg(tr('bad_parameter', command=command), text)
@@ -269,8 +269,8 @@ def cmd_delete_from_library(bot, user, text, command, parameter):
         msgs = [tr('multiple_file_added') + "<ul>"]
         count = 0
         for index in indexes:
-            if 1 <= index <= len(_shared.song_shortlist):
-                music_dict = _shared.song_shortlist[index - 1]
+            if 1 <= index <= len(_shared.shortlist(bot)):
+                music_dict = _shared.shortlist(bot)[index - 1]
                 if 'id' in music_dict:
                     music_wrapper = get_cached_wrapper_by_id(music_dict['id'], user)
                     log.info("cmd: remove from library: " + music_wrapper.format_debug_string())
@@ -291,8 +291,8 @@ def cmd_delete_from_library(bot, user, text, command, parameter):
         return
     elif len(indexes) == 1:
         index = indexes[0]
-        if 1 <= index <= len(_shared.song_shortlist):
-            music_dict = _shared.song_shortlist[index - 1]
+        if 1 <= index <= len(_shared.shortlist(bot)):
+            music_dict = _shared.shortlist(bot)[index - 1]
             if 'id' in music_dict:
                 music_wrapper = get_cached_wrapper_by_id(music_dict['id'], user)
                 bot.send_msg(tr('file_deleted', item=music_wrapper.format_song_string()), text)

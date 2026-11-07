@@ -165,7 +165,7 @@ class DJBot(PlayerMixin, ChannelMixin):
         if var.config.getboolean('bot', 'save_playlist') \
                 and var.config.get("bot", "save_music_library"):
             self.log.info("bot: save playlist into database")
-            var.playlist.save()
+            self.playlist.save()
 
         if self.nb_exit > 1:
             self.log.info("Forced Quit")
@@ -213,7 +213,7 @@ class DJBot(PlayerMixin, ChannelMixin):
         """bot 自己进出 / 换语音频道(包括被管理员拖走、踢出)。"""
         if new_channel is None and old_channel is not None and time.time() >= self._leaving_until:
             # 被人从语音里踢出去了:暂停,别在没人听的情况下继续"播"
-            if not self.is_pause and len(var.playlist) > 0:
+            if not self.is_pause and len(self.playlist) > 0:
                 self.log.info("bot: disconnected from voice, pausing playback")
                 self.pause()
         self._humans_in_channel = self.get_user_count_in_channel()
@@ -392,7 +392,7 @@ class DJBot(PlayerMixin, ChannelMixin):
                 self.resume()
             elif var.config.get("bot", "when_nobody_in_channel") == "pause" and self.is_pause:
                 self.send_channel_msg(tr("auto_paused"))
-        elif humans == 0 and self.link.my_channel_id is not None and len(var.playlist) != 0:
+        elif humans == 0 and self.link.my_channel_id is not None and len(self.playlist) != 0:
             # 频道里只剩 bot 了
             if self.follow_would_move():
                 # 跟随模式马上会带 bot 去有人的频道,继续放,别暂停/清空

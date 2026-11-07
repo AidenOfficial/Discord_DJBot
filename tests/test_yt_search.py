@@ -28,7 +28,6 @@ class FakeBot:
 @pytest.fixture
 def bot(monkeypatch):
     constants.load_lang('en_US')
-    monkeypatch.setattr(sources, '_yt_search_state', {})
     calls = []
 
     def search(query, limit=20):
@@ -51,8 +50,8 @@ def test_search_shows_first_page_and_fills_shortlist(bot):
     assert bot.calls == [('cats', sources.YT_SEARCH_LIMIT)]
     assert 'cats song 0' in bot.sent[-1] and 'cats song 4' in bot.sent[-1]
     assert 'cats song 5' not in bot.sent[-1]
-    assert [s['url'] for s in _shared.song_shortlist][0] == 'https://www.youtube.com/watch?v=cats0'
-    assert all('title' in s for s in _shared.song_shortlist)
+    assert [s['url'] for s in _shared.shortlist(bot)][0] == 'https://www.youtube.com/watch?v=cats0'
+    assert all('title' in s for s in _shared.shortlist(bot))
 
 
 def test_next_page_is_per_user(bot):
@@ -61,7 +60,7 @@ def test_next_page_is_per_user(bot):
     sources.cmd_yt_search(bot, 'alice', None, 'ysearch', '-n')
     # alice 翻到的是自己的第二页,不受 bob 的搜索影响
     assert 'cats song 5' in bot.sent[-1] and 'dogs' not in bot.sent[-1]
-    assert _shared.song_shortlist[0]['url'].endswith('cats5')
+    assert _shared.shortlist(bot)[0]['url'].endswith('cats5')
     sources.cmd_yt_search(bot, 'alice', None, 'ysearch', '-n')
     assert bot.sent[-1] == constants.tr_cli('yt_no_more')
     sources.cmd_yt_search(bot, 'bob', None, 'ysearch', '-n')
@@ -90,3 +89,15 @@ def test_yplay_plays_first_result(bot, monkeypatch):
     sources.cmd_yt_play(bot, 'alice', None, 'yplay', 'cats')
     assert bot.calls == [('cats', 1)]
     assert played == ['https://www.youtube.com/watch?v=cats0']
+
+
+def test_search_state_is_per_session(bot):
+    # 两个服务器各自一个会话:一边的搜索不改变另一边 /pick 的含义
+    other = FakeBot()
+    other.calls = bot.calls
+    sources.cmd_yt_search(bot, 'alice', None, 'ysearch', 'cats')
+    sources.cmd_yt_search(other, 'alice', None, 'ysearch', 'dogs')
+    assert _shared.shortlist(bot)[0]['url'].endswith('cats0')
+    assert _shared.shortlist(other)[0]['url'].endswith('dogs0')
+    sources.cmd_yt_search(bot, 'alice', None, 'ysearch', '-n')
+    assert 'cats song 5' in bot.sent[-1]

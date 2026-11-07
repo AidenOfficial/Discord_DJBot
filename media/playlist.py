@@ -12,6 +12,13 @@ from media.item import ValidationFailedError
 
 
 def get_playlist(mode, _list=None, _index=None):
+    """按模式建队列对象。从旧队列 _list 换模式时,新对象接着属于旧队列的会话。"""
+    playlist = _new_playlist(mode, _list, _index)
+    playlist.session = getattr(_list, 'session', None)
+    return playlist
+
+
+def _new_playlist(mode, _list=None, _index=None):
     index = -1
     if _list and _index is None:
         index = _list.current_index
@@ -53,6 +60,8 @@ class BasePlaylist(list):
         self.playlist_lock = threading.RLock()
         # 删掉当前曲后指针已经落在"原来的下一首"上,下一次 next() 不再前进
         self._stay_once = False
+        # 这个队列属于哪个会话(DJBot);校验失败时通过它发消息、移出队列。没有就退回 var.bot
+        self.session = None
 
     def is_empty(self):
         return True if len(self) == 0 else False
@@ -322,8 +331,9 @@ class BasePlaylist(list):
                 item.validate()
             except ValidationFailedError as e:
                 self.log.debug("playlist: validating failed.")
-                if var.bot:
-                    var.bot.send_channel_msg(e.msg)
+                owner = self._owner()
+                if owner:
+                    owner.send_channel_msg(e.msg)
                 self._drop(item.id)
                 var.cache.free_and_delete(item.id)
                 continue
@@ -338,10 +348,14 @@ class BasePlaylist(list):
 
         self.log.debug("playlist: validating finished.")
 
+    def _owner(self):
+        return self.session if self.session is not None else var.bot
+
     def _drop(self, item_id):
         # 由 bot 决定删掉当前曲后指针怎么走(见 PlayerMixin.drop_from_queue)
-        if var.bot is not None and hasattr(var.bot, 'drop_from_queue'):
-            var.bot.drop_from_queue(item_id)
+        owner = self._owner()
+        if owner is not None and hasattr(owner, 'drop_from_queue'):
+            owner.drop_from_queue(item_id)
         else:
             self.remove_by_id(item_id)
 
