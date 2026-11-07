@@ -21,4 +21,10 @@ jobs:
           fail-on-severity: high
           # 强 copyleft 许可证会污染 MIT 项目的分发
           deny-licenses: AGPL-1.0-only, AGPL-1.0-or-later, AGPL-3.0-only, AGPL-3.0-or-later, SSPL-1.0
+          # 评估后接受的漏洞(每条写清楚理由;条件变了就删掉):
+          # GHSA-mrhx-c7xc-m3w5:zod < 4.6.6 校验超大集合时可能耗尽内存。来自 @discord/embedded-app-sdk
+          #   2.5.0(最新稳定版,要求 zod ^3;3.x 没有修复版)。SDK 运行时用的是它自己打包进去的 zod,
+          #   只在用户自己的浏览器里校验 Discord 客户端发来的消息:利用它要先有恶意的 Discord 客户端,
+          #   后果也只是用户自己的 Activity 页面卡死,碰不到服务器。SDK 3.0 正式版换到 zod 4 后升级并删掉这条。
+          allow-ghsas: GHSA-mrhx-c7xc-m3w5
           comment-summary-in-pr: on-failure
