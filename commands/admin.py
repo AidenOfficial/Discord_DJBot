@@ -4,6 +4,7 @@ import html
 from constants import tr_cli as tr
 import util
 import variables as var
+from media.cache import discard_everywhere
 from media.item import item_id_generators
 
 
@@ -61,14 +62,14 @@ def cmd_url_ban(bot, user, text, command, parameter):
     url = util.get_url_from_input(parameter)
     if url:
         _id = item_id_generators['url'](url=url)
-        var.cache.free_and_delete(_id)
         bot.drop_from_queue(_id)
+        discard_everywhere(_id, done=bot.playlist)
     else:
         if bot.playlist.current_item() and bot.playlist.current_item().type == 'url':
             item = bot.playlist.current_item().item()
             url = item.url
-            var.cache.free_and_delete(item.id)
             bot.drop_from_queue(item.id)
+            discard_everywhere(item.id, done=bot.playlist)
         else:
             bot.send_msg(tr('bad_parameter', command=command), text)
             return
