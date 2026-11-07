@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import variables as var  # noqa: E402
 from bot import channels as chmod  # noqa: E402
 from bot.channels import ChannelMixin  # noqa: E402
+from bot.store import GuildStore  # noqa: E402
 from database import SettingsDatabase  # noqa: E402
 
 
@@ -87,10 +88,11 @@ class Bot(ChannelMixin):
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self._saved = {n: getattr(var, n, None) for n in ('db', 'config', 'bot')}
+        self._saved = {n: getattr(var, n, None) for n in ('db', 'config', 'bot', 'store')}
         var.db = SettingsDatabase(os.path.join(self.tmp.name, 's.db'))
         from database import DatabaseMigration, MusicDatabase
         DatabaseMigration(var.db, MusicDatabase(os.path.join(self.tmp.name, 'm.db'))).migrate()
+        var.store = GuildStore(var.db.db_path)
         self.bot = Bot()
         # 测试里同步执行跟随检查,不起定时器
         self.bot.schedule_follow_check = lambda delay=0: None

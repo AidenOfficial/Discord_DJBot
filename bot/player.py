@@ -8,8 +8,10 @@ import time
 import variables as var
 from constants import tr_cli as tr
 from media import lyrics, sponsorblock
+from media.cache import ItemNotCachedError, discard_everywhere
 from media.item import ValidationFailedError, PreparationFailedError
 
+from . import downloads
 from .session_queue import SessionQueue
 
 
@@ -18,7 +20,7 @@ class PlayerMixin(SessionQueue):
     download orchestration, volume and transport control."""
 
     # Hard cap on concurrent downloads started by the prefetcher, so a long
-    # queue cannot saturate bandwidth or disk.
+    # queue cannot saturate bandwidth or disk. Counted across all sessions.
     PREFETCH_MAX_CONCURRENT = 2
 
     # Consecutive dead reconnect attempts before a live stream is given up on.
@@ -247,7 +249,7 @@ class PlayerMixin(SessionQueue):
                 var.play_history.record(
                     item.id, item.format_title(), getattr(item, 'type', ''),
                     getattr(music_wrapper, 'user', '') or '',
-                    getattr(item, 'duration', 0) or 0)
+                    getattr(item, 'duration', 0) or 0, guild_id=self.guild_id or None)
             except Exception:
                 self.log.debug("bot: could not record play history", exc_info=True)
 
@@ -357,7 +359,7 @@ class PlayerMixin(SessionQueue):
             except ValidationFailedError as e:
                 self.send_channel_msg(e.msg)
                 self.playlist.remove_by_id(next.id)
-                var.cache.free_and_delete(next.id)
+                discard_everywhere(next.id, done=self.playlist)
 
         self._prefetch_upcoming()
 
@@ -365,15 +367,14 @@ class PlayerMixin(SessionQueue):
         """Pre-download items beyond the immediate next one so queue
         advances don't stall on downloads. The window size comes from
         prefetch_count; at most PREFETCH_MAX_CONCURRENT downloads run at
-        once (the _active_downloads guard also dedupes against the
-        download the loop itself started)."""
+        once across all sessions (the downloads registry also dedupes
+        against downloads the loops themselves started)."""
         count = var.config.getint('bot', 'prefetch_count', fallback=2)
         if count <= 1:
             return
         for wrapper in self.playlist.upcoming_items(count)[1:]:
-            with self._download_lock:
-                if len(self._active_downloads) >= self.PREFETCH_MAX_CONCURRENT:
-                    break
+            if downloads.active_count() >= self.PREFETCH_MAX_CONCURRENT:
+                break
             try:
                 if not wrapper.is_ready():
                     self.async_download(wrapper)
@@ -381,17 +382,16 @@ class PlayerMixin(SessionQueue):
                 # same cleanup path async_download_next uses
                 self.send_channel_msg(e.msg)
                 self.playlist.remove_by_id(wrapper.id)
-                var.cache.free_and_delete(wrapper.id)
+                discard_everywhere(wrapper.id, done=self.playlist)
 
     def async_download(self, item):
-        # Guard against the same item being downloaded twice concurrently:
-        # otherwise a second call would spawn another progress-reporter thread
-        # and every download message would appear twice in chat.
-        with self._download_lock:
-            if item.id in self._active_downloads:
-                self.log.debug("bot: download already running for %s, not starting another", item.id[:7])
-                return None
-            self._active_downloads.add(item.id)
+        # Guard against the same item being downloaded twice concurrently,
+        # by this or any other session (they share the cache): otherwise a
+        # second call would spawn another progress-reporter thread, and a
+        # second prepare() would return at once and end up failing the item.
+        if not downloads.begin(item.id):
+            self.log.debug("bot: download already running for %s, not starting another", item.id[:7])
+            return None
 
         th = threading.Thread(
             target=self._download, name="Prepare-" + item.id[:7], args=(item,))
@@ -426,11 +426,10 @@ class PlayerMixin(SessionQueue):
             item = wrapper.item()
         except Exception:
             return
-        with self._download_lock:
-            # 只认下载线程登记:item.downloading 可能因为异常一直停在 True,
-            # 那样补发几次后会被判失败,而不是永远等下去
-            if wrapper.id in self._active_downloads:
-                return
+        # 只认下载线程登记(任何会话的都算,别的服务器在下就等它):item.downloading
+        # 可能因为异常一直停在 True,那样补发几次后会被判失败,而不是永远等下去
+        if downloads.is_active(wrapper.id):
+            return
 
         if getattr(self, '_kick_id', None) != wrapper.id:
             self._kick_id, self._kick_count = wrapper.id, 0
@@ -444,6 +443,14 @@ class PlayerMixin(SessionQueue):
         self._kick_count += 1
         self.log.info("bot: nothing is downloading the current item %s, starting it", wrapper.id[:7])
         self.async_download(wrapper)
+
+    @staticmethod
+    def _still_cached(wrapper):
+        try:
+            wrapper.item()
+            return True
+        except ItemNotCachedError:
+            return False
 
     def drop_from_queue(self, item_id):
         """播放 / 下载 / 校验失败时把这首(含重复条目)移出队列。
@@ -499,7 +506,7 @@ class PlayerMixin(SessionQueue):
             except ValidationFailedError as e:
                 self.send_channel_msg(e.msg)
                 self.drop_from_queue(item.id)
-                var.cache.free_and_delete(item.id)
+                discard_everywhere(item.id, done=self.playlist)
                 return False
             except Exception:
                 # yt-dlp / 网站返回的意外数据(时长为 None 等)只算这一首失败,
@@ -526,8 +533,7 @@ class PlayerMixin(SessionQueue):
                     pass
                 return False
         finally:
-            with self._download_lock:
-                self._active_downloads.discard(item.id)
+            downloads.end(item.id)
 
     @staticmethod
     def _safe_title(wrapper):
@@ -677,8 +683,7 @@ class PlayerMixin(SessionQueue):
     # Main loop of the Bot
     def loop(self):
         while not self.exit and self.link.alive:
-            self.last_loop_at = time.time()
-            self._write_heartbeat()
+            self.last_loop_at = time.time()  # Hub 的看门狗 / 心跳看它
             self._autosave_playlist()
             try:
                 idle_tick = getattr(self, 'idle_tick', None)
@@ -734,19 +739,6 @@ class PlayerMixin(SessionQueue):
             self._saved_playlist_version = version
         except Exception:
             self.log.debug("bot: playlist autosave failed", exc_info=True)
-
-    def _write_heartbeat(self):
-        # Touch a heartbeat file every few seconds so an external healthcheck
-        # (e.g. Docker) can confirm the main loop is still alive.
-        now = time.time()
-        if now - self._last_heartbeat_write < 5:
-            return
-        self._last_heartbeat_write = now
-        try:
-            with open(self.heartbeat_file, "w") as f:
-                f.write(str(now))
-        except Exception:
-            pass
 
     def _send_pcm(self, pcm):
         # 发送端只缓冲 0.5 秒:写满时这里阻塞,由播放速度节流(以前是轮询缓冲大小再 sleep)。
@@ -848,7 +840,7 @@ class PlayerMixin(SessionQueue):
                         self.log.error("bot: ffmpeg said: %s", self.last_ffmpeg_err)
                     self.send_channel_msg(tr('unable_play', item=current.format_title()))
                     self.drop_from_queue(current.id)
-                    var.cache.free_and_delete(current.id)
+                    discard_everywhere(current.id, done=self.playlist)
             self.last_ffmpeg_err = ""
 
             # move to the next song.
@@ -867,7 +859,7 @@ class PlayerMixin(SessionQueue):
                     except ValidationFailedError as e:
                         self.send_channel_msg(e.msg)
                         self.drop_from_queue(current.id)
-                        var.cache.free_and_delete(current.id)
+                        discard_everywhere(current.id, done=self.playlist)
                 else:
                     self._loop_status = 'Empty queue'
                     self.update_activity(None)
@@ -875,7 +867,11 @@ class PlayerMixin(SessionQueue):
                 # if wait_for_ready flag is true, means the pointer is already
                 # pointing to target song. start playing
                 current = self.playlist.current_item()
-                if current:
+                if current and not self._still_cached(current):
+                    # 条目已经被删掉(别的会话播放失败 / 封禁 / 从曲库删除):移出队列,接着放下一首
+                    self.wait_for_ready = False
+                    self.drop_from_queue(current.id)
+                elif current:
                     if current.is_ready():
                         self.wait_for_ready = False
                         self.read_pcm_size = 0

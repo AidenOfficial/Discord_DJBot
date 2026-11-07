@@ -6,11 +6,9 @@ import logging.handlers
 import os
 import sys
 import threading
-import time
 
 import commands
 import constants
-import media.playlist
 import util
 import variables as var
 from database import SettingsDatabase, MusicDatabase, DatabaseMigration, PlayHistoryDatabase
@@ -19,7 +17,8 @@ from media.cache import MusicCache
 
 from . import logbuffer
 from .cleanup import CacheCleaner
-from .core import DJBot
+from .hub import Hub
+from .store import GuildStore
 
 
 def start_web_interface(addr, port):
@@ -160,6 +159,8 @@ def main():
         var.music_db = MusicDatabase(":memory:")
 
     DatabaseMigration(var.db, var.music_db).migrate()
+    # 按服务器分开的设置 / 队列 / 封禁规则(settings 库里的 guild_* / access_rule 表)
+    var.store = GuildStore(var.settings_db_path)
 
     # Play log for the web interface statistics; lives next to the music
     # database (own table, created on first use).
@@ -207,31 +208,13 @@ def main():
         var.cache.build_dir_cache()
 
     # ======================
-    #   Load playback mode
+    #  Connect + home session
     # ======================
-    playback_mode = None
-    if var.db.has_option("playlist", "playback_mode"):
-        playback_mode = var.db.get('playlist', 'playback_mode')
-    else:
-        playback_mode = var.config.get('bot', 'playback_mode')
-
-    if playback_mode in ["one-shot", "repeat", "single", "random", "autoplay"]:
-        playlist = media.playlist.get_playlist(playback_mode)
-    else:
-        raise KeyError(f"Unknown playback mode '{playback_mode}'")
-
-    # ======================
-    #  Create bot instance
-    # ======================
-    var.bot = DJBot(args)
-    var.bot.set_playlist(playlist)
-    commands.register_all_commands(var.bot)
-    var.bot.start()
-
-    # load playlist
-    if var.config.getboolean('bot', 'save_playlist'):
-        var.bot_logger.info("bot: load playlist from previous session")
-        var.bot.playlist.load()
+    # Hub 装好信号处理;start():连上 Discord(失败退出)-> 建主服务器的会话(var.bot)->
+    # 读它存的音量 / 播放模式 / 队列 -> 进默认频道。播放循环在最后的 run() 里各开一个线程
+    var.hub = Hub(args)
+    commands.register_all_commands(var.hub)
+    var.hub.start()
 
     # ============================
     #   Start the web interface
@@ -281,24 +264,7 @@ def main():
                 os._exit(1)
         threading.excepthook = _thread_excepthook
 
-    # Watchdog: if the main playback loop stops making progress (e.g. a stuck
-    # ffmpeg read), force an exit so the supervisor restarts a fresh process.
-    # Set [bot] watchdog_timeout = 0 to disable.
-    watchdog_timeout = var.config.getint("bot", "watchdog_timeout", fallback=0)
-    if watchdog_timeout > 0:
-        def _watchdog():
-            while not var.bot.exit:
-                time.sleep(min(15, watchdog_timeout))
-                if var.bot.exit:
-                    return
-                stalled = time.time() - var.bot.last_loop_at
-                if stalled > watchdog_timeout:
-                    bot_logger.critical(
-                        "bot: playback loop stalled for %.0fs (> %ds), exiting for restart",
-                        stalled, watchdog_timeout)
-                    os._exit(1)
-        threading.Thread(target=_watchdog, name="Watchdog", daemon=True).start()
-
-    # Start the main loop.
-    var.bot.loop()
+    # 看门狗(某个会话的播放循环卡住 -> 退出让 Docker 重启)和心跳文件由 Hub 的 Monitor 线程负责。
+    # 播放循环各在自己的线程(Player-<guild_id>)里跑,主线程等到全部退出
+    sys.exit(var.hub.run())
 

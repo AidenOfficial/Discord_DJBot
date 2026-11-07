@@ -1,34 +1,45 @@
 # coding=utf-8
 import collections
 import logging
-import os
-import queue
-import signal
-import sys
 import threading
 import time
 import traceback
 
+import media.playlist
 import util
 import variables as var
 from constants import tr_cli as tr
 
 from .channels import ChannelMixin
-from .discord_link import CommandContext, DiscordLink
+from .discord_link import CommandContext
 from .now_playing import NowPlaying
 from .player import PlayerMixin
 
 
+PLAYBACK_MODES = ("one-shot", "repeat", "single", "random", "autoplay")
+
+
+def new_queue(mode):
+    if mode not in PLAYBACK_MODES:
+        raise KeyError(f"Unknown playback mode '{mode}'")
+    return media.playlist.get_playlist(mode)
+
+
+def _as_float(value, fallback):
+    try:
+        return float(value) if value is not None else fallback
+    except ValueError:
+        return fallback
+
+
 class DJBot(PlayerMixin, ChannelMixin):
+    """一个服务器的会话:队列、播放循环、频道跟随、命令处理。连接(GuildLink)和进程级的事
+    (信号、看门狗、心跳、Bot 状态汇总)由 bot.hub.Hub 管。"""
+
     version = 'git'
 
-    def __init__(self, args):
+    def __init__(self, args, link, executor=None, ticker=None):
         self.log = logging.getLogger("bot")
-        self.log.info(f"bot: Discord-DJBot version {self.get_version()}, starting...")
-        signal.signal(signal.SIGINT, self.ctrl_caught)
-        # docker stop / restart 发的是 SIGTERM:默认处理会直接杀进程,
-        # 队列来不及落盘。按 Ctrl-C 同样的路径优雅退出。
-        signal.signal(signal.SIGTERM, self.ctrl_caught)
         self.cmd_handle = {}
         self.slash_names = {}  # spec.key -> 斜杠命令名(帮助 / 提示文字用)
 
@@ -40,9 +51,8 @@ class DJBot(PlayerMixin, ChannelMixin):
         var.is_proxified = var.config.getboolean(
             "webinterface", "is_web_proxified")
 
-        # Flags to indicate the bot is exiting (Ctrl-C, or /kill)
+        # 播放循环该停了(Ctrl-C、/kill,由 Hub 设置)
         self.exit = False
-        self.nb_exit = 0
 
         # Related to ffmpeg thread
         self.thread = None
@@ -52,17 +62,8 @@ class DJBot(PlayerMixin, ChannelMixin):
         self.last_ffmpeg_err = ""
         self._ffmpeg_stderr_lines = collections.deque(maxlen=20)
 
-        # Single-instance guard so the same item never spawns two concurrent
-        # download / progress-reporter threads (which would double every
-        # download message in chat).
-        self._active_downloads = set()
-        self._download_lock = threading.Lock()
-
-        # Liveness tracking for the watchdog and the (Docker) healthcheck.
+        # 看门狗和心跳(Hub)看这个时间判断播放循环还活着
         self.last_loop_at = time.time()
-        self._last_heartbeat_write = 0.0
-        self.heartbeat_file = os.environ.get("BAM_HEARTBEAT") or \
-            os.path.join(var.tmp_folder, "djbot.heartbeat")
 
         # Play/pause status
         self.is_pause = False
@@ -76,25 +77,10 @@ class DJBot(PlayerMixin, ChannelMixin):
         self._leaving_until = 0.0  # /leave 之后这段时间里的"离开语音"是自己走的,不算被踢
         self._activity = None
 
-        token = args.token or os.environ.get("DISCORD_TOKEN") or var.config.get("discord", "token")
-        if not token:
-            self.log.error("bot: no Discord bot token. Set [discord] token in configuration.ini "
-                           "or the DISCORD_TOKEN environment variable.")
-            sys.exit(1)
-        guild_id = args.guild or var.config.get("discord", "guild_id")
-        admin_ids = [a.strip() for a in var.config.get('bot', 'admin').replace(';', ',').split(',')
-                     if a.strip().isdigit()]
-
-        self.link = DiscordLink(
-            token,
-            guild_id=guild_id or None,
-            announce_channel_id=var.config.get("discord", "announce_channel") or None,
-            admin_ids=admin_ids,
-            admin_permission=var.config.getboolean("discord", "admin_by_permission"),
-            self_deaf=var.config.getboolean("discord", "self_deaf"),
-            bitrate=var.config.getint("discord", "bitrate"),
-            language=var.language,
-            debug=var.config.getboolean('debug', 'discord_connection'))
+        self.link = link
+        #: 共享线程池(bot.executor.KeyedExecutor):命令按 (guild_id, 'cmd') 依次处理
+        self.executor = executor
+        self.ticker = ticker
         # 公告频道里的"正在播放"面板 + 语音频道状态
         self.now_playing = NowPlaying(
             self, self.link,
@@ -102,17 +88,13 @@ class DJBot(PlayerMixin, ChannelMixin):
             voice=var.config.getboolean('discord', 'voice_channel_status', fallback=True))
 
         # ====== Volume ======
+        # 先用配置文件的值;服务器自己存的音量 / 播放模式 / 队列连上 Discord 后再读(load_guild_state)
         self.volume_helper = util.VolumeHelper()
-
-        max_vol = var.config.getfloat('bot', 'max_volume')
-        if var.db.has_option('bot', 'max_volume'):
-            max_vol = var.db.getfloat('bot', 'max_volume')
-        _volume = var.config.getfloat('bot', 'volume')
-        if var.db.has_option('bot', 'volume'):
-            _volume = var.db.getfloat('bot', 'volume')
-        _volume = min(_volume, max_vol)
-        self.volume_helper.set_volume(_volume)
+        self.volume_helper.set_volume(min(var.config.getfloat('bot', 'volume'),
+                                          var.config.getfloat('bot', 'max_volume')))
         self.last_volume_cycle_time = time.time()
+        self._guild_state_loaded = False
+        self.set_playlist(new_queue(var.config.get('bot', 'playback_mode')))
 
         assert var.config.get("bot", "when_nobody_in_channel") in ['pause', 'pause_resume', 'stop', 'nothing', ''], \
             "Unknown action for when_nobody_in_channel"
@@ -125,29 +107,27 @@ class DJBot(PlayerMixin, ChannelMixin):
 
         self.redirect_ffmpeg_log = var.config.getboolean('debug', 'redirect_ffmpeg_log')
 
-        self._start_message_worker()
         self._init_follow()
         bots = var.config.get("bot", "when_nobody_in_channel_ignore", fallback="")
         self.bots = set(b.strip() for b in bots.split(',') if b.strip())
         self._humans_in_channel = 0
 
     def start(self):
-        """连上 Discord。register_slash_commands() 之后调用。"""
-        self.link.on_command = self.command_received
-        self.link.on_precheck = self.precheck
-        self.link.on_autocomplete = self.autocomplete
+        """连接(GuildLink)已经就绪:读这个服务器的状态、接上回调、进默认频道。
+        register_slash_commands() 之后调用;播放循环(loop)由 Hub 另开线程跑。"""
         self.link.on_user_joined = self._on_user_created
         self.link.on_user_updated = self._on_user_updated
         self.link.on_user_left = self._on_user_removed
         self.link.on_self_moved = self._on_self_moved
         self.link.on_panel_button = self.now_playing.resolve_button
         self.link.on_panel_pressed = self.now_playing.poke
-        try:
-            self.link.connect()
-        except Exception as e:
-            self.log.error("bot: failed to connect to Discord: %s", e)
-            sys.exit(1)
-        self.now_playing.start()
+        self.bind_guild(self.link.guild_id)
+        self.load_guild_state()
+        # 状态读完才接命令:之前来的命令由连接层回"还在启动"
+        self.link.on_autocomplete = self.autocomplete
+        self.link.on_precheck = self.precheck
+        self.link.on_command = self.command_received
+        self.now_playing.start(getattr(self, 'ticker', None))
         # 启动时已经在语音里的人不会逐个触发"加入"回调:直接从快照记下每人所在频道,跟随逻辑要用
         for user in self.link.users.values():
             self._user_channels[user.session] = user.channel_id
@@ -157,22 +137,41 @@ class DJBot(PlayerMixin, ChannelMixin):
         # 默认频道可能本来就没人:连上后按跟随设置检查一次
         self.schedule_follow_check(delay=5)
 
-    # Set the CTRL+C shortcut
-    def ctrl_caught(self, signal, frame):
-        self.log.info(
-            "\nSIGINT caught, quitting, {} more to kill".format(2 - self.nb_exit))
+    def load_guild_state(self):
+        """读这个服务器存的音量、播放模式和队列(bind_guild 之后)。第一次先接收旧版不分服务器的设置。"""
+        if self.guild_id:
+            self.store.adopt_legacy(self.guild_id)
 
+        max_vol = _as_float(self.setting('max_volume'), var.config.getfloat('bot', 'max_volume'))
+        volume = _as_float(self.setting('volume'), var.config.getfloat('bot', 'volume'))
+        self.volume_helper.set_volume(min(volume, max_vol))
+
+        mode = self.setting('playback_mode') or var.config.get('bot', 'playback_mode')
+        if mode not in PLAYBACK_MODES:
+            self.log.warning("bot: unknown saved playback mode %r, using the configured one", mode)
+            mode = var.config.get('bot', 'playback_mode')
+        self.set_playlist(new_queue(mode))
+
+        if var.config.getboolean('bot', 'save_playlist'):
+            self.log.info("bot: load playlist from previous session")
+            self.playlist.load()
+        self._guild_state_loaded = True
+
+    def save_queue(self):
+        """退出时(信号)保存队列。"""
+        # 还没读出存的队列就退出(连接 Discord 时被停):别拿空队列覆盖掉
         if var.config.getboolean('bot', 'save_playlist') \
-                and var.config.get("bot", "save_music_library"):
-            self.log.info("bot: save playlist into database")
+                and var.config.get("bot", "save_music_library") \
+                and getattr(self, '_guild_state_loaded', True):
+            self.log.info("bot: save playlist into database (%s)", self.guild_id or '-')
             self.playlist.save()
 
-        if self.nb_exit > 1:
-            self.log.info("Forced Quit")
-            sys.exit(0)
-        self.nb_exit += 1
-
+    def stop(self):
+        """让播放循环退出(它退出前会再存一次队列),面板不再更新。"""
         self.exit = True
+        now_playing = getattr(self, 'now_playing', None)
+        if now_playing is not None:
+            now_playing.stop()
 
     def get_version(self):
         if self.version != "git":
@@ -181,11 +180,10 @@ class DJBot(PlayerMixin, ChannelMixin):
             return util.get_snapshot_version()
 
     def register_slash_commands(self, named_specs):
-        """[(斜杠命令名, Spec)]:交给连接层注册,命令分发表按 spec.key 索引。"""
+        """[(斜杠命令名, Spec)]:命令分发表按 spec.key 索引。命令树由 Hub 在连接前注册给 DiscordClient。"""
         for name, spec in named_specs:
             self.cmd_handle[spec.key] = {'handle': spec.handler, 'spec': spec, 'name': name}
             self.slash_names[spec.key] = name
-        self.link.register_commands(named_specs)
 
     # =======================
     #   Voice channel events
@@ -207,7 +205,8 @@ class DJBot(PlayerMixin, ChannelMixin):
 
     def _dispatch_users_changed(self, user, action):
         if getattr(self, '_react_to_empty_channel', False):
-            threading.Thread(target=self.users_changed, args=(user, action), daemon=True).start()
+            threading.Thread(target=self.users_changed, args=(user, action), name=f"Users-{self.guild_id}",
+                             daemon=True).start()
 
     def _on_self_moved(self, old_channel, new_channel):
         """bot 自己进出 / 换语音频道(包括被管理员拖走、踢出)。"""
@@ -223,37 +222,31 @@ class DJBot(PlayerMixin, ChannelMixin):
     #         Commands
     # =======================
 
-    def _start_message_worker(self):
-        # 命令处理可能很慢(建条目、写库、起校验线程、回消息),放在连接层的事件线程里
-        # 会拖住后面的语音状态事件。回调只把命令入队,由单独的线程按顺序处理。
-        self._message_queue = queue.Queue()
-        th = threading.Thread(target=self._message_worker, name="CommandWorker", daemon=True)
-        th.start()
-
-    def _message_worker(self):
-        while True:
-            ctx = self._message_queue.get()
+    def _run_command(self, ctx):
+        try:
+            self._handle_command(ctx)
+        except Exception:
+            self.log.exception("bot: failed to handle a command")
+        finally:
             try:
-                self._handle_command(ctx)
+                self.link.finish(ctx)
             except Exception:
-                self.log.exception("bot: failed to handle a command")
-            finally:
-                try:
-                    self.link.finish(ctx)
-                except Exception:
-                    pass
+                pass
 
     def command_received(self, ctx):
-        """连接层回调:只入队,立刻返回。"""
-        message_queue = getattr(self, '_message_queue', None)
-        if message_queue is None:
+        """连接层回调:交给共享线程池,立刻返回。
+
+        命令处理可能很慢(建条目、写库、起校验线程、回消息),和语音状态事件在同一条队列里会拖住
+        后者:命令走 (guild_id, 'cmd'),事件走 (guild_id, 'evt'),同一服务器的命令仍按顺序执行。"""
+        executor = getattr(self, 'executor', None)
+        if executor is None:
             # 没走 __init__ 的场景(测试替身):退回同步处理
             try:
                 self._handle_command(ctx)
             except Exception:
                 self.log.exception("bot: failed to handle a command")
             return
-        message_queue.put(ctx)
+        executor.submit((self.guild_id, 'cmd'), self._run_command, ctx)
 
     def precheck(self, ctx):
         """在 Discord 等回应的 3 秒内调用:返回拒绝理由(HTML)就只回给本人,不执行命令。"""
@@ -263,12 +256,12 @@ class DJBot(PlayerMixin, ChannelMixin):
         spec = entry['spec']
         admin = self.is_admin(ctx)
 
-        if not admin and var.db.has_option('user_ban', str(ctx.actor)):
+        if not admin and self.has_rule('user_ban', str(ctx.actor)):
             return tr('user_ban')
 
         if not admin and ctx.argument:
             input_url = util.get_url_from_input(ctx.argument)
-            if input_url and var.db.has_option('url_ban', input_url):
+            if input_url and self.has_rule('url_ban', input_url):
                 return tr('url_ban', url=input_url)
 
         if spec.admin and not admin:
@@ -298,7 +291,7 @@ class DJBot(PlayerMixin, ChannelMixin):
         if spec.admin and not admin:
             self.send_msg(tr('not_admin'), ctx)
             return
-        if not admin and var.db.has_option('user_ban', str(ctx.actor)):
+        if not admin and self.has_rule('user_ban', str(ctx.actor)):
             self.send_msg(tr('user_ban'), ctx)
             return
         self._refresh_discord_link(ctx)

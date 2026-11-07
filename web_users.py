@@ -784,8 +784,8 @@ def enqueue(wrappers, mode):
     if not wrappers:
         return
     if mode == 'replace':
-        # clear() 会 var.cache.free_all(),把刚为这些 wrapper 注册的条目也清掉,
-        # 队列里就全是悬空引用(ItemNotCachedError,一首首被跳过)。
+        # clear() 会释放旧队列里的条目;新 wrapper 和旧队列重复的那些(同一歌单再播一次)
+        # 还没入队,也会被清掉,队列里就是悬空引用(ItemNotCachedError,一首首被跳过)。
         # 先取出条目,清空后再放回缓存。
         items = [w.item() for w in wrappers]
         web_context.session().clear()

@@ -76,9 +76,11 @@ class GroupPersistenceTest(unittest.TestCase):
     def setUp(self):
         from database import SettingsDatabase, MusicDatabase, DatabaseMigration
         self.tmp = tempfile.TemporaryDirectory()
-        self._saved = {n: getattr(var, n, None) for n in ('db', 'cache')}
+        from bot.store import GuildStore
+        self._saved = {n: getattr(var, n, None) for n in ('db', 'cache', 'store')}
         var.db = SettingsDatabase(os.path.join(self.tmp.name, 's.db'))
         DatabaseMigration(var.db, MusicDatabase(os.path.join(self.tmp.name, 'm.db'))).migrate()
+        var.store = GuildStore(var.db.db_path)
 
         class Cache(dict):
             def get_item_by_id(self, _id):
@@ -252,12 +254,13 @@ class PlaceholderTitleTest(unittest.TestCase):
 class MessageWorkerTest(unittest.TestCase):
     def test_callback_returns_before_command_finishes(self):
         from bot.core import DJBot
+        from bot.executor import KeyedExecutor
         bot = DJBot.__new__(DJBot)
         bot.log = mock.Mock()
         bot.link = mock.Mock()
         done = threading.Event()
         bot._handle_command = lambda ctx: (time.sleep(0.3), done.set())
-        bot._start_message_worker()
+        bot.executor = KeyedExecutor(max_workers=2, name="T")
         started = time.time()
         bot.command_received(object())
         self.assertLess(time.time() - started, 0.1)  # 连接层的事件线程立刻返回
@@ -265,6 +268,7 @@ class MessageWorkerTest(unittest.TestCase):
 
     def test_worker_survives_a_failing_command(self):
         from bot.core import DJBot
+        from bot.executor import KeyedExecutor
         bot = DJBot.__new__(DJBot)
         bot.log = mock.Mock()
         bot.link = mock.Mock()
@@ -277,7 +281,7 @@ class MessageWorkerTest(unittest.TestCase):
             handled.append(text)
             done.set()
         bot._handle_command = handle
-        bot._start_message_worker()
+        bot.executor = KeyedExecutor(max_workers=2, name="T")
         bot.command_received('boom')
         bot.command_received('ok')
         self.assertTrue(done.wait(2))

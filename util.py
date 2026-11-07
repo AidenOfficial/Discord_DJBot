@@ -311,8 +311,9 @@ def set_logging_formatter(handler: logging.Handler, logging_level):
             "[%(filename)s:%(lineno)d] %(message)s"
         )
     else:
+        # 线程名带着服务器:Player-<guild_id>、Worker-3[<guild_id>:cmd]……多服务器时看得出是哪个
         formatter = logging.Formatter(
-            '[%(asctime)s %(levelname)s] %(message)s', "%b %d %H:%M:%S")
+            '[%(asctime)s %(levelname)s] [%(threadName)s] %(message)s', "%b %d %H:%M:%S")
 
     handler.setFormatter(formatter)
 
