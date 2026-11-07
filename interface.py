@@ -45,9 +45,11 @@ class ReverseProxied(object):
         scheme = environ.get('HTTP_X_SCHEME', '')
         if scheme:
             environ['wsgi.url_scheme'] = scheme
-        real_ip = environ.get('HTTP_X_REAL_IP', '')
+        # 访问者的真实 IP:Cloudflare Tunnel(cloudflared)放在 Cf-Connecting-IP,nginx 一般用 X-Real-IP。
+        # 不认的话所有人都是 cloudflared 容器的地址,输错令牌的 IP 封禁会把所有人一起封掉
+        real_ip = environ.get('HTTP_CF_CONNECTING_IP', '') or environ.get('HTTP_X_REAL_IP', '')
         if real_ip:
-            environ['REMOTE_ADDR'] = real_ip
+            environ['REMOTE_ADDR'] = real_ip.strip()
         return self.app(environ, start_response)
 
 
