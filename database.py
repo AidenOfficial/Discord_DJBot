@@ -192,7 +192,7 @@ class Condition:
         return self
 
 
-SETTING_DB_VERSION = 2
+SETTING_DB_VERSION = 3
 MUSIC_DB_VERSION = 4
 
 
@@ -500,7 +500,8 @@ class DatabaseMigration:
         self.settings_db = settings_db
         self.music_db = music_db
         self.settings_table_migrate_func = {0: self.settings_table_migrate_from_0_to_1,
-                                            1: self.settings_table_migrate_from_1_to_2}
+                                            1: self.settings_table_migrate_from_1_to_2,
+                                            2: self.settings_table_migrate_from_2_to_3}
         self.music_table_migrate_func = {0: self.music_table_migrate_from_0_to_1,
                                          1: self.music_table_migrate_from_1_to_2,
                                          2: self.music_table_migrate_from_2_to_4,
@@ -515,33 +516,49 @@ class DatabaseMigration:
     def settings_database_migrate(self):
         conn = sqlite3.connect(self.settings_db.db_path)
         cursor = conn.cursor()
-        if self.has_table('botamusique', conn):
+        fresh = not self.has_table('botamusique', conn)
+        if fresh:
+            log.info(f"database: no settings table found. Creating settings table version {SETTING_DB_VERSION}.")
+            self.create_settings_table_version_2(conn)
+            current_version = 2
+        else:
             current_version = 0
             ver = cursor.execute("SELECT value FROM botamusique WHERE section='bot' "
                                  "AND option='db_version'").fetchone()
             if ver:
                 current_version = int(ver[0])
 
-            if current_version == SETTING_DB_VERSION:
-                conn.close()
-                return
-            else:
-                log.info(
-                    f"database: migrating from settings table version {current_version} to {SETTING_DB_VERSION}...")
-                while current_version < SETTING_DB_VERSION:
-                    log.debug(f"database: migrate step {current_version}/{SETTING_DB_VERSION - 1}")
-                    current_version = self.settings_table_migrate_func[current_version](conn)
-                log.info("database: migration done.")
+        if current_version == SETTING_DB_VERSION:
+            conn.close()
+            return
 
-                cursor.execute("UPDATE botamusique SET value=? "
-                               "WHERE section='bot' AND option='db_version'", (SETTING_DB_VERSION,))
+        if not fresh:
+            log.info(f"database: migrating from settings table version {current_version} to {SETTING_DB_VERSION}...")
+        while current_version < SETTING_DB_VERSION:
+            log.debug(f"database: migrate step {current_version}/{SETTING_DB_VERSION - 1}")
+            if current_version == 2 and not fresh:
+                self.backup_settings(conn, '.bak-v2')
+            current_version = self.settings_table_migrate_func[current_version](conn)
+        if not fresh:
+            log.info("database: migration done.")
 
-        else:
-            log.info(f"database: no settings table found. Creating settings table version {SETTING_DB_VERSION}.")
-            self.create_settings_table_version_2(conn)
-
+        cursor.execute("UPDATE botamusique SET value=? "
+                       "WHERE section='bot' AND option='db_version'", (SETTING_DB_VERSION,))
         conn.commit()
         conn.close()
+
+    def backup_settings(self, conn, suffix):
+        """结构变动前整库备份一份(<path><suffix>),出问题能换回旧镜像 + 旧库。内存库跳过。"""
+        path = self.settings_db.db_path
+        if not path or path == ':memory:' or path.startswith('file:'):
+            return
+        conn.commit()
+        target = sqlite3.connect(path + suffix)
+        try:
+            conn.backup(target)
+        finally:
+            target.close()
+        log.info(f"database: settings backed up to {path + suffix}")
 
     def music_database_migrate(self):
         conn = sqlite3.connect(self.music_db.db_path)
@@ -641,6 +658,37 @@ class DatabaseMigration:
                        "WHERE section='bot' AND option='db_version'")
         return 2  # return new version number
 
+    def settings_table_migrate_from_2_to_3(self, conn):
+        # 按服务器分开的数据(多服务器)。只建表;旧的不分服务器的设置由 bot.store.GuildStore.adopt_legacy()
+        # 在知道服务器 ID 之后(连上 Discord)复制过去,旧行保留,换回旧镜像照样能用。
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS guild_settings ("
+                       "guild_id TEXT NOT NULL, "
+                       "key TEXT NOT NULL, "
+                       "value TEXT, "
+                       "PRIMARY KEY (guild_id, key))")
+        cursor.execute("CREATE TABLE IF NOT EXISTS guild_queue ("
+                       "guild_id TEXT NOT NULL, "
+                       "position INTEGER NOT NULL, "
+                       "item_id TEXT NOT NULL, "
+                       "user TEXT NOT NULL DEFAULT '', "
+                       "grp TEXT, "
+                       "PRIMARY KEY (guild_id, position))")
+        cursor.execute("CREATE TABLE IF NOT EXISTS guild_queue_state ("
+                       "guild_id TEXT PRIMARY KEY, "
+                       "current_index INTEGER NOT NULL DEFAULT -1)")
+        # scope '' = 全局,否则是服务器 ID;kind: user_ban / url_ban / url_whitelist
+        cursor.execute("CREATE TABLE IF NOT EXISTS access_rule ("
+                       "scope TEXT NOT NULL, "
+                       "kind TEXT NOT NULL, "
+                       "value TEXT NOT NULL, "
+                       "note TEXT NOT NULL DEFAULT '', "
+                       "created_by TEXT NOT NULL DEFAULT '', "
+                       "created_at REAL NOT NULL DEFAULT 0, "
+                       "PRIMARY KEY (scope, kind, value))")
+        conn.commit()
+        return 3  # return new version number
+
     def music_table_migrate_from_0_to_1(self, conn):
         cursor = conn.cursor()
         cursor.execute("ALTER TABLE music RENAME TO music_old")
@@ -712,27 +760,34 @@ class PlayHistoryDatabase:
                      "ON play_history (played_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_play_history_item "
                      "ON play_history (item_id)")
+        # 在哪个服务器播的(多服务器)。之前的记录是 NULL
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(play_history)")}
+        if 'guild_id' not in columns:
+            conn.execute("ALTER TABLE play_history ADD COLUMN guild_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_play_history_guild "
+                     "ON play_history (guild_id, played_at)")
         conn.commit()
         conn.close()
 
-    def record(self, item_id, title, type, user, duration=0, played_at=None):
+    def record(self, item_id, title, type, user, duration=0, played_at=None, guild_id=None):
         if played_at is None:
             played_at = time.time()
         conn = sqlite3.connect(self.db_path)
         conn.execute(
-            "INSERT INTO play_history (item_id, title, type, user, duration, played_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (item_id, title or '', type or '', user or '', duration or 0, played_at))
+            "INSERT INTO play_history (item_id, title, type, user, duration, played_at, guild_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (item_id, title or '', type or '', user or '', duration or 0, played_at, guild_id or None))
         conn.commit()
         conn.close()
 
-    def mark_skipped(self, item_id):
-        """Flag the most recent play of item_id as skipped."""
+    def mark_skipped(self, item_id, guild_id=None):
+        """Flag the most recent play of item_id (in that guild, when given) as skipped."""
+        guild_sql, params = ("AND guild_id = ? ", (item_id, guild_id)) if guild_id else ("", (item_id,))
         conn = sqlite3.connect(self.db_path)
         conn.execute(
             "UPDATE play_history SET skipped = 1 WHERE id = ("
-            "SELECT id FROM play_history WHERE item_id = ? "
-            "ORDER BY played_at DESC LIMIT 1)", (item_id,))
+            "SELECT id FROM play_history WHERE item_id = ? " + guild_sql +
+            "ORDER BY played_at DESC LIMIT 1)", params)
         conn.commit()
         conn.close()
 
@@ -744,54 +799,65 @@ class PlayHistoryDatabase:
         conn.close()
         return {item_id: (count, last) for item_id, count, last in rows}
 
-    def stats(self, top_n=10):
-        """All aggregations for the stats page in one call."""
+    def stats(self, top_n=10, guild_id=None, include_unscoped=False):
+        """All aggregations for the stats page in one call.
+
+        guild_id 只统计这个服务器;include_unscoped 把加 guild_id 列之前的旧记录(NULL)也算进来,
+        只该给原来那个(单服务器时代的)服务器用。不给 guild_id 就是全部。
+        """
+        if guild_id:
+            scope = "guild_id = ? OR guild_id IS NULL" if include_unscoped else "guild_id = ?"
+            scope_params = (str(guild_id),)
+        else:
+            scope, scope_params = "1", ()
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
 
         def rows(sql, *params):
-            return cur.execute(sql, params).fetchall()
+            # 下面的查询都从 h(按服务器筛过的 play_history)取
+            return cur.execute(f"WITH h AS (SELECT * FROM play_history WHERE {scope}) " + sql,
+                               scope_params + params).fetchall()
 
         total_plays, total_seconds, unique_tracks = rows(
             "SELECT COUNT(*), COALESCE(SUM(duration), 0), COUNT(DISTINCT item_id) "
-            "FROM play_history")[0]
+            "FROM h")[0]
 
         by_type = [{'type': t, 'count': c} for t, c in rows(
-            "SELECT type, COUNT(*) FROM play_history GROUP BY type "
+            "SELECT type, COUNT(*) FROM h GROUP BY type "
             "ORDER BY COUNT(*) DESC")]
 
         top_tracks = [{'item_id': i, 'title': t, 'count': c} for i, t, c in rows(
-            "SELECT item_id, MAX(title), COUNT(*) AS c FROM play_history "
+            "SELECT item_id, MAX(title), COUNT(*) AS c FROM h "
             "GROUP BY item_id ORDER BY c DESC, MAX(played_at) DESC LIMIT ?", top_n)]
 
         top_users = [{'user': u, 'count': c} for u, c in rows(
-            "SELECT user, COUNT(*) AS c FROM play_history WHERE user != '' "
+            "SELECT user, COUNT(*) AS c FROM h WHERE user != '' "
             "GROUP BY user ORDER BY c DESC LIMIT ?", top_n)]
 
         # local-time hour-of-day histogram (0..23)
         hour_rows = dict(rows(
             "SELECT CAST(strftime('%H', played_at, 'unixepoch', 'localtime') AS INTEGER), "
-            "COUNT(*) FROM play_history GROUP BY 1"))
+            "COUNT(*) FROM h GROUP BY 1"))
         hours = [hour_rows.get(h, 0) for h in range(24)]
 
         weekday_rows = dict(rows(
             "SELECT CAST(strftime('%w', played_at, 'unixepoch', 'localtime') AS INTEGER), "
-            "COUNT(*) FROM play_history GROUP BY 1"))
+            "COUNT(*) FROM h GROUP BY 1"))
         weekdays = [weekday_rows.get(d, 0) for d in range(7)]  # 0 = Sunday
 
         most_skipped = [{'item_id': i, 'title': t, 'count': c} for i, t, c in rows(
-            "SELECT item_id, MAX(title), COUNT(*) AS c FROM play_history "
+            "SELECT item_id, MAX(title), COUNT(*) AS c FROM h "
             "WHERE skipped = 1 GROUP BY item_id ORDER BY c DESC LIMIT 5")]
 
         busiest = rows(
             "SELECT date(played_at, 'unixepoch', 'localtime') AS d, COUNT(*) AS c "
-            "FROM play_history GROUP BY d ORDER BY c DESC LIMIT 1")
+            "FROM h GROUP BY d ORDER BY c DESC LIMIT 1")
         busiest_day = ({'date': busiest[0][0], 'count': busiest[0][1]}
                        if busiest else None)
 
         last_30d = [{'date': d, 'count': c} for d, c in rows(
             "SELECT date(played_at, 'unixepoch', 'localtime') AS d, COUNT(*) "
-            "FROM play_history "
+            "FROM h "
             "WHERE played_at >= strftime('%s', 'now', '-30 days') "
             "GROUP BY d ORDER BY d")]
 

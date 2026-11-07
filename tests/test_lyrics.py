@@ -486,10 +486,9 @@ class WebApiTest(StoreTestCase):
         super().setUp()
         from flask import Flask
         import web_api
-        from tests.test_web_api import FakeBot, FakeCache, FakeDB, FakeWrapper
+        from tests.test_web_api import FakeBot, FakeCache, FakeWrapper
         self._saved_web = {n: getattr(var, n, None) for n in ('bot', 'cache', 'db')}
         var.bot = FakeBot()
-        var.db = FakeDB()
         self.item = UrlItem()
         self.item.display_type = lambda: 'url'
         var.playlist = type('P', (list,), {'version': 1, 'mode': 'one-shot', 'current_index': 0,

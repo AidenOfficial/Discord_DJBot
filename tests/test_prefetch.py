@@ -2,12 +2,12 @@ import configparser
 import logging
 import os
 import sys
-import threading
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import variables as var  # noqa: E402
+from bot import downloads  # noqa: E402
 from bot.player import PlayerMixin  # noqa: E402
 from media.playlist import OneshotPlaylist, RepeatPlaylist, RandomPlaylist  # noqa: E402
 
@@ -30,13 +30,13 @@ class Prefetcher(PlayerMixin):
 
     def __init__(self, active=None):
         self.log = logging.getLogger("test")
-        self._download_lock = threading.Lock()
-        self._active_downloads = set(active or [])
+        for item_id in active or []:
+            downloads.begin(item_id)
         self.started = []
 
     def async_download(self, item):
         self.started.append(item.id)
-        self._active_downloads.add(item.id)
+        downloads.begin(item.id)
 
     def send_channel_msg(self, msg):
         pass
@@ -90,6 +90,7 @@ class PrefetchTestCase(unittest.TestCase):
     def tearDown(self):
         var.config = self._saved_config
         var.playlist = self._saved_playlist
+        downloads._active.clear()
 
     def test_prefetches_window_beyond_next(self):
         w = [FakeWrapper() for _ in range(5)]

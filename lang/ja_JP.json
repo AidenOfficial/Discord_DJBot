@@ -80,6 +80,7 @@
         "playlist_fetching_failed": "再生リストを取得できません。",
         "position_in_the_queue": "位置：",
         "preconfigurated_radio": "デフォルトのウェブラジオは：",
+        "presence_servers": "{count} サーバー",
         "queue_contents": "再生リストにある曲は：",
         "queue_empty": "再生リストは空です。",
         "radio": "ラジオ",

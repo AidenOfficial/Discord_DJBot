@@ -12,7 +12,6 @@ import logging
 import os
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from unittest import mock
@@ -21,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import constants  # noqa: E402
 import variables as var  # noqa: E402
+from bot import downloads  # noqa: E402
 from bot.player import PlayerMixin  # noqa: E402
 from media import playlist as mp  # noqa: E402
 from media.cache import CachedItemWrapper  # noqa: E402
@@ -149,8 +149,6 @@ class Player(PlayerMixin):
         self.pcm_buffer_size = 1920
         self.last_ffmpeg_err = ''
         self._ffmpeg_stderr_lines = collections.deque(maxlen=20)
-        self._active_downloads = set()
-        self._download_lock = threading.Lock()
         self.is_pause = False
         self.pause_at_id = ''
         self.playhead = 0
@@ -199,6 +197,7 @@ class Base(unittest.TestCase):
         patcher = mock.patch('bot.player.time.sleep')
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.addCleanup(downloads._active.clear)
 
     def tearDown(self):
         for k, v in self._saved.items():
@@ -287,10 +286,10 @@ class WaitStateTest(Base):
         var.playlist = fill(mp.RepeatPlaylist(), [W('X', ready='validated')], 0)
         p = Player()
         p.wait_for_ready = True
-        p._active_downloads.add('X')
+        downloads.begin('X')
         p.run(5)
         self.assertEqual([], p.downloads)
-        p._active_downloads.discard('X')
+        downloads.end('X')
         p.run(1)
         self.assertEqual(['X'], p.downloads)
 

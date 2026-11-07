@@ -117,8 +117,9 @@ status_payload = _status_payload
 
 def _set_volume(value):
     value = max(0.0, min(1.0, round(float(value), 2)))
-    web_context.session().volume_helper.set_volume(value)
-    var.db.set('bot', 'volume', str(web_context.session().volume_helper.plain_volume_set))
+    session = web_context.session()
+    session.volume_helper.set_volume(value)
+    session.save_setting('volume', str(session.volume_helper.plain_volume_set))
 
 
 def _set_mode(mode):
@@ -133,7 +134,7 @@ def _set_mode(mode):
         web_context.session().interrupt()
     else:
         web_context.set_playlist(media.playlist.get_playlist(mode, web_context.playlist()))
-    var.db.set('playlist', 'playback_mode', mode)
+    web_context.session().save_setting('playback_mode', mode)
 
 
 def _mark_current_skipped():
@@ -142,7 +143,7 @@ def _mark_current_skipped():
     try:
         current = web_context.playlist().current_item()
         if current and not web_context.session().is_pause:
-            var.play_history.mark_skipped(current.id)
+            var.play_history.mark_skipped(current.id, web_context.session().guild_id or None)
     except Exception:
         pass
 

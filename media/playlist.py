@@ -1,11 +1,10 @@
-import json
 import threading
 import logging
 import random
 import time
 
 import variables as var
-from media.cache import (CachedItemWrapper, ItemNotCachedError,
+from media.cache import (CachedItemWrapper, ItemNotCachedError, discard_everywhere,
                          get_cached_wrapper_from_dict, get_cached_wrapper_by_id)
 from database import Condition
 from media.item import ValidationFailedError
@@ -13,8 +12,10 @@ from media.item import ValidationFailedError
 
 def get_playlist(mode, _list=None, _index=None):
     """按模式建队列对象。从旧队列 _list 换模式时,新对象接着属于旧队列的会话。"""
+    left = set(getattr(_list, '_left_ids', ())) | {w.id for w in _list or ()}
     playlist = _new_playlist(mode, _list, _index)
     playlist.session = getattr(_list, 'session', None)
+    playlist._left_ids |= left
     return playlist
 
 
@@ -62,6 +63,8 @@ class BasePlaylist(list):
         self._stay_once = False
         # 这个队列属于哪个会话(DJBot);校验失败时通过它发消息、移出队列。没有就退回 var.bot
         self.session = None
+        # 离开队列时没释放缓存的条目(换播放模式、自动播放换一批),clear() 时一起释放
+        self._left_ids = set()
 
     def is_empty(self):
         return True if len(self) == 0 else False
@@ -69,6 +72,7 @@ class BasePlaylist(list):
     def from_list(self, _list, current_index):
         self.version += 1
         self._stay_once = False
+        self._left_ids.update(w.id for w in self)
         super().clear()
         self.extend(_list)
         self.current_index = current_index
@@ -260,34 +264,36 @@ class BasePlaylist(list):
             self.version += 1
             self.current_index = -1
             self._stay_once = False
+            ids = self._left_ids | {w.id for w in self}
+            self._left_ids = set()
             super().clear()
 
-        var.cache.free_all()
+        # 只释放这个队列的条目,而且别的会话的队列还排着的不动(缓存是共用的)
+        for id in ids:
+            var.cache.free(id)
 
     def save(self):
         with self.playlist_lock:
-            var.db.remove_section("playlist_item")
             assert self.current_index is not None
-            var.db.set("playlist", "current_index", self.current_index)
-
-            for index, music in enumerate(self):
+            entries = []
+            for music in self:
                 record = {'id': music.id, 'user': music.user}
                 if getattr(music, 'group', None):
                     record['group'] = music.group
-                var.db.set("playlist_item", str(index), json.dumps(record))
+                entries.append(record)
+            store, guild_id = self._store()
+            store.save_queue(guild_id, self.current_index, entries)
 
     def load(self):
-        current_index = var.db.getint("playlist", "current_index", fallback=-1)
+        store, guild_id = self._store()
+        current_index, items = store.load_queue(guild_id)
         if current_index == -1:
             return
 
-        items = var.db.items("playlist_item")
         if items:
             music_wrappers = []
             groups = {}  # 同一组的条目共用一个 dict,和入队时一样
-            items.sort(key=lambda v: int(v[0]))
             for item in items:
-                item = json.loads(item[1])
                 music_wrapper = get_cached_wrapper_by_id(item['id'], item['user'])
                 if music_wrapper:
                     group = item.get('group')
@@ -335,7 +341,7 @@ class BasePlaylist(list):
                 if owner:
                     owner.send_channel_msg(e.msg)
                 self._drop(item.id)
-                var.cache.free_and_delete(item.id)
+                discard_everywhere(item.id, done=self)
                 continue
             except Exception:
                 # 任何意外错误只影响这一首,校验线程继续处理后面的
@@ -350,6 +356,12 @@ class BasePlaylist(list):
 
     def _owner(self):
         return self.session if self.session is not None else var.bot
+
+    def _store(self):
+        """队列存在哪:(GuildStore, guild_id)。没归属会话(测试)就是全局 store 的 '' 服务器。"""
+        if self.session is not None:
+            return self.session.store, self.session.guild_id
+        return var.store, ''
 
     def _drop(self, item_id):
         # 由 bot 决定删掉当前曲后指针怎么走(见 PlayerMixin.drop_from_queue)
