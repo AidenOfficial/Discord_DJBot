@@ -6,12 +6,15 @@
 一个服务器里慢吞吞的命令不会拖住它自己的语音事件((gid, 'evt')),更不会拖住别的服务器。
 
 工作线程按需创建、空闲一会儿自己退出;运行任务时线程名带上 key,日志里看得出是哪个服务器。
+定时任务(跟随检查的防抖等)也不各开线程:Timers 一个线程管全部,到点交给线程池。
 """
 
 import collections
 import concurrent.futures
+import heapq
 import logging
 import threading
+import time
 
 log = logging.getLogger("bot")
 
@@ -119,3 +122,93 @@ class KeyedExecutor:
                             self._cond.notify()
                     else:
                         del self._pending[key]
+
+
+class Timers:
+    """一个线程管所有服务器的定时任务(以前每次防抖都开一个 threading.Timer 线程)。
+
+    schedule(slot, delay, key, fn, *args):delay 秒后把 fn 交给 executor 按 key 执行;同一个 slot
+    再 schedule 会替换掉还没到点的那个(防抖)。没给 executor 就在定时线程里直接调用(要很快返回)。
+    """
+
+    def __init__(self, executor=None, name='Timers'):
+        self.executor = executor
+        self._name = name
+        self._cond = threading.Condition()
+        self._slots = {}                       # slot -> (到点时间, 序号, key, fn, args)
+        self._heap = []                        # (到点时间, 序号, slot)
+        self._seq = 0
+        self._thread = None
+        self._shutdown = False
+
+    def schedule(self, slot, delay, key, fn, *args):
+        due = time.monotonic() + max(0.0, float(delay))
+        with self._cond:
+            if self._shutdown:
+                return
+            self._seq += 1
+            self._slots[slot] = (due, self._seq, key, fn, args)
+            heapq.heappush(self._heap, (due, self._seq, slot))
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name=self._name, daemon=True)
+                self._thread.start()
+            self._cond.notify()
+
+    def cancel(self, slot):
+        with self._cond:
+            return self._slots.pop(slot, None) is not None
+
+    def scheduled(self, slot):
+        with self._cond:
+            return slot in self._slots
+
+    def shutdown(self):
+        with self._cond:
+            self._shutdown = True
+            self._slots.clear()
+            self._heap.clear()
+            self._cond.notify_all()
+
+    def _run(self):
+        while True:
+            with self._cond:
+                fire = None
+                while fire is None:
+                    if self._shutdown:
+                        return
+                    now = time.monotonic()
+                    while self._heap and self._heap[0][0] <= now:
+                        _, seq, slot = heapq.heappop(self._heap)
+                        entry = self._slots.get(slot)
+                        if entry is not None and entry[1] == seq:  # 被替换 / 取消的旧条目直接丢掉
+                            del self._slots[slot]
+                            fire = entry
+                            break
+                    if fire is None:
+                        self._cond.wait(self._heap[0][0] - now if self._heap else None)
+            _, _, key, fn, args = fire
+            executor = self.executor
+            try:
+                if executor is not None:
+                    executor.submit(key, fn, *args)
+                else:
+                    fn(*args)
+            except RuntimeError:
+                if executor is not None:
+                    return  # 线程池已关闭(正在退出)
+                log.exception("timers: %s failed", getattr(fn, '__name__', fn))
+            except Exception:
+                log.exception("timers: %s failed", getattr(fn, '__name__', fn))
+
+
+_default_timers = None
+_default_lock = threading.Lock()
+
+
+def default_timers():
+    """没有 Hub 时(测试替身)共用的那个:回调直接在定时线程里跑。"""
+    global _default_timers
+    with _default_lock:
+        if _default_timers is None:
+            _default_timers = Timers(name='Timers-default')
+        return _default_timers

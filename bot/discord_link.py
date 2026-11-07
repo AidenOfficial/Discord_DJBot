@@ -15,8 +15,9 @@ bot 其余部分是线程模型,discord.py 是 asyncio:这里把 discord.py 放�
 回调在共享线程池(bot.executor.KeyedExecutor)里按 (guild_id, 'evt') 依次调用,不在事件循环线程里;
 on_precheck / on_autocomplete 要在 3 秒内给 Discord 答复,在各自的小线程池里同步执行,应当很快返回。
 
-现在还是只服务主服务器(配置的 guild_id,没配就用 bot 加入的第一个):斜杠命令只同步到这个服务器,
-其他服务器里的交互礼貌拒绝。
+还没有会话的服务器来了交互(或 bot 自己出现在那里的语音频道):DiscordClient 通过 on_session_needed
+请 Hub 按需建会话,等它准备好再交给新的 GuildLink;Hub 拒绝(不允许的服务器、会话数到上限)就回理由。
+会话休眠时 GuildLink.close() 把自己从 DiscordClient 上摘下。
 """
 
 from __future__ import annotations
@@ -94,6 +95,8 @@ class CommandContext:
     guild_id: Optional[int] = None
     role_ids: Tuple[int, ...] = ()
     is_admin: bool = False
+    #: bot 主人([bot] admin 里的用户 ID);服务器管理员只是 is_admin,不是主人
+    is_owner: bool = False
     ephemeral: bool = False
     #: 面板按钮触发的:结果就是面板本身的变化,命令的文字回复一律不发(避免刷屏)
     silent: bool = False
@@ -300,16 +303,17 @@ def _desc(text_by_locale, default_locale='en'):
 
 #: 交互来自还没准备好的服务器时的回复
 STARTING_REPLY = "The bot is still starting, try again in a moment."
-#: C1 只服务主服务器:别的服务器里的交互
+#: 没有 Hub 帮忙建会话时(测试 / 单独用连接层),没有会话的服务器里的交互;私信里的交互
 HOME_ONLY_REPLY = "This bot only works in its home server for now."
+#: 交互来自刚要建会话的服务器时,最多等它准备好多久(秒)
+SESSION_WAIT = 1.5
 
 
 class DiscordClient:
     """整个进程共用的 Discord 连接:登录、事件循环线程、斜杠命令树、持久面板按钮。
 
     交互(斜杠命令、自动补全、预检查、面板按钮)和网关事件(语音状态、频道 / 身份组 / 服务器变化)
-    按 guild_id 交给那个服务器的 GuildLink;没有 GuildLink 的服务器:主服务器回"还在启动",
-    其他服务器礼貌拒绝。斜杠命令现在只同步到主服务器(即时生效,不用等全局命令的缓存)。
+    按 guild_id 交给那个服务器的 GuildLink;没有 GuildLink 的服务器先请 Hub 建会话(on_session_needed)。
     """
 
     def __init__(self, token, home_guild_id=None, language='en_US', debug=False, executor=None):
@@ -336,7 +340,7 @@ class DiscordClient:
         self._tree.on_error = self._on_tree_error
         for handler in (self.on_ready, self.on_shard_ready, self.on_voice_state_update,
                         self.on_guild_channel_create, self.on_guild_channel_delete, self.on_guild_channel_update,
-                        self.on_guild_update,
+                        self.on_guild_update, self.on_guild_join, self.on_guild_remove,
                         # 身份组权限变了,"能不能进这个频道"也跟着变
                         self.on_guild_role_create, self.on_guild_role_update, self.on_guild_role_delete):
             self.client.event(handler)
@@ -359,6 +363,12 @@ class DiscordClient:
         self._spec_by_key: Dict[str, Any] = {}
         #: GuildLink.set_activity 汇总到这里(Hub 决定账号显示什么);没设置就直接改状态
         self.on_activity: Optional[Callable[[Optional[int], Optional[str], str], None]] = None
+        #: 交互来自还没有会话的服务器:请 Hub 建一个(在事件循环里调用,必须马上返回)。
+        #: 返回 None = 已经在建 / 已经有了;返回文字 = 拒绝理由(不允许的服务器、会话数到上限……)
+        self.on_session_needed: Optional[Callable[[int], Optional[str]]] = None
+        #: bot 被拉进 / 移出服务器(在事件循环里调用,要马上返回)
+        self.on_guild_joined: Optional[Callable[[int], None]] = None
+        self.on_guild_removed: Optional[Callable[[int], None]] = None
 
     # ---- 生命周期 ----------------------------------------------------------
 
@@ -462,6 +472,22 @@ class DiscordClient:
 
     def guild_ids(self) -> List[int]:
         return [g.id for g in list(self.client.guilds)]
+
+    def humans_in(self, guild_id, channel_id):
+        """语音频道里有几个真人(不算 bot)。还没有会话的服务器也能查(重启后决定要不要回去)。"""
+        try:
+            guild = self.client.get_guild(int(guild_id))
+            channel = guild.get_channel(int(channel_id)) if guild is not None else None
+        except (TypeError, ValueError):
+            return 0
+        if channel is None or not hasattr(channel, 'voice_states'):
+            return 0
+        count = 0
+        for uid in list(channel.voice_states):
+            member = guild.get_member(uid)
+            if member is not None and not member.bot:
+                count += 1
+        return count
 
     def guild_info(self, guild_id):
         """{'id', 'name', 'icon'}(icon 是 CDN 地址,没有图标为 '');bot 不在这个服务器返回 None。"""
@@ -586,6 +612,31 @@ class DiscordClient:
         link = self._links.get(member.guild.id)
         if link is not None:
             await link.on_voice_state_update(member, before, after)
+            return
+        # 没有会话的服务器:别人进出语音不建会话;只有 bot 自己出现在语音里(重启前留下的状态等)才建
+        me = self.client.user
+        if me is not None and member.id == me.id and getattr(after, 'channel', None) is not None:
+            self._need_session(member.guild.id)
+
+    def _need_session(self, guild_id):
+        hook = self.on_session_needed
+        if hook is None:
+            return HOME_ONLY_REPLY
+        try:
+            return hook(guild_id)
+        except Exception:
+            log.exception("discord: could not start a session for %s", guild_id)
+            return STARTING_REPLY
+
+    async def on_guild_join(self, guild):
+        log.info("discord: joined server %s (%s)", guild.name, guild.id)
+        if self.on_guild_joined is not None:
+            self.on_guild_joined(guild.id)
+
+    async def on_guild_remove(self, guild):
+        log.info("discord: removed from server %s (%s)", getattr(guild, 'name', '?'), guild.id)
+        if self.on_guild_removed is not None:
+            self.on_guild_removed(guild.id)
 
     def _rebuild(self, guild_id):
         link = self._links.get(guild_id)
@@ -615,24 +666,54 @@ class DiscordClient:
 
     # ---- 交互路由 ----------------------------------------------------------
 
-    async def _refuse(self, interaction):
-        gid = interaction.guild_id
-        text = STARTING_REPLY if gid is not None and gid == self.home_guild_id else HOME_ONLY_REPLY
+    async def _refuse(self, interaction, text=None):
+        if text is None:
+            gid = interaction.guild_id
+            text = STARTING_REPLY if gid is not None and gid == self.home_guild_id else HOME_ONLY_REPLY
         await interaction.response.send_message(text, ephemeral=True)
 
+    async def _link_for(self, interaction):
+        """交互该交给哪个 GuildLink。还没有会话的服务器:请 Hub 建一个,等它在 SESSION_WAIT 秒内
+        准备好(Discord 要求 3 秒内答复,后面还有预检查);等不到回"还在启动",被拒绝回理由。
+        已经答复过的返回 None。"""
+        gid = interaction.guild_id
+        if gid is None:
+            await self._refuse(interaction, HOME_ONLY_REPLY)
+            return None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + SESSION_WAIT
+        requested = False
+        while True:
+            link = self._links.get(gid)
+            if link is not None and getattr(link, 'ready', True):
+                return link
+            if link is None and not requested:
+                # 没有会话,或者正在休眠的会话刚摘下 GuildLink
+                if self.on_session_needed is None:
+                    await self._refuse(interaction)
+                    return None
+                requested = True
+                refusal = self._need_session(gid)
+                if refusal:
+                    await self._refuse(interaction, refusal)
+                    return None
+            if loop.time() >= deadline:
+                break
+            await asyncio.sleep(0.05)
+        if link is not None:
+            return link  # 会话还在读状态:GuildLink 自己回"还在启动"
+        await self._refuse(interaction, STARTING_REPLY)
+        return None
+
     async def _invoke(self, spec, interaction, kwargs, ephemeral=None, silent=False):
-        link = self._links.get(interaction.guild_id) if interaction.guild_id is not None else None
-        if link is None:
-            await self._refuse(interaction)
-            return
-        await link._invoke(spec, interaction, kwargs, ephemeral=ephemeral, silent=silent)
+        link = await self._link_for(interaction)
+        if link is not None:
+            await link._invoke(spec, interaction, kwargs, ephemeral=ephemeral, silent=silent)
 
     async def _on_panel_button(self, interaction, action):
-        link = self._links.get(interaction.guild_id) if interaction.guild_id is not None else None
-        if link is None:
-            await self._refuse(interaction)
-            return
-        await link._on_panel_button(interaction, action)
+        link = await self._link_for(interaction)
+        if link is not None:
+            await link._on_panel_button(interaction, action)
 
     async def _on_tree_error(self, interaction, error):
         log.error("discord: slash command error: %s", error, exc_info=error)
@@ -685,6 +766,8 @@ class DiscordClient:
             link = client._links.get(interaction.guild_id) if interaction.guild_id is not None else None
             handler = link.on_autocomplete if link is not None else None
             if handler is None:
+                if link is None and interaction.guild_id is not None and client.on_session_needed is not None:
+                    client._need_session(interaction.guild_id)  # 有人在打命令了:先把会话建起来
                 return []
             ctx = link._context(None, interaction, {})
             try:
@@ -782,16 +865,30 @@ class GuildLink:
     def _emit(self, fn, *args):
         self._dc.emit((self.guild_id, 'evt'), fn, *args)
 
-    def close(self):
-        """只断开这个服务器:离开语音、清掉频道状态。共享连接不受影响。"""
+    def close(self, reason='closed'):
+        """只断开这个服务器(会话休眠 / bot 被移出服务器):先从共享连接上摘下(之后的交互和事件
+        不再交给它),再离开语音、清掉语音频道状态;面板 / 状态不再更新。共享连接不受影响。"""
+        self._close_reason = reason
+        self._closed.set()
+        if self._dc.link(self.guild_id) is self:
+            self._dc.remove_link(self.guild_id)
+        for name in ('on_command', 'on_precheck', 'on_autocomplete', 'on_user_joined', 'on_user_updated',
+                     'on_user_left', 'on_self_moved', 'on_panel_button', 'on_panel_pressed'):
+            setattr(self, name, None)
         try:
             self._call(self._shutdown_voice(), timeout=10)
         except Exception:
-            pass
-        self._closed.set()
+            log.debug("discord: could not leave voice in %s", self.guild_id, exc_info=True)
         self._pcm.close()
-        if self._dc.link(self.guild_id) is self:
-            self._dc.remove_link(self.guild_id)
+
+    @property
+    def closed(self):
+        return self._closed.is_set()
+
+    @property
+    def ready(self):
+        """会话读完状态、开始接命令了(之前来的命令回"还在启动")。"""
+        return self.on_command is not None and not self._closed.is_set()
 
     async def _shutdown_voice(self):
         guild = self._guild()
@@ -950,6 +1047,29 @@ class GuildLink:
     @property
     def guild_name(self):
         return self._guild_name
+
+    def text_channels(self):
+        """bot 能发言的文字频道(Web 上选公告频道用):[{'id': str, 'name': str}],按频道列表的顺序。"""
+        async def collect():
+            guild = self._guild()
+            if guild is None:
+                return []
+            me = guild.me
+            out = []
+            for channel in sorted(guild.text_channels, key=lambda c: (c.category.position if c.category else -1,
+                                                                       c.position)):
+                if me is not None:
+                    perms = channel.permissions_for(me)
+                    if not (perms.view_channel and perms.send_messages):
+                        continue
+                out.append({'id': str(channel.id), 'name': channel.name})
+            return out
+
+        try:
+            return self._call(collect(), timeout=10) or []
+        except Exception:
+            log.debug("discord: could not list the text channels of %s", self.guild_id, exc_info=True)
+            return []
 
     @property
     def max_message_length(self):
@@ -1249,6 +1369,8 @@ class GuildLink:
 
     def panel_show(self, panel, new_track=False):
         """显示 / 更新面板。new_track:换歌了,面板已经被聊天顶上去的话删掉重发到最底下。返回是否成功。"""
+        if self._closed.is_set():
+            return False
         try:
             return bool(self._call(self._panel_show(panel, new_track), timeout=30))
         except Exception:
@@ -1257,6 +1379,8 @@ class GuildLink:
 
     def panel_end(self, panel):
         """播放结束:面板换成 panel 的内容并去掉按钮;panel 为 None 时只去掉按钮。"""
+        if self._closed.is_set():
+            return False
         try:
             return bool(self._call(self._panel_end(panel), timeout=30))
         except Exception:
@@ -1389,6 +1513,8 @@ class GuildLink:
 
     def set_voice_status(self, text):
         """bot 所在语音频道的状态文字(频道名下面那行);'' 清除。没权限 / 不在语音里返回 False。"""
+        if self._closed.is_set():
+            return False
         try:
             return bool(self._call(self._set_voice_status(text), timeout=15))
         except Exception:
@@ -1436,7 +1562,8 @@ class GuildLink:
         voice = getattr(member, 'voice', None)
         role_ids = tuple(r.id for r in getattr(member, 'roles', ()) or ())
         perms = getattr(member, 'guild_permissions', None)
-        is_admin = (member.id in self.admin_ids or any(r in self.admin_ids for r in role_ids)
+        is_owner = member.id in self.admin_ids
+        is_admin = (is_owner or any(r in self.admin_ids for r in role_ids)
                     or (self.admin_permission and perms is not None
                         and (perms.administrator or perms.manage_guild)))
         options = {}
@@ -1468,6 +1595,7 @@ class GuildLink:
             guild_id=interaction.guild_id,
             role_ids=role_ids,
             is_admin=bool(is_admin),
+            is_owner=bool(is_owner),
             ephemeral=(bool(ephemeral) if ephemeral is not None
                        else bool(spec.ephemeral) if spec is not None else True),
             interaction=interaction,

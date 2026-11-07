@@ -113,6 +113,8 @@
         "removing_item": "Removed entry {item} from playlist.",
         "repeat": "Repeat {song} for {n} times.",
         "report_version": "The current version of Discord-DJBot is <b>{version}</b>.",
+        "server_limit_reached": "The bot is busy in too many servers right now, please try again later.",
+        "server_not_allowed": "This bot is not available in this server.",
         "shortlist_instruction": "Use <i>/pick indexes:{indexes}</i> to play the item you want.",
         "spotify_busy": "Too many Spotify downloads in progress. Please try again shortly.",
         "spotify_error": "Failed to download <b>{url}</b> from Spotify. Check the bot logs for details.",

@@ -211,7 +211,8 @@ def main():
     #  Connect + home session
     # ======================
     # Hub 装好信号处理;start():连上 Discord(失败退出)-> 建主服务器的会话(var.bot)->
-    # 读它存的音量 / 播放模式 / 队列 -> 进默认频道。播放循环在最后的 run() 里各开一个线程
+    # 读它存的音量 / 播放模式 / 队列 -> 进语音频道 -> 重启前在语音里的服务器回去。
+    # 别的服务器的会话按需建、闲置后休眠。播放循环在最后的 run() 里各开一个线程
     var.hub = Hub(args)
     commands.register_all_commands(var.hub)
     var.hub.start()

@@ -278,6 +278,42 @@ class DebounceTest(Base):
             time.sleep(0.3)
         self.assertEqual(len(calls), 1)
 
+    def test_uses_the_shared_timer_thread(self):
+        b = Bot()
+        b.timers = mock.Mock()
+        b.schedule_follow_check(delay=1)
+        slot = (id(b), 'follow')
+        b.timers.schedule.assert_called_once_with(slot, 1, ('', 'evt'), b._safe_follow_check)
+        b.cancel_follow_check()
+        b.timers.cancel.assert_called_once_with(slot)
+
+
+class RejoinTest(Base):
+    """重启后回到原来的语音频道(voice_channel)。"""
+
+    def setUp(self):
+        super().setUp()
+        self.bot.link.users.myself.channel_id = None     # 刚启动:还不在语音里
+
+    def test_rejoins_where_people_still_are(self):
+        b = self.bot
+        b.remember_voice_channel(5)
+        self.assertEqual(b.saved_voice_channel(), 5)
+        b.link.users.add(2, 'alice', 5)
+        self.assertTrue(b.rejoin_saved_channel())
+        self.assertEqual(b.link.moves, [5])
+
+    def test_forgets_an_empty_channel(self):
+        b = self.bot
+        b.remember_voice_channel(5)
+        b.link.users.add(3, 'OtherBot', 5)               # 只有别的 bot:不算有人
+        self.assertFalse(b.rejoin_saved_channel())
+        self.assertEqual(b.link.moves, [])
+        self.assertIsNone(b.saved_voice_channel())
+        self.assertFalse(b.rejoin_saved_channel())       # 没记录:什么都不做
+        b.remember_voice_channel(None)                   # 没有也能清
+        self.assertIsNone(b.saved_voice_channel())
+
 
 class ApiTest(Base):
     def setUp(self):

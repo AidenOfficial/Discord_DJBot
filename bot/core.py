@@ -1,7 +1,6 @@
 # coding=utf-8
 import collections
 import logging
-import threading
 import time
 import traceback
 
@@ -17,6 +16,8 @@ from .player import PlayerMixin
 
 
 PLAYBACK_MODES = ("one-shot", "repeat", "single", "random", "autoplay")
+#: 服务器设置里的公告频道(频道 id;'' = 不指定)
+ANNOUNCE_KEY = 'announce_channel'
 
 
 def new_queue(mode):
@@ -38,7 +39,7 @@ class DJBot(PlayerMixin, ChannelMixin):
 
     version = 'git'
 
-    def __init__(self, args, link, executor=None, ticker=None):
+    def __init__(self, args, link, executor=None, ticker=None, timers=None):
         self.log = logging.getLogger("bot")
         self.cmd_handle = {}
         self.slash_names = {}  # spec.key -> 斜杠命令名(帮助 / 提示文字用)
@@ -81,6 +82,8 @@ class DJBot(PlayerMixin, ChannelMixin):
         #: 共享线程池(bot.executor.KeyedExecutor):命令按 (guild_id, 'cmd') 依次处理
         self.executor = executor
         self.ticker = ticker
+        #: 共用的定时线程(bot.executor.Timers):跟随检查的防抖
+        self.timers = timers
         # 公告频道里的"正在播放"面板 + 语音频道状态
         self.now_playing = NowPlaying(
             self, self.link,
@@ -112,9 +115,12 @@ class DJBot(PlayerMixin, ChannelMixin):
         self.bots = set(b.strip() for b in bots.split(',') if b.strip())
         self._humans_in_channel = 0
 
-    def start(self):
-        """连接(GuildLink)已经就绪:读这个服务器的状态、接上回调、进默认频道。
-        register_slash_commands() 之后调用;播放循环(loop)由 Hub 另开线程跑。"""
+    def start(self, startup=True):
+        """连接(GuildLink)已经就绪:读这个服务器的状态、接上回调、进语音频道。
+        register_slash_commands() 之后调用;播放循环(loop)由 Hub 另开线程跑。
+
+        语音频道:重启前在的频道还有人就回去;否则 startup(进程启动时建的会话)才进默认频道,
+        按需建 / 从休眠恢复的会话不主动进频道。最后还不在语音里,恢复的队列先暂停着,不对着空气放。"""
         self.link.on_user_joined = self._on_user_created
         self.link.on_user_updated = self._on_user_updated
         self.link.on_user_left = self._on_user_removed
@@ -132,7 +138,9 @@ class DJBot(PlayerMixin, ChannelMixin):
         for user in self.link.users.values():
             self._user_channels[user.session] = user.channel_id
 
-        self.join_channel()
+        if not self.rejoin_saved_channel() and startup:
+            self.join_channel()
+        self._pause_outside_voice()
         self._humans_in_channel = self.get_user_count_in_channel()
         # 默认频道可能本来就没人:连上后按跟随设置检查一次
         self.schedule_follow_check(delay=5)
@@ -153,9 +161,36 @@ class DJBot(PlayerMixin, ChannelMixin):
         self.set_playlist(new_queue(mode))
 
         if var.config.getboolean('bot', 'save_playlist'):
-            self.log.info("bot: load playlist from previous session")
+            self.log.info("bot: load playlist from previous session (%s)", self.guild_id or '-')
             self.playlist.load()
+        self.load_announce_channel()
         self._guild_state_loaded = True
+
+    def _pause_outside_voice(self):
+        """启动后不在语音里:恢复的队列先暂停(/play 或 Web 上点播放再继续,从当前这首开头放)。"""
+        if self.link.my_channel_id is not None or len(self.playlist) == 0:
+            return
+        self.is_pause = True
+        self.pause_at_id = ""
+        self.wait_for_ready = self.playlist.current_index != -1
+        self.log.info("bot: not in a voice channel, the restored queue of %s waits paused", self.guild_id or '-')
+
+    # ---- 公告频道(按服务器存,key announce_channel;配置文件的是主服务器的后备) ----
+
+    def load_announce_channel(self):
+        saved = self.setting(ANNOUNCE_KEY)
+        if saved is not None and hasattr(self.link, 'announce_channel_id'):
+            self.link.announce_channel_id = int(saved) if str(saved).isdigit() else None
+
+    def set_announce_channel(self, channel_id):
+        """Web 设置页改公告频道;None / '' = 不指定(发到最近一次有人用命令的频道)。"""
+        value = str(channel_id) if channel_id and str(channel_id).isdigit() else ''
+        self.save_setting(ANNOUNCE_KEY, value)
+        self.link.announce_channel_id = int(value) if value else None
+
+    def announce_channel(self):
+        cid = getattr(self.link, 'announce_channel_id', None)
+        return str(cid) if cid else ''
 
     def save_queue(self):
         """退出时(信号)保存队列。"""
@@ -166,12 +201,34 @@ class DJBot(PlayerMixin, ChannelMixin):
             self.log.info("bot: save playlist into database (%s)", self.guild_id or '-')
             self.playlist.save()
 
-    def stop(self):
-        """让播放循环退出(它退出前会再存一次队列),面板不再更新。"""
+    def stop_session(self):
+        """让播放循环退出(它退出前会再存一次队列),面板不再更新。进程退出 / 休眠时由 Hub 调用。
+        (不能叫 stop:那是 PlayerMixin 的"停止播放",/stop 命令和 Web 都在用。)"""
         self.exit = True
         now_playing = getattr(self, 'now_playing', None)
         if now_playing is not None:
             now_playing.stop()
+        self.cancel_follow_check()
+
+    def release(self):
+        """播放循环退出后(休眠):结束还挂着的 ffmpeg 进程。"""
+        thread, self.thread = getattr(self, 'thread', None), None
+        if thread is not None:
+            try:
+                thread.kill()
+            except Exception:
+                pass
+
+    def is_idle(self):
+        """可以休眠:不在语音里,也没在放(暂停着、队列放完了),没有命令在排队。"""
+        if self.link.my_channel_id is not None:
+            return False
+        executor = getattr(self, 'executor', None)
+        if executor is not None and executor.pending((self.guild_id, 'cmd')):
+            return False
+        if self.is_pause or len(self.playlist) == 0:
+            return True
+        return self.thread is None and not self.wait_for_ready
 
     def get_version(self):
         if self.version != "git":
@@ -204,12 +261,24 @@ class DJBot(PlayerMixin, ChannelMixin):
         self._dispatch_users_changed(user, 'removed')
 
     def _dispatch_users_changed(self, user, action):
-        if getattr(self, '_react_to_empty_channel', False):
-            threading.Thread(target=self.users_changed, args=(user, action), name=f"Users-{self.guild_id}",
-                             daemon=True).start()
+        """when_nobody_in_channel 的处理会暂停 / 继续播放(切歌要淡出几十毫秒):排到这个服务器的事件队列
+        (guild_id, 'evt') 末尾,不阻塞当前这条事件,也不再每条事件开一个线程。"""
+        if not getattr(self, '_react_to_empty_channel', False):
+            return
+        executor = getattr(self, 'executor', None)
+        if executor is None:
+            self.users_changed(user, action)
+            return
+        try:
+            executor.submit((self.guild_id, 'evt'), self.users_changed, user, action)
+        except RuntimeError:
+            pass  # 线程池已关闭(正在退出)
 
     def _on_self_moved(self, old_channel, new_channel):
-        """bot 自己进出 / 换语音频道(包括被管理员拖走、踢出)。"""
+        """bot 自己进出 / 换语音频道(包括被管理员拖走、踢出)。记下所在频道,重启后回去;
+        退出进程时断开语音不算(那时要留着记录)。"""
+        if not getattr(self, 'exit', False):
+            self.remember_voice_channel(new_channel)
         if new_channel is None and old_channel is not None and time.time() >= self._leaving_until:
             # 被人从语音里踢出去了:暂停,别在没人听的情况下继续"播"
             if not self.is_pause and len(self.playlist) > 0:
@@ -348,9 +417,17 @@ class DJBot(PlayerMixin, ChannelMixin):
             self.log.debug("bot: could not refresh discord link", exc_info=True)
 
     def is_admin(self, user):
-        """user 是 CommandContext(斜杠命令)或 Discord user id。"""
+        """这个服务器里的 bot 管理员。user 是 CommandContext(斜杠命令:bot 主人、配置的身份组,
+        或有"管理员 / 管理服务器"权限的人)或 Discord user id(只认配置的 bot 主人)。"""
         if isinstance(user, CommandContext):
             return user.is_admin
+        return self.is_owner(user)
+
+    def is_owner(self, user):
+        """bot 主人([bot] admin 里的用户 ID,所有服务器通用)。服务器管理员不是主人:
+        影响整个进程的事(比如 /kill)只该交给主人。"""
+        if isinstance(user, CommandContext):
+            return bool(getattr(user, 'is_owner', False))
         admins = {a.strip() for a in var.config.get('bot', 'admin').replace(';', ',').split(',') if a.strip()}
         return str(user) in admins
 

@@ -93,6 +93,8 @@
         "removing_item": "再生リストに「{item}」を削除しました。",
         "repeat": "「{song}」を{n}回リピートするになります。",
         "report_version": "Discord-DJBot のバージョン：<b>{version}</b>。",
+        "server_limit_reached": "現在ほかのサーバーで多数稼働中のため利用できません。しばらくしてからもう一度お試しください。",
+        "server_not_allowed": "このサーバーではこのボットを利用できません。",
         "shortlist_instruction": "<i>/pick indexes:{indexes}</i> でこのリストの曲を再生します。",
         "spotify_no_match": "spotdl は <b>{url}</b> に一致する曲を見つけられませんでした。<i>/url</i> で直接追加してみてください。",
         "start_updating": "更新しています…",

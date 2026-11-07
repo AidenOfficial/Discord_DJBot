@@ -254,6 +254,7 @@ class FakeLink:
         self.users = {}
         self.my_channel_id = None
         self.channels = {}
+        self.announce_channel_id = None
 
 
 class Cache(dict):
@@ -326,6 +327,55 @@ class SessionLoadTest(SessionBase):
         self.assertEqual(var.store.get('777', 'volume'), '0.4')
         self.assertEqual(var.store.load_queue('777')[0], 2)
         self.assertEqual(var.db.get('bot', 'volume'), '0.3')    # 旧行不再写
+
+    def test_restored_queue_waits_paused_outside_voice(self):
+        bot = self.make_bot(777)
+        self.start(bot)
+        self.assertTrue(bot.is_pause)                              # 不在语音里:不对着空气放
+        self.assertTrue(bot.wait_for_ready)                        # 继续时从当前这首开始
+        self.assertEqual(bot.playlist.current_index, 1)
+
+        inside = self.make_bot(777)
+        inside.link.my_channel_id = 5                              # 进了语音(回到原来的频道 / 默认频道)
+        self.start(inside)
+        self.assertFalse(getattr(inside, 'is_pause', False))
+
+    def test_lazy_session_does_not_join_the_default_channel(self):
+        bot = self.make_bot(777)
+        from media.playlist import BasePlaylist
+        with mock.patch.object(BasePlaylist, 'async_validate'):
+            bot.start(startup=False)
+        bot.join_channel.assert_not_called()
+        started = self.make_bot(777)
+        self.start(started)
+        started.join_channel.assert_called_once()
+
+    def test_announce_channel_per_guild(self):
+        var.store.adopt_legacy('777')
+        var.store.set('888', 'announce_channel', '900')
+        bot = self.make_bot(888)
+        bot.link.announce_channel_id = 5                           # 配置文件的(主服务器的后备)
+        self.start(bot)
+        self.assertEqual(bot.link.announce_channel_id, 900)        # 服务器自己设置的优先
+        self.assertEqual(bot.announce_channel(), '900')
+        bot.set_announce_channel(None)
+        self.assertIsNone(bot.link.announce_channel_id)
+        self.assertEqual(var.store.get('888', 'announce_channel', 'unset'), '')
+        bot.set_announce_channel('901')
+        self.assertEqual((bot.link.announce_channel_id, var.store.get('888', 'announce_channel')), (901, '901'))
+
+        again = self.make_bot(888)
+        self.start(again)
+        self.assertEqual(again.link.announce_channel_id, 901)
+        cleared = self.make_bot(888)
+        var.store.set('888', 'announce_channel', '')
+        cleared.link.announce_channel_id = 5
+        self.start(cleared)
+        self.assertIsNone(cleared.link.announce_channel_id)        # 设成"不指定"也算设置过
+        home = self.make_bot(999)
+        home.link.announce_channel_id = 5
+        self.start(home)
+        self.assertEqual(home.link.announce_channel_id, 5)         # 没设置过:用配置文件的
 
     def test_second_guild_starts_from_defaults(self):
         var.store.adopt_legacy('777')

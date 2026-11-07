@@ -103,5 +103,54 @@ class KeyedExecutorTest(unittest.TestCase):
             pool.submit('k', lambda: None)
 
 
+class TimersTest(unittest.TestCase):
+    def setUp(self):
+        self.pool = KeyedExecutor(max_workers=4, name='T')
+        self.timers = ex.Timers(self.pool, name='TestTimers')
+
+    def tearDown(self):
+        self.timers.shutdown()
+        self.pool.shutdown()
+
+    def test_runs_on_the_pool_under_its_key(self):
+        names = []
+        done = threading.Event()
+        self.timers.schedule(('7', 'follow'), 0.02, ('7', 'evt'),
+                             lambda: (names.append(threading.current_thread().name), done.set()))
+        self.assertTrue(done.wait(2))
+        self.assertIn('[7:evt]', names[0])
+        self.assertFalse(self.timers.scheduled(('7', 'follow')))
+
+    def test_same_slot_debounces_and_cancel(self):
+        calls = []
+        for n in range(5):
+            self.timers.schedule('slot', 0.05, 'k', calls.append, n)
+        self.timers.schedule('other', 0.01, 'k', calls.append, 'other')
+        self.timers.schedule('gone', 0.01, 'k', calls.append, 'gone')
+        self.assertTrue(self.timers.cancel('gone'))
+        self.assertFalse(self.timers.cancel('gone'))
+        time.sleep(0.3)
+        self.assertEqual(calls, ['other', 4])               # 只有最后一次 schedule 生效,取消的不跑
+
+    def test_one_thread_for_all_timers(self):
+        before = threading.active_count()
+        hits = []
+        for n in range(50):
+            self.timers.schedule(('g', n), 0.05, ('g', n), hits.append, n)
+        self.assertLessEqual(threading.active_count(), before + 1)
+        deadline = time.time() + 2
+        while len(hits) < 50 and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(sorted(hits), list(range(50)))
+
+    def test_without_executor_runs_inline(self):
+        timers = ex.Timers(name='Inline')
+        done = threading.Event()
+        timers.schedule('s', 0, None, done.set)
+        self.assertTrue(done.wait(2))
+        timers.shutdown()
+        timers.schedule('s', 0, None, mock.Mock())          # 关了以后不再接
+
+
 if __name__ == '__main__':
     unittest.main()
