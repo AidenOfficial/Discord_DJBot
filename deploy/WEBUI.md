@@ -86,6 +86,34 @@ access_aud = <Access 应用 Overview 页的 Application Audience (AUD) Tag>
 开启后每个请求都校验 `Cf-Access-Jwt-Assertion`,没有合法 JWT 的一律 403
 (局域网直连也会被拒,这是预期行为)。
 
+## 用 Discord 登录(可选)
+
+不想依赖 Cloudflare Access 识别身份时,可以让用户用 Discord 账号登录:
+
+1. Developer Portal → 你的应用 → **OAuth2** → Redirects 加上
+   `<public_url>/auth/discord/callback`,必须和下面的 `public_url` 拼出来的完全一致。
+2. `configuration.ini`:
+
+   ```ini
+   [webinterface]
+   auth_method = discord          ; 当门禁用;保持 none/token 时则是可选登录方式
+   discord_client_id = <Client ID>
+   public_url = https://music.example.com
+   ```
+
+   Client Secret 放进 `.env` 的 `DISCORD_CLIENT_SECRET`(优先于 ini 里的
+   `discord_client_secret`),**不要提交进仓库**。
+3. 路由:`/auth/discord/login` → Discord 授权 → `/auth/discord/callback`;
+   `/auth/logout` 退出(GET 显示页面,POST 返回 JSON)。
+
+- `auth_method = discord`:没登录的网页跳去登录,`/api/*` 返回 401 JSON;
+  只放行和 bot 在同一个服务器里的账号,其他人 403。
+- `auth_method = token`:令牌页多一个"用 Discord 登录"按钮,同服务器的账号可以代替令牌。
+- 身份:用 `/bind` 绑定过的 Discord 账号登录后就是绑定的那个 Web 身份(歌单、收藏都在);
+  没绑定过的身份是 `discord:<用户 ID>`,并自动记一条绑定,不需要再 `/bind`。
+  用 Discord 登录后,身份优先于 Access 邮箱头(JWT 校验仍然照常要求)。
+- 会话 Cookie 由 `flask_secret` 签名;不配置时随机生成一次存进 settings 库,重启不掉登录。
+
 ## 语音频道与跟随(Settings 页)
 
 - 实时显示服务器的语音频道(按分类分组,和 Discord 里的顺序一致)和每个频道里的人

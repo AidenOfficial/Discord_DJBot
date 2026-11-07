@@ -420,15 +420,27 @@ DEFAULT_FLASK_SECRET = 'ChangeThisPassword'
 def resolve_flask_secret():
     """返回给 Flask 签名会话 Cookie 用的密钥。
 
-    未配置或仍是公开的默认值时，改用本进程随机生成的密钥并打警告；
-    代价只是重启后已登录的网页会话失效，需要重新登录。
+    未配置或仍是公开的默认值时，随机生成一个存进 settings 数据库([webinterface] flask_secret)，
+    之后重启都用它，已登录的网页会话不会因为重启失效。
+    数据库不可用时才退回本进程随机密钥并打警告。
     """
     import secrets
 
     secret = (var.config.get('webinterface', 'flask_secret', fallback='') or '').strip()
-    if not secret or secret == DEFAULT_FLASK_SECRET:
-        log.warning("web: flask_secret is unset or the public default; using a random "
-                    "per-process secret. Set [webinterface] flask_secret to keep sessions "
-                    "across restarts.")
-        return secrets.token_hex(32)
-    return secret
+    if secret and secret != DEFAULT_FLASK_SECRET:
+        return secret
+    db = getattr(var, 'db', None)
+    if db is not None:
+        try:
+            stored = (db.get('webinterface', 'flask_secret', fallback='') or '').strip()
+            if not stored:
+                stored = secrets.token_hex(32)
+                db.set('webinterface', 'flask_secret', stored)
+                log.info("web: generated a flask_secret and stored it in the settings database")
+            return stored
+        except Exception:
+            log.warning("web: could not read/store flask_secret in the settings database", exc_info=True)
+    log.warning("web: flask_secret is unset or the public default; using a random "
+                "per-process secret. Set [webinterface] flask_secret to keep sessions "
+                "across restarts.")
+    return secrets.token_hex(32)

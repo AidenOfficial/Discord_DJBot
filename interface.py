@@ -52,6 +52,7 @@ class ReverseProxied(object):
 
 
 import web_api
+import web_auth_discord
 import web_cache
 import web_channels
 import web_library
@@ -120,6 +121,13 @@ def requires_auth(f):
 
         auth_method = var.config.get("webinterface", "auth_method")
 
+        if auth_method == 'discord':
+            if web_auth_discord.session_user() is None:
+                return web_auth_discord.unauthenticated()
+            if not web_auth_discord.shares_guild_with_bot():
+                return web_auth_discord.forbidden()
+            return _with_identity(f, None, args, kwargs)
+
         if auth_method == 'password':
             auth = request.authorization
             if auth:
@@ -139,6 +147,10 @@ def requires_auth(f):
             else:
                 return authenticate()
         if auth_method == 'token':
+            # 配置了 Discord 登录时,和 bot 在同一服务器的 Discord 账号可以代替令牌
+            if web_auth_discord.session_user() is not None and 'token' not in request.args \
+                    and web_auth_discord.shares_guild_with_bot():
+                return _with_identity(f, None, args, kwargs)
             if 'user' in session and 'token' not in request.args:
                 return _with_identity(f, session['user'], args, kwargs)
             elif 'token' in request.args:
@@ -169,6 +181,7 @@ def requires_auth(f):
 
             command = "/" + (var.bot.command_name('requests_webinterface_access') if var.bot else 'web')
             bot_name = (var.bot.link.bot_name if var.bot else '') or 'the bot'
+            discord_login = web_auth_discord.configured()
             return render_template('need_token.html',
                                    lang=var.language.split('_')[0],
                                    title=tr_web('token_required'),
@@ -176,7 +189,10 @@ def requires_auth(f):
                                                   name=html.escape(bot_name),
                                                   command=html.escape(command)),
                                    token_label=tr_web('token'),
-                                   submit=tr_web('submit'))
+                                   submit=tr_web('submit'),
+                                   discord_login_url=web_auth_discord.login_url(request.script_root + request.path)
+                                   if discord_login else None,
+                                   discord_login_label=tr_web('login_with_discord') if discord_login else None)
 
         auth_user = request.authorization.username \
             if auth_method == 'password' and request.authorization else None
@@ -185,6 +201,8 @@ def requires_auth(f):
     return decorated
 
 
+# 用 Discord 登录(/auth/discord/login、/auth/discord/callback、/auth/logout),不经过 requires_auth
+web.register_blueprint(web_auth_discord.create_blueprint())
 # JSON API for the new web interface (all routes under /api/)
 web.register_blueprint(web_api.create_blueprint(requires_auth))
 web.register_blueprint(web_users.create_blueprint(requires_auth))
