@@ -11,9 +11,10 @@
   return_home   服务器上一个人都没有时回到默认频道(1/0)
   idle_pause_minutes  bot 所在频道连续没人这么多分钟就自动暂停(0 = 关,默认 5)
   idle_resume         自动暂停后有人回来就自动继续播放(1/0,默认 1)
+另外 voice_channel(不带前缀)记着 bot 现在在哪个语音频道,重启后那里还有人就回去。
 
-连接层的用户事件回调里只记录事件,真正的决策放到防抖定时器线程里做
-(人在频道间来回切时不会被带着乱跑)。self.link 是 bot.discord_link.GuildLink;
+连接层的用户事件回调里只记录事件,真正的决策放到防抖定时器里做(共用的 Timers 线程,到点在线程池里执行;
+人在频道间来回切时不会被带着乱跑)。self.link 是 bot.discord_link.GuildLink;
 本模块不 import 通信库,单测用假的 link 对象即可。
 
 Discord 的频道 dict 里多了 kind(guild / category / voice / stage)、joinable(bot 有权限进)、
@@ -26,6 +27,7 @@ import logging
 import threading
 import time
 
+from .executor import default_timers
 from .session_queue import SessionQueue
 
 log = logging.getLogger("bot")
@@ -34,6 +36,8 @@ FOLLOW_MODES = ('off', 'auto', 'user')
 PREFIX = 'channel.'
 DEBOUNCE_SECONDS = 2.5
 LAST_LEAVER_TTL = 60  # "最后离开的人去了哪"多久内有效
+#: 服务器设置里记着 bot 现在在哪个语音频道(频道 id);重启后回到这里
+VOICE_KEY = 'voice_channel'
 
 
 class ChannelMixin(SessionQueue):
@@ -222,6 +226,38 @@ class ChannelMixin(SessionQueue):
             return
         self.move_to_channel(cid, 'default channel')
 
+    # ---- 重启后回到原来的语音频道 ---------------------------------------------
+
+    def remember_voice_channel(self, channel_id):
+        """bot 进 / 换语音频道时记下(VOICE_KEY),离开(/leave、被踢)时清掉。重启后据此回去。"""
+        try:
+            if channel_id:
+                self.save_setting(VOICE_KEY, str(channel_id))
+            elif self.setting(VOICE_KEY) is not None:
+                self.store.delete(self.guild_id, VOICE_KEY)
+        except Exception:
+            log.debug("channel: could not remember the voice channel", exc_info=True)
+
+    def saved_voice_channel(self):
+        raw = self.setting(VOICE_KEY) or ''
+        return int(raw) if raw.isdigit() else None
+
+    def rejoin_saved_channel(self):
+        """重启前 bot 在的语音频道现在还有人:回去(恢复的队列不至于对着空气放)。
+        没人 / 进不去就忘掉它。返回是否回去了。"""
+        cid = self.saved_voice_channel()
+        if cid is None:
+            return False
+        if self.my_channel_id() == cid:
+            return True
+        if self._joinable(cid) and self.humans_by_channel().get(cid):
+            if self.move_to_channel(cid, 'back where we were before the restart'):
+                return True
+        else:
+            log.info("channel: nobody in %s any more, not rejoining", self.channel_display_name(cid))
+        self.remember_voice_channel(None)
+        return False
+
     # ---- 跟随 -------------------------------------------------------------
 
     def _init_follow(self):
@@ -247,15 +283,28 @@ class ChannelMixin(SessionQueue):
                 self._last_leaver = (time.time(), new)
         self.schedule_follow_check()
 
+    def _follow_slot(self):
+        return (self.guild_id or id(self), 'follow')
+
     def schedule_follow_check(self, delay=DEBOUNCE_SECONDS):
+        """防抖:delay 秒内再有事件就重新计时。共用 Hub 的定时线程,到点在 (guild_id, 'evt') 里执行
+        (和语音事件串行);没有 Hub(测试替身)时用默认的定时线程。"""
         if not hasattr(self, '_follow_lock'):
             self._init_follow()
+        timers = getattr(self, 'timers', None) or default_timers()
         with self._follow_lock:
-            if self._follow_timer is not None:
-                self._follow_timer.cancel()
-            self._follow_timer = threading.Timer(delay, self._safe_follow_check)
-            self._follow_timer.daemon = True
-            self._follow_timer.start()
+            slot = self._follow_slot()
+            if self._follow_timer is not None and self._follow_timer != slot:
+                timers.cancel(self._follow_timer)  # bind_guild 前排的那个
+            self._follow_timer = slot
+            timers.schedule(slot, delay, (self.guild_id, 'evt'), self._safe_follow_check)
+
+    def cancel_follow_check(self):
+        """会话休眠 / 退出:还没到点的跟随检查不再执行。"""
+        slot = getattr(self, '_follow_timer', None)
+        if slot is not None:
+            (getattr(self, 'timers', None) or default_timers()).cancel(slot)
+            self._follow_timer = None
 
     def _safe_follow_check(self):
         try:

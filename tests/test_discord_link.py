@@ -262,6 +262,10 @@ class LinkTest(unittest.TestCase):
         self.assertTrue(self.link._context(spec, fake_interaction(user_id=7), {}).is_admin)      # 配置的用户 ID
         self.assertTrue(self.link._context(spec, fake_interaction(roles=(7,)), {}).is_admin)     # 配置的身份组 ID
         self.assertTrue(self.link._context(spec, fake_interaction(admin=True), {}).is_admin)     # 服务器管理员
+        # bot 主人只有配置的用户 ID;服务器管理员、配置的身份组都不是主人
+        self.assertTrue(self.link._context(spec, fake_interaction(user_id=7), {}).is_owner)
+        self.assertFalse(self.link._context(spec, fake_interaction(roles=(7,)), {}).is_owner)
+        self.assertFalse(self.link._context(spec, fake_interaction(admin=True), {}).is_owner)
         self.link.admin_permission = False
         self.assertFalse(self.link._context(spec, fake_interaction(admin=True), {}).is_admin)
 
@@ -586,6 +590,84 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual([(c.name, c.value) for c in choices], [('library@2', 'lo')])
         self.assertEqual(asyncio.run(complete(fake_interaction(guild_id=3), 'lo')), [])
 
+    def test_unknown_guild_gets_a_session_first(self):
+        asked = []
+
+        def need(gid):
+            asked.append(gid)
+            # Hub 在线程池里建会话,过一会儿 GuildLink 才登记上
+            threading.Timer(0.1, lambda: self.client._links.__setitem__(gid, FakeGuildLink(gid))).start()
+
+        self.client.on_session_needed = need
+        asyncio.run(self.client._invoke('spec', fake_interaction(guild_id=3), {}))
+        self.assertEqual(asked, [3])
+        self.assertEqual(self.client._links[3].got, [('invoke', 'spec', False)])
+        asyncio.run(self.client._on_panel_button(fake_interaction(guild_id=3), 'stop'))
+        self.assertEqual(asked, [3])                    # 已经有了:不再请求
+        self.assertEqual(self.client._links[3].got[-1], ('button', 'stop'))
+
+    def test_refused_or_slow_session(self):
+        self.client.on_session_needed = lambda gid: 'Not here.'
+        refused = fake_interaction(guild_id=3)
+        asyncio.run(self.client._invoke('spec', refused, {}))
+        refused.response.send_message.assert_awaited_once_with('Not here.', ephemeral=True)
+
+        self.client.on_session_needed = lambda gid: None    # 在建,但等不到
+        slow = fake_interaction(guild_id=3)
+        with mock.patch.object(dl, 'SESSION_WAIT', 0.1):
+            asyncio.run(self.client._invoke('spec', slow, {}))
+        slow.response.send_message.assert_awaited_once_with(dl.STARTING_REPLY, ephemeral=True)
+
+    def test_waits_for_a_session_that_is_still_loading(self):
+        self.a.ready = False
+        threading.Timer(0.1, lambda: setattr(self.a, 'ready', True)).start()
+        self.client.on_session_needed = mock.Mock()
+        asyncio.run(self.client._invoke('spec', fake_interaction(guild_id=1), {}))
+        self.assertEqual(self.a.got, [('invoke', 'spec', False)])
+        self.client.on_session_needed.assert_not_called()
+
+    def test_voice_events_create_sessions_only_for_the_bot_itself(self):
+        asked = []
+        self.client.on_session_needed = asked.append
+        guild = types.SimpleNamespace(id=3)
+        joined = types.SimpleNamespace(channel=types.SimpleNamespace(id=50))
+        with mock.patch.object(type(self.client.client), 'user', new_callable=mock.PropertyMock,
+                               return_value=types.SimpleNamespace(id=99)):
+            asyncio.run(self.client.on_voice_state_update(types.SimpleNamespace(id=5, guild=guild), None, joined))
+            self.assertEqual(asked, [])                 # 别人进出语音:不建会话
+            asyncio.run(self.client.on_voice_state_update(
+                types.SimpleNamespace(id=99, guild=guild), None, types.SimpleNamespace(channel=None)))
+            self.assertEqual(asked, [])
+            asyncio.run(self.client.on_voice_state_update(types.SimpleNamespace(id=99, guild=guild), None, joined))
+        self.assertEqual(asked, [3])
+
+    def test_autocomplete_warms_up_a_session(self):
+        from commands.slash import Opt, _d
+        asked = []
+        self.client.on_session_needed = asked.append
+        complete = self.client._make_autocomplete(Opt('query', _d('q', 'q', 'q'), autocomplete='library'))
+        self.assertEqual(asyncio.run(complete(fake_interaction(guild_id=3), 'lo')), [])
+        self.assertEqual(asked, [3])
+
+    def test_guild_join_and_remove_hooks(self):
+        seen = []
+        self.client.on_guild_joined = lambda gid: seen.append(('join', gid))
+        self.client.on_guild_removed = lambda gid: seen.append(('remove', gid))
+        asyncio.run(self.client.on_guild_join(types.SimpleNamespace(id=3, name='New')))
+        asyncio.run(self.client.on_guild_remove(types.SimpleNamespace(id=2, name='Old')))
+        self.assertEqual(seen, [('join', 3), ('remove', 2)])
+
+    def test_humans_in(self):
+        members = {1: types.SimpleNamespace(bot=False), 2: types.SimpleNamespace(bot=True),
+                   3: types.SimpleNamespace(bot=False)}
+        channel = types.SimpleNamespace(voice_states={1: object(), 2: object(), 3: object(), 4: object()})
+        guild = types.SimpleNamespace(get_channel=lambda cid: channel if cid == 55 else None,
+                                      get_member=members.get)
+        with mock.patch.object(self.client.client, 'get_guild', side_effect=lambda gid: guild if gid == 2 else None):
+            self.assertEqual(self.client.humans_in('2', '55'), 2)  # 不算 bot,也不算查不到的
+            self.assertEqual(self.client.humans_in(2, 56), 0)
+            self.assertEqual(self.client.humans_in(3, 55), 0)
+
     def test_presence_goes_through_the_hook(self):
         seen = []
         client, link = make_link(7)
@@ -624,6 +706,47 @@ class GuildLinkIsolationTest(unittest.TestCase):
         with mock.patch.object(self.link._client, 'get_channel', return_value=foreign):
             self.link.reply(ctx, 'late')
         foreign.send.assert_not_called()
+
+    def test_close_detaches_and_goes_quiet(self):
+        self.link.on_command = lambda ctx: None
+        self.link.on_user_joined = lambda user: None
+        self.assertTrue(self.link.ready)
+        with mock.patch.object(self.link, '_shutdown_voice', mock.AsyncMock()) as leave:
+            self.link.close('hibernated (idle)')
+        leave.assert_awaited_once()                     # 离开语音、清掉语音频道状态
+        self.assertIsNone(self.client.link(1))          # 交互 / 事件不再交给它
+        self.assertFalse(self.link.ready or self.link.alive)
+        self.assertTrue(self.link.closed)
+        self.assertIsNone(self.link.on_user_joined)
+        self.assertEqual(self.link.close_reason, 'hibernated (idle)')
+        self.assertFalse(self.link.panel_show({'title': 'x'}))
+        self.assertFalse(self.link.panel_end(None))
+        self.assertFalse(self.link.set_voice_status('x'))
+        self.assertFalse(self.link.write_audio(pcm(1)))
+
+    def test_close_leaves_a_newer_link_alone(self):
+        newer = GuildLink(self.client, 1)
+        self.client._links[1] = newer
+        with mock.patch.object(self.link, '_shutdown_voice', mock.AsyncMock()):
+            self.link.close()
+        self.assertIs(self.client.link(1), newer)
+
+    def test_text_channels(self):
+        ok = types.SimpleNamespace(view_channel=True, send_messages=True)
+        mute = types.SimpleNamespace(view_channel=True, send_messages=False)
+
+        def ch(cid, name, position, category=None, perms=ok):
+            return types.SimpleNamespace(id=cid, name=name, position=position, category=category,
+                                         permissions_for=lambda me: perms)
+
+        music = types.SimpleNamespace(position=1)
+        guild = types.SimpleNamespace(me=object(), text_channels=[
+            ch(30, 'requests', 0, music), ch(10, 'general', 0), ch(20, 'rules', 1, perms=mute), ch(11, 'chat', 2)])
+        with mock.patch.object(self.link, '_guild', return_value=guild):
+            self.assertEqual(self.link.text_channels(), [
+                {'id': '10', 'name': 'general'}, {'id': '11', 'name': 'chat'}, {'id': '30', 'name': 'requests'}])
+        with mock.patch.object(self.link, '_guild', return_value=None):
+            self.assertEqual(self.link.text_channels(), [])
 
     def test_voice_lost_after_reconnect_is_reported(self):
         moved = []

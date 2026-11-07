@@ -197,6 +197,61 @@ class CoreTest(unittest.TestCase):
         self.assertEqual([c[2] for c in self.calls], ['a', 'b', 'c', 'd'])
         self.assertEqual(finished, ['a', 'b', 'c', '', 'd'])
 
+    def test_stop_command_does_not_end_the_session(self):
+        # /stop、/leave 和 Web 的停止调用 bot.stop():必须是"停止播放",不能让播放循环退出(进程会重启)
+        from bot.player import PlayerMixin
+        self.assertIs(DJBot.stop, PlayerMixin.stop)
+        self.assertTrue(callable(DJBot.stop_session))
+
+    def test_is_owner_is_not_server_admin(self):
+        var.config.set('bot', 'admin', '111;222')
+        self.assertTrue(self.bot.is_owner('111'))
+        self.assertFalse(self.bot.is_owner(self.ctx('queue', admin=True)))   # 服务器管理员不是 bot 主人
+        owner = self.ctx('queue', admin=True)
+        owner.is_owner = True
+        self.assertTrue(self.bot.is_owner(owner))
+
+    def test_users_changed_runs_on_the_event_queue(self):
+        import threading
+        from bot.executor import KeyedExecutor
+        b = self.bot
+        b.bind_guild(777)
+        b.executor = KeyedExecutor(max_workers=2, name='T')
+        b._react_to_empty_channel = True
+        seen = []
+        done = threading.Event()
+        b.users_changed = lambda user, action: (seen.append((action, threading.current_thread().name)), done.set())
+        before = threading.active_count()
+        b._dispatch_users_changed(object(), 'removed')
+        self.assertTrue(done.wait(2))
+        self.assertEqual(seen[0][0], 'removed')
+        self.assertIn('[777:evt]', seen[0][1])                                # 不再每条事件开一个线程
+        self.assertLessEqual(threading.active_count(), before + 1)
+        b._react_to_empty_channel = False
+        b._dispatch_users_changed(object(), 'created')
+        time.sleep(0.05)
+        self.assertEqual(len(seen), 1)
+        b.executor.shutdown()
+
+    def test_voice_channel_is_remembered_for_restarts(self):
+        b = self.bot
+        b.bind_guild(777)
+        b.exit = False
+        b.is_pause = True
+        b.schedule_follow_check = lambda delay=0: None
+        b.get_user_count_in_channel = lambda: 0
+        b._on_self_moved(None, 55)
+        self.assertEqual(var.store.get('777', 'voice_channel'), '55')
+        b._on_self_moved(55, 56)
+        self.assertEqual(var.store.get('777', 'voice_channel'), '56')
+        b._leaving_until = time.time() + 15                                   # /leave
+        b._on_self_moved(56, None)
+        self.assertIsNone(var.store.get('777', 'voice_channel'))
+        b._on_self_moved(None, 57)
+        b.exit = True                                                         # 退出进程时断开语音:留着记录
+        b._on_self_moved(57, None)
+        self.assertEqual(var.store.get('777', 'voice_channel'), '57')
+
 
 
 def test_play_routes_spotify_by_hostname():

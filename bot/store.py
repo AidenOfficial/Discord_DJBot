@@ -59,6 +59,13 @@ class GuildStore:
         with self._conn() as conn, conn:
             conn.execute("DELETE FROM guild_settings WHERE guild_id=? AND key=?", (str(guild_id), key))
 
+    def guilds_with(self, key):
+        """所有设置了 key 的服务器:{guild_id: value}(启动时找重启前在语音里的服务器)。"""
+        with self._conn() as conn:
+            rows = conn.execute("SELECT guild_id, value FROM guild_settings WHERE key=? AND value IS NOT NULL "
+                                "AND value != ''", (key,)).fetchall()
+        return {gid: value for gid, value in rows}
+
     # ---- 队列 -----------------------------------------------------------
 
     def save_queue(self, guild_id, current_index, entries):

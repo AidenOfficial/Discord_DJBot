@@ -113,6 +113,8 @@
         "removing_item": "已将 {item} 从播放列表中移除。",
         "repeat": "重复{song} {n}次。",
         "report_version": "Discord-DJBot 当前版本：<b>{version}</b>。",
+        "server_limit_reached": "bot 现在同时服务的服务器太多了,请稍后再试。",
+        "server_not_allowed": "这个服务器不能使用本 bot。",
         "shortlist_instruction": "使用 <i>/pick indexes:{indexes}</i> 播放列表中的曲目。",
         "spotify_busy": "Spotify 下载任务太多,请稍后再试。",
         "spotify_error": "从 Spotify 下载 <b>{url}</b> 失败。详情请查看机器人日志。",
