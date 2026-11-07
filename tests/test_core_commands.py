@@ -250,8 +250,11 @@ class CoreTest(unittest.TestCase):
         var.config.set('bot', 'admin', '111;222')
         self.assertTrue(self.bot.is_owner('111'))
         self.assertFalse(self.bot.is_owner(self.ctx('queue', admin=True)))   # 服务器管理员不是 bot 主人
+        forged = self.ctx('queue', admin=True)
+        forged.is_owner = True                      # 只认配置里的用户 ID,不信上下文里的标记
+        self.assertFalse(self.bot.is_owner(forged))
         owner = self.ctx('queue', admin=True)
-        owner.is_owner = True
+        owner.actor = 111
         self.assertTrue(self.bot.is_owner(owner))
 
     def test_users_changed_runs_on_the_event_queue(self):
