@@ -1,8 +1,9 @@
 # coding=utf-8
+import sqlite3
 
 from constants import tr_cli as tr
 import variables as var
-from database import SettingsDatabase, MusicDatabase
+from database import DatabaseMigration, SettingsDatabase, MusicDatabase
 from media.item import dict_to_item, dicts_to_items
 from media.cache import get_cached_wrapper_from_scrap, get_cached_wrapper_by_id, get_cached_wrappers_by_tags, \
     get_cached_wrapper, discard_everywhere
@@ -305,23 +306,31 @@ def cmd_delete_from_library(bot, user, text, command, parameter):
 
 
 def cmd_drop_database(bot, user, text, command, parameter):
-    if bot.is_admin(text):
-        var.db.drop_table()
-        var.db = SettingsDatabase(var.settings_db_path)
-        var.music_db.drop_table()
-        var.music_db = MusicDatabase(var.settings_db_path)
-        log.info("command: database dropped.")
-        bot.send_msg(tr('database_dropped'), text)
-    else:
-        bot.send_msg(tr('not_admin'), text)
+    # bot 主人专用(全局数据);分发前已经查过,这里再挡一次
+    if not bot.is_owner(text):
+        bot.send_msg(tr('not_owner'), text)
+        return
+    if var.store is not None:
+        var.store.clear_all()  # 每个服务器的设置、队列、封禁规则
+    for db in (var.db, var.music_db):
+        try:
+            db.drop_table()
+        except sqlite3.OperationalError:
+            log.debug("command: no table to drop in %s", db.db_path)  # 已经删过 / 内存库
+    # 以前 music_db 重建时指向了 settings 库;路径保持不变,表按当前版本重新建好
+    var.db = SettingsDatabase(var.db.db_path)
+    var.music_db = MusicDatabase(var.music_db.db_path)
+    DatabaseMigration(var.db, var.music_db).migrate()
+    log.info("command: database dropped.")
+    bot.send_msg(tr('database_dropped'), text)
 
 
 def cmd_refresh_cache(bot, user, text, command, parameter):
-    if bot.is_admin(text):
+    if bot.is_owner(text):
         var.cache.build_dir_cache()
         log.info("command: Local file cache refreshed.")
         bot.send_msg(tr('cache_refreshed'), text)
     else:
-        bot.send_msg(tr('not_admin'), text)
+        bot.send_msg(tr('not_owner'), text)
 
 

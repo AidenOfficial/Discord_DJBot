@@ -7,7 +7,16 @@ import variables as var
 from media.cache import (CachedItemWrapper, ItemNotCachedError, discard_everywhere,
                          get_cached_wrapper_from_dict, get_cached_wrapper_by_id)
 from database import Condition
-from media.item import ValidationFailedError
+from media.item import BlockedHereError, ValidationFailedError, validating_for
+from bot.limits import limits_for
+
+
+class QueueFullError(Exception):
+    """队列满了(限额见 bot.limits):命令分发处统一回复 queue_full。"""
+
+    def __init__(self, limit):
+        super().__init__(f"queue is full ({limit})")
+        self.limit = limit
 
 
 def get_playlist(mode, _list=None, _index=None):
@@ -74,13 +83,20 @@ class BasePlaylist(list):
         self._stay_once = False
         self._left_ids.update(w.id for w in self)
         super().clear()
-        self.extend(_list)
+        self._extend(_list)  # 换播放模式 / 读存的队列:原样搬过来,不受队列长度限额
         self.current_index = current_index
 
         return self
 
+    def check_room(self, adding):
+        """加歌前看队列长度限额(bot.limits);放不下就抛 QueueFullError,一首都不加。"""
+        limit = limits_for(getattr(self.session, 'guild_id', '')).max_queue
+        if limit and len(self) + adding > limit:
+            raise QueueFullError(limit)
+
     def append(self, item: CachedItemWrapper):
         with self.playlist_lock:
+            self.check_room(1)
             self.version += 1
             super().append(item)
             self.pending_items.append(item)
@@ -91,6 +107,7 @@ class BasePlaylist(list):
 
     def insert(self, index, item):
         with self.playlist_lock:
+            self.check_room(1)
             self.version += 1
             if index == -1:
                 index = self.current_index
@@ -107,6 +124,12 @@ class BasePlaylist(list):
         return item
 
     def extend(self, items):
+        items = list(items)
+        with self.playlist_lock:
+            self.check_room(len(items))
+            return self._extend(items)
+
+    def _extend(self, items):
         with self.playlist_lock:
             self.version += 1
             super().extend(items)
@@ -334,7 +357,15 @@ class BasePlaylist(list):
             ver = item.version
 
             try:
-                item.validate()
+                with validating_for(getattr(self.session, 'guild_id', '')):
+                    item.validate()
+            except BlockedHereError as e:
+                # 只是本服务器不能放:从这个队列拿掉,缓存和别的服务器的队列不动
+                owner = self._owner()
+                if owner:
+                    owner.send_channel_msg(e.msg)
+                self._drop(item.id)
+                continue
             except ValidationFailedError as e:
                 self.log.debug("playlist: validating failed.")
                 owner = self._owner()

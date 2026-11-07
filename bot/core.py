@@ -11,6 +11,7 @@ from constants import tr_cli as tr
 
 from .channels import ChannelMixin
 from .discord_link import CommandContext
+from .limits import guild_max_volume
 from .now_playing import NowPlaying
 from .player import PlayerMixin
 
@@ -24,6 +25,12 @@ def new_queue(mode):
     if mode not in PLAYBACK_MODES:
         raise KeyError(f"Unknown playback mode '{mode}'")
     return media.playlist.get_playlist(mode)
+
+
+def owner_ids():
+    """[bot] admin 里的 ID(用户或身份组,',' 或 ';' 分隔)。"""
+    raw = var.config.get('bot', 'admin', fallback='') if var.config is not None else ''
+    return {a.strip() for a in (raw or '').replace(';', ',').split(',') if a.strip()}
 
 
 def _as_float(value, fallback):
@@ -150,7 +157,7 @@ class DJBot(PlayerMixin, ChannelMixin):
         if self.guild_id:
             self.store.adopt_legacy(self.guild_id)
 
-        max_vol = _as_float(self.setting('max_volume'), var.config.getfloat('bot', 'max_volume'))
+        max_vol = guild_max_volume(self.guild_id, self.store)
         volume = _as_float(self.setting('volume'), var.config.getfloat('bot', 'volume'))
         self.volume_helper.set_volume(min(volume, max_vol))
 
@@ -323,18 +330,10 @@ class DJBot(PlayerMixin, ChannelMixin):
         if entry is None:
             return tr('bad_command', command=ctx.command)
         spec = entry['spec']
-        admin = self.is_admin(ctx)
-
-        if not admin and self.has_rule('user_ban', str(ctx.actor)):
-            return tr('user_ban')
-
-        if not admin and ctx.argument:
-            input_url = util.get_url_from_input(ctx.argument)
-            if input_url and self.has_rule('url_ban', input_url):
-                return tr('url_ban', url=input_url)
-
-        if spec.admin and not admin:
-            return tr('not_admin')
+        refusal = self._permission_refusal(spec, ctx, check_url=True)
+        if refusal:
+            return refusal
+        admin = self.is_owner(ctx) or self.is_admin(ctx)
 
         mine = self.link.my_channel_id
         if not spec.outside_channel and not admin \
@@ -346,6 +345,35 @@ class DJBot(PlayerMixin, ChannelMixin):
             return tr('join_voice_first')
         return None
 
+    def _permission_refusal(self, spec, ctx, check_url=False):
+        """封禁 / 管理员 / bot 主人检查,预检查和真正执行前各查一次。返回拒绝理由或 None。"""
+        owner = self.is_owner(ctx)
+        admin = owner or self.is_admin(ctx)
+        if self.banned('user_ban', str(ctx.actor), admin=admin, owner=owner):
+            return tr('user_ban')
+        if check_url and ctx.argument:
+            input_url = util.get_url_from_input(ctx.argument)
+            if input_url and self.banned('url_ban', input_url, admin=admin, owner=owner):
+                return tr('url_ban', url=input_url)
+        if getattr(spec, 'owner_only', False) and not owner:
+            return tr('not_owner')
+        if spec.admin and not admin:
+            return tr('not_admin')
+        return None
+
+    def banned(self, kind, value, admin=False, owner=False):
+        """value 被封禁了没有:全局规则(bot 主人定的)管所有人,只有 bot 主人自己不受影响;
+        本服务器的规则(服务器管理员定的)管不到本服务器的管理员。"""
+        if owner:
+            return False
+        store = self.store
+        if store is None:
+            return False
+        if store.has_rule(kind, value):
+            return True
+        return not admin and bool(self.guild_id) \
+            and store.has_rule(kind, value, self.guild_id, include_global=False)
+
     def _handle_command(self, ctx):
         entry = self.cmd_handle.get(ctx.command)
         if entry is None:
@@ -355,13 +383,10 @@ class DJBot(PlayerMixin, ChannelMixin):
         user = ctx.name
         self.log.info(f'bot: received /{entry["name"]} "{ctx.argument}" from {user} ({ctx.actor})')
 
-        # 预检查之外再查一遍权限:管理员命令的 handler 自己不检查,不能只靠预检查
-        admin = self.is_admin(ctx)
-        if spec.admin and not admin:
-            self.send_msg(tr('not_admin'), ctx)
-            return
-        if not admin and self.has_rule('user_ban', str(ctx.actor)):
-            self.send_msg(tr('user_ban'), ctx)
+        # 预检查之外再查一遍权限:管理员 / bot 主人命令的 handler 自己不检查,不能只靠预检查
+        refusal = self._permission_refusal(spec, ctx)
+        if refusal:
+            self.send_msg(refusal, ctx)
             return
         self._refresh_discord_link(ctx)
 
@@ -373,6 +398,8 @@ class DJBot(PlayerMixin, ChannelMixin):
 
         try:
             entry['handle'](self, user, ctx, entry['name'], ctx.argument)
+        except media.playlist.QueueFullError as e:
+            self.send_msg(tr('queue_full', max=e.limit), ctx)
         except Exception:
             error_traceback = traceback.format_exc()
             error = error_traceback.rstrip().split("\n")[-1]
@@ -417,19 +444,16 @@ class DJBot(PlayerMixin, ChannelMixin):
             self.log.debug("bot: could not refresh discord link", exc_info=True)
 
     def is_admin(self, user):
-        """这个服务器里的 bot 管理员。user 是 CommandContext(斜杠命令:bot 主人、配置的身份组,
-        或有"管理员 / 管理服务器"权限的人)或 Discord user id(只认配置的 bot 主人)。"""
+        """这个服务器的 bot 管理员。user 是 CommandContext(斜杠命令)或 Discord user id。"""
         if isinstance(user, CommandContext):
             return user.is_admin
-        return self.is_owner(user)
+        return str(user) in owner_ids()
 
     def is_owner(self, user):
-        """bot 主人([bot] admin 里的用户 ID,所有服务器通用)。服务器管理员不是主人:
-        影响整个进程的事(比如 /kill)只该交给主人。"""
-        if isinstance(user, CommandContext):
-            return bool(getattr(user, 'is_owner', False))
-        admins = {a.strip() for a in var.config.get('bot', 'admin').replace(';', ',').split(',') if a.strip()}
-        return str(user) in admins
+        """bot 主人([bot] admin 里的 Discord 用户 ID):全局封禁和运维命令只认这个,每次都对照配置检查;
+        服务器管理员(管理服务器权限)不算。user 是 CommandContext 或 user id。"""
+        actor = user.actor if isinstance(user, CommandContext) else user
+        return str(actor) in owner_ids()
 
     def command_name(self, key):
         """spec.key -> 当前的斜杠命令名(改过名也对)。"""

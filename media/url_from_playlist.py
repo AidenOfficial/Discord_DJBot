@@ -9,7 +9,10 @@ from media.url import URLItem, url_item_id_generator
 log = logging.getLogger("bot")
 
 
-def get_playlist_info(url, start_index=0, user=""):
+def get_playlist_info(url, start_index=0, user="", limit=None):
+    """limit:最多展开几首(服务器的限额,见 bot.limits);不给就用配置的 [bot] max_track_playlist。"""
+    if limit is None:
+        limit = var.config.getint('bot', 'max_track_playlist')
     ydl_opts = {
         'extract_flat': 'in_playlist',
         'verbose': var.config.getboolean('debug', 'youtube_dl')
@@ -49,7 +52,7 @@ def get_playlist_info(url, start_index=0, user=""):
                     entry_url_prefix = "https://www.youtube.com/watch?v="
 
                 for j in range(start_index, min(len(info['entries']),
-                                                start_index + var.config.getint('bot', 'max_track_playlist'))):
+                                                start_index + limit)):
                     # Unknow String if No title into the json
                     title = info['entries'][j]['title'] if 'title' in info['entries'][j] else "Unknown Title"
                     # Add a base url if the url in the json isn't a full url

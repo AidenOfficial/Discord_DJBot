@@ -13,6 +13,7 @@ from media.item import dict_to_item
 from media.cache import get_cached_wrapper_from_scrap, get_cached_wrapper, get_cached_wrapper_from_dict, \
     get_cached_wrappers_from_dicts, tag_group
 from media.url_from_playlist import get_playlist_info
+from bot.limits import limits_for
 
 from . import _shared
 from ._shared import (ITEMS_PER_PAGE, send_multi_lines, send_multi_lines_in_channel,
@@ -155,7 +156,8 @@ def cmd_play_playlist(bot, user, text, command, parameter):
         return
     if url:
         log.debug(f"cmd: fetching media info from playlist url {url}")
-        items = get_playlist_info(url=url, start_index=offset, user=user)
+        items = get_playlist_info(url=url, start_index=offset, user=user,
+                                  limit=limits_for(bot.guild_id).max_playlist_tracks)
         if len(items) > 0:
             wrappers = [get_cached_wrapper_from_scrap(**item) for item in items]
             if len(wrappers) > 1:

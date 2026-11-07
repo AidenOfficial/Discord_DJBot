@@ -19,11 +19,12 @@ import sqlite3
 import threading
 import time
 
-from flask import Blueprint, abort, g, jsonify, request
+from flask import Blueprint, abort, g, jsonify, make_response, request
 
 import util
 import variables as var
 import web_context
+from bot.limits import limits_for
 
 log = logging.getLogger("bot")
 
@@ -783,6 +784,11 @@ def enqueue(wrappers, mode):
     """mode: append(加到队尾) / next(插到当前曲之后) / replace(清空队列后立即播放)。"""
     if not wrappers:
         return
+    # 队列长度限额(bot.limits):放不下就整批拒绝,replace 也不先清空
+    limit = limits_for(getattr(web_context.session(), 'guild_id', '')).max_queue
+    existing = 0 if mode == 'replace' else len(web_context.playlist())
+    if limit and existing + len(wrappers) > limit:
+        abort(make_response(jsonify({'error': 'queue_full', 'max': limit}), 409))
     if mode == 'replace':
         # clear() 会释放旧队列里的条目;新 wrapper 和旧队列重复的那些(同一歌单再播一次)
         # 还没入队,也会被清掉,队列里就是悬空引用(ItemNotCachedError,一首首被跳过)。

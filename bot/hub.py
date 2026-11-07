@@ -136,7 +136,11 @@ class Hub:
         self.client.on_session_needed = self.request_session
         self.client.on_guild_joined = self._on_guild_joined
         self.client.on_guild_removed = self._on_guild_removed
-        self.client.register_commands(self.named_specs)
+        self.client.register_commands(
+            self.named_specs,
+            owner_guild_id=var.config.get("discord", "owner_guild_id", fallback='') or None,
+            dev_guild_id=var.config.get("discord", "dev_guild_id", fallback='') or None,
+            sync_state=var.db)
         try:
             self.client.connect()
         except Exception as e:

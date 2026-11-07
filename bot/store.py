@@ -119,9 +119,14 @@ class GuildStore:
                                (str(scope), kind, str(value)))
             return cur.rowcount > 0
 
-    def has_rule(self, kind, value, guild_id=None):
-        """全局有,或者 guild_id 这个服务器有。guild_id 为空只看全局。"""
-        scopes = (GLOBAL, str(guild_id)) if guild_id else (GLOBAL,)
+    def has_rule(self, kind, value, guild_id=None, include_global=True):
+        """全局有,或者 guild_id 这个服务器有。guild_id 为空只看全局;include_global=False 只看这个服务器。"""
+        if include_global:
+            scopes = (GLOBAL, str(guild_id)) if guild_id else (GLOBAL,)
+        elif guild_id:
+            scopes = (str(guild_id),)
+        else:
+            return False
         with self._conn() as conn:
             row = conn.execute(
                 f"SELECT 1 FROM access_rule WHERE kind=? AND value=? "
@@ -136,6 +141,16 @@ class GuildStore:
                                 "WHERE kind=? AND scope=? ORDER BY created_at, value",
                                 (kind, str(scope))).fetchall()
         return [{'value': v, 'note': n, 'created_by': c, 'created_at': t} for v, n, c, t in rows]
+
+    # ---- 全部清空 ---------------------------------------------------------
+
+    TABLES = ('guild_settings', 'guild_queue', 'guild_queue_state', 'access_rule')
+
+    def clear_all(self):
+        """/dropdatabase:删掉所有服务器的设置、队列和规则(表结构保留)。"""
+        with self._conn() as conn, conn:
+            for table in self.TABLES:
+                conn.execute(f"DELETE FROM {table}")
 
     # ---- 旧数据 -----------------------------------------------------------
 

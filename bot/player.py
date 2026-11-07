@@ -9,7 +9,7 @@ import variables as var
 from constants import tr_cli as tr
 from media import lyrics, sponsorblock
 from media.cache import ItemNotCachedError, discard_everywhere
-from media.item import ValidationFailedError, PreparationFailedError
+from media.item import BlockedHereError, ValidationFailedError, PreparationFailedError, validating_for
 
 from . import downloads
 from .session_queue import SessionQueue
@@ -499,10 +499,16 @@ class PlayerMixin(SessionQueue):
         try:
             ver = item.version
             try:
-                item.validate()
+                with validating_for(self.guild_id):
+                    item.validate()
                 self._sponsorblock_prefetch(item)
                 if item.is_ready():
                     return True
+            except BlockedHereError as e:
+                # 本服务器封禁的链接:只从这个队列拿掉,别的服务器还能放
+                self.send_channel_msg(e.msg)
+                self.drop_from_queue(item.id)
+                return False
             except ValidationFailedError as e:
                 self.send_channel_msg(e.msg)
                 self.drop_from_queue(item.id)

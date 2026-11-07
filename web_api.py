@@ -20,6 +20,7 @@ import variables as var
 import web_context
 import web_search
 from media import artwork, lyrics
+from bot.limits import limits_for
 from media.cache import get_cached_wrapper_from_scrap
 from web_users import current_user_name, requester_display_name
 
@@ -116,8 +117,10 @@ status_payload = _status_payload
 
 
 def _set_volume(value):
-    value = max(0.0, min(1.0, round(float(value), 2)))
     session = web_context.session()
+    # 限额的音量硬上限(bot.limits);服务器的 /maxvolume 只管聊天命令,和以前一样
+    ceiling = limits_for(getattr(session, 'guild_id', '')).max_volume
+    value = max(0.0, min(ceiling, round(float(value), 2)))
     session.volume_helper.set_volume(value)
     session.save_setting('volume', str(session.volume_helper.plain_volume_set))
 
@@ -364,7 +367,10 @@ def create_blueprint(requires_auth):
             abort(400)
         music_wrapper = get_cached_wrapper_from_scrap(
             type='url', url=url, user=current_user_name())
-        web_context.playlist().append(music_wrapper)
+        try:
+            web_context.playlist().append(music_wrapper)
+        except media.playlist.QueueFullError as e:
+            return jsonify({'error': 'queue_full', 'max': e.limit}), 409
         if len(web_context.playlist()) == 2:
             # mirror the legacy add_url behavior: if this became the next
             # item, start downloading right away
