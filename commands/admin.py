@@ -57,8 +57,8 @@ def cmd_url_ban(bot, user, text, command, parameter):
         var.cache.free_and_delete(_id)
         bot.drop_from_queue(_id)
     else:
-        if var.playlist.current_item() and var.playlist.current_item().type == 'url':
-            item = var.playlist.current_item().item()
+        if bot.playlist.current_item() and bot.playlist.current_item().type == 'url':
+            item = bot.playlist.current_item().item()
             url = item.url
             var.cache.free_and_delete(item.id)
             bot.drop_from_queue(item.id)

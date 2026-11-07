@@ -22,7 +22,7 @@ def _matches(current, *texts):
 
 def _queue(bot, ctx, current):
     out = []
-    playlist = var.playlist
+    playlist = bot.playlist
     if playlist is None:
         return out
     current_index = playlist.current_index

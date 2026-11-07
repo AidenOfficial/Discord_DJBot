@@ -17,6 +17,7 @@ from flask import Blueprint, Response, abort, jsonify, request, send_file
 import media.playlist
 import util
 import variables as var
+import web_context
 import web_search
 from media import artwork, lyrics
 from media.cache import get_cached_wrapper_from_scrap
@@ -24,9 +25,9 @@ from web_users import current_user_name, requester_display_name
 
 
 def _current_wrapper():
-    if len(var.playlist) == 0:
+    if len(web_context.playlist()) == 0:
         return None
-    wrapper = var.playlist.current_item()
+    wrapper = web_context.playlist().current_item()
     return wrapper or None
 
 
@@ -71,19 +72,19 @@ def _voice_channel(bot):
 
 
 def _status_payload():
-    bot = var.bot
+    bot = web_context.session()
     current = _current_wrapper()
     payload = {
-        'version': var.playlist.version,
+        'version': web_context.playlist().version,
         'empty': current is None,
         'play': not bot.is_pause,
-        'mode': var.playlist.mode,
+        'mode': web_context.playlist().mode,
         'volume': bot.volume_helper.plain_volume_set,
         # bot 所在的语音频道;None = 不在语音里(网页上提示去 Settings 选一个)
         'voice_channel': _voice_channel(bot),
         'playhead': bot.playhead if current is not None else 0,
-        'queue_length': len(var.playlist),
-        'current_index': var.playlist.current_index,
+        'queue_length': len(web_context.playlist()),
+        'current_index': web_context.playlist().current_index,
         'server_time': time.time(),
         'current': None,
         'prep': None,
@@ -91,7 +92,7 @@ def _status_payload():
     if current is not None:
         try:
             payload['current'] = _item_summary(
-                current, var.playlist.current_index)
+                current, web_context.playlist().current_index)
             # 正在播放的那首优先准备封面(已经有了就是一次文件检查)
             artwork.ensure(current.item(), urgent=True)
             # 歌词状态(off / waiting / pending / found / none / instrumental),found 时前端再来取
@@ -116,8 +117,8 @@ status_payload = _status_payload
 
 def _set_volume(value):
     value = max(0.0, min(1.0, round(float(value), 2)))
-    var.bot.volume_helper.set_volume(value)
-    var.db.set('bot', 'volume', str(var.bot.volume_helper.plain_volume_set))
+    web_context.session().volume_helper.set_volume(value)
+    var.db.set('bot', 'volume', str(web_context.session().volume_helper.plain_volume_set))
 
 
 def _set_mode(mode):
@@ -125,13 +126,13 @@ def _set_mode(mode):
     if mode not in ('one-shot', 'repeat', 'single', 'random', 'autoplay'):
         abort(400)
     if mode == 'random':
-        if var.playlist.mode != 'random':
-            var.playlist = media.playlist.get_playlist('random', var.playlist)
+        if web_context.playlist().mode != 'random':
+            web_context.set_playlist(media.playlist.get_playlist('random', web_context.playlist()))
         else:
-            var.playlist.randomize()
-        var.bot.interrupt()
+            web_context.playlist().randomize()
+        web_context.session().interrupt()
     else:
-        var.playlist = media.playlist.get_playlist(mode, var.playlist)
+        web_context.set_playlist(media.playlist.get_playlist(mode, web_context.playlist()))
     var.db.set('playlist', 'playback_mode', mode)
 
 
@@ -139,8 +140,8 @@ def _mark_current_skipped():
     if var.play_history is None:
         return
     try:
-        current = var.playlist.current_item()
-        if current and not var.bot.is_pause:
+        current = web_context.playlist().current_item()
+        if current and not web_context.session().is_pause:
             var.play_history.mark_skipped(current.id)
     except Exception:
         pass
@@ -149,24 +150,24 @@ def _mark_current_skipped():
 def _skip():
     """Same semantics as the legacy /post action=next."""
     _mark_current_skipped()
-    var.playlist.skip_current()  # in single-loop mode, break out for one step
-    if not var.bot.is_pause:
-        var.bot.interrupt()
+    web_context.playlist().skip_current()  # in single-loop mode, break out for one step
+    if not web_context.session().is_pause:
+        web_context.session().interrupt()
     else:
-        var.playlist.next()
-        var.bot.wait_for_ready = True
+        web_context.playlist().next()
+        web_context.session().wait_for_ready = True
 
 
 def _stop():
     if var.config.getboolean('bot', 'clear_when_stop_in_oneshot') \
-            and var.playlist.mode == 'one-shot':
-        var.bot.clear()
+            and web_context.playlist().mode == 'one-shot':
+        web_context.session().clear()
     else:
-        var.bot.stop()
+        web_context.session().stop()
 
 
 def _queue_move(src, dst):
-    playlist = var.playlist
+    playlist = web_context.playlist()
     with playlist.playlist_lock:
         n = len(playlist)
         if not (0 <= src < n and 0 <= dst < n):
@@ -202,10 +203,10 @@ def _leave_group_if_detached(playlist, index):
 
 def _queue_remove(index):
     """Remove the index-th queue item; shared with /remove and the legacy /post."""
-    playlist = var.playlist
+    playlist = web_context.playlist()
     if not (0 <= index < len(playlist)):
         abort(400)
-    var.bot.remove_from_queue(index)
+    web_context.session().remove_from_queue(index)
 
 
 def _search_result_url(source, url, video_id=None):
@@ -246,15 +247,15 @@ def create_blueprint(requires_auth):
         if not action:
             abort(400)
         if action == 'pause':
-            var.bot.pause()
+            web_context.session().pause()
         elif action == 'resume':
-            var.bot.resume()
+            web_context.session().resume()
         elif action == 'skip':
             _skip()
         elif action == 'stop':
             _stop()
         elif action == 'clear':
-            var.bot.clear()
+            web_context.session().clear()
         elif action == 'mode':
             _set_mode(payload.get('mode'))
         elif action == 'volume':
@@ -267,7 +268,7 @@ def create_blueprint(requires_auth):
                 position = float(payload.get('position'))
             except (TypeError, ValueError):
                 abort(400)
-            if not var.bot.seek(position):
+            if not web_context.session().seek(position):
                 abort(409)  # 没有在放 / 直播电台这类不能跳转的
         else:
             abort(400)
@@ -277,9 +278,9 @@ def create_blueprint(requires_auth):
     @requires_auth
     def api_queue():
         items = []
-        with var.playlist.playlist_lock:
-            wrappers = list(var.playlist)
-            current_index = var.playlist.current_index
+        with web_context.playlist().playlist_lock:
+            wrappers = list(web_context.playlist())
+            current_index = web_context.playlist().current_index
         for index, wrapper in enumerate(wrappers):
             try:
                 summary = _item_summary(wrapper, index)
@@ -293,7 +294,7 @@ def create_blueprint(requires_auth):
         return jsonify({
             'items': items,
             'current_index': current_index,
-            'version': var.playlist.version,
+            'version': web_context.playlist().version,
         })
 
     @api.route('/queue', methods=['POST'])
@@ -314,20 +315,20 @@ def create_blueprint(requires_auth):
             _queue_move(index, to)
         elif action == 'top':
             # insert right after the currently playing item
-            dst = min(max(var.playlist.current_index + 1, 0),
-                      max(len(var.playlist) - 1, 0))
+            dst = min(max(web_context.playlist().current_index + 1, 0),
+                      max(len(web_context.playlist()) - 1, 0))
             _queue_move(index, dst)
         elif action == 'remove':
             _queue_remove(index)
         elif action == 'play':
-            if not (0 <= index < len(var.playlist)):
+            if not (0 <= index < len(web_context.playlist())):
                 abort(400)
-            var.bot.play(index)
+            web_context.session().play(index)
         elif action == 'clear':
-            var.bot.clear()
+            web_context.session().clear()
         elif action == 'remove_group':
             key = str(payload.get('group') or '')
-            if not key or not var.bot.remove_group_from_queue(key):
+            if not key or not web_context.session().remove_group_from_queue(key):
                 abort(400)
         else:
             abort(400)
@@ -362,11 +363,11 @@ def create_blueprint(requires_auth):
             abort(400)
         music_wrapper = get_cached_wrapper_from_scrap(
             type='url', url=url, user=current_user_name())
-        var.playlist.append(music_wrapper)
-        if len(var.playlist) == 2:
+        web_context.playlist().append(music_wrapper)
+        if len(web_context.playlist()) == 2:
             # mirror the legacy add_url behavior: if this became the next
             # item, start downloading right away
-            var.bot.async_download_next()
+            web_context.session().async_download_next()
         return jsonify(_status_payload())
 
     @api.route('/stats', methods=['GET'])

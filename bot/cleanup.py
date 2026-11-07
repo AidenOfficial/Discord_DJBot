@@ -124,8 +124,7 @@ class CacheCleaner:
         """Absolute paths that must never be deleted: everything the
         playlist references plus items currently downloading."""
         protected = set()
-        playlist = getattr(var, 'playlist', None)
-        if playlist is not None:
+        for playlist in var.all_playlists():
             for wrapper in list(playlist):
                 try:
                     uri = wrapper.uri()

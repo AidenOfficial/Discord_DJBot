@@ -147,7 +147,7 @@ def _prune_cache(folder, max_size_mb):
     # Never delete a file that the playlist still points at.
     protected = set()
     try:
-        for wrapper in list(var.playlist):
+        for wrapper in [w for playlist in var.all_playlists() for w in list(playlist)]:
             try:
                 uri = wrapper.uri()
                 if uri:

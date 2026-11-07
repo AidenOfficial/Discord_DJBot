@@ -429,6 +429,7 @@ class RepeatLimitTest(Base):
         from commands import playback
         var.playlist = fill(mp.RepeatPlaylist(), [W('A')], 0)
         bot = mock.Mock()
+        bot.playlist = var.playlist
         with mock.patch.object(mp.BasePlaylist, 'async_validate'):
             playback.cmd_repeat(bot, 'u', 'txt', 'repeat', '999999999')
             self.assertEqual(1, len(var.playlist))

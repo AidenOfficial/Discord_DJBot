@@ -28,6 +28,8 @@ import time
 
 import variables as var
 
+from .session_queue import SessionQueue
+
 log = logging.getLogger("bot")
 
 FOLLOW_MODES = ('off', 'auto', 'user')
@@ -36,7 +38,7 @@ DEBOUNCE_SECONDS = 2.5
 LAST_LEAVER_TTL = 60  # "最后离开的人去了哪"多久内有效
 
 
-class ChannelMixin:
+class ChannelMixin(SessionQueue):
 
     # ---- 设置 -----------------------------------------------------------
 
@@ -351,7 +353,7 @@ class ChannelMixin:
         if getattr(self, '_empty_since', None) is None:
             self._empty_since = now
         minutes = settings['idle_pause_minutes']
-        if minutes <= 0 or self.is_pause or len(var.playlist) == 0:
+        if minutes <= 0 or self.is_pause or len(self.playlist) == 0:
             return
         if now - self._empty_since >= minutes * 60 and not self.follow_would_move():
             log.info("channel: nobody here for %d min, pausing playback", minutes)

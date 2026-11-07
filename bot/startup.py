@@ -216,7 +216,7 @@ def main():
         playback_mode = var.config.get('bot', 'playback_mode')
 
     if playback_mode in ["one-shot", "repeat", "single", "random", "autoplay"]:
-        var.playlist = media.playlist.get_playlist(playback_mode)
+        playlist = media.playlist.get_playlist(playback_mode)
     else:
         raise KeyError(f"Unknown playback mode '{playback_mode}'")
 
@@ -224,13 +224,14 @@ def main():
     #  Create bot instance
     # ======================
     var.bot = DJBot(args)
+    var.bot.set_playlist(playlist)
     commands.register_all_commands(var.bot)
     var.bot.start()
 
     # load playlist
     if var.config.getboolean('bot', 'save_playlist'):
         var.bot_logger.info("bot: load playlist from previous session")
-        var.playlist.load()
+        var.bot.playlist.load()
 
     # ============================
     #   Start the web interface

@@ -30,3 +30,12 @@ music_folder = ""
 tmp_folder = ""
 
 language = ""
+
+
+def all_playlists():
+    """所有会话的队列(清理缓存时要保护所有队列里的文件)。现在只有一个会话;多服务器后由 Hub 提供全部。"""
+    queues = []
+    for queue in (getattr(bot, 'playlist', None) if bot is not None else None, playlist):
+        if queue is not None and all(queue is not q for q in queues):
+            queues.append(queue)
+    return queues

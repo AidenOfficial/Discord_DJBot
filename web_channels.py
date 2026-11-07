@@ -8,7 +8,7 @@ import logging
 
 from flask import Blueprint, abort, jsonify, request
 
-import variables as var
+import web_context
 from bot.channels import FOLLOW_MODES
 from web_users import current_user_name
 
@@ -42,7 +42,7 @@ def _parse_id(raw):
 
 
 def overview():
-    bot = var.bot
+    bot = web_context.session()
     settings = bot.channel_settings()
     tree = bot.channel_tree()
     humans = sorted({u.name for users in bot.humans_by_channel().values() for u in users},
@@ -84,9 +84,9 @@ def create_blueprint(requires_auth):
                 changes['default'] = []  # 不自动进频道
             else:
                 cid = _parse_id(raw)
-                if not var.bot._joinable(cid):
+                if not web_context.session()._joinable(cid):
                     abort(404)
-                changes['default'] = var.bot.channel_path(cid)
+                changes['default'] = web_context.session().channel_path(cid)
         if 'follow' in payload:
             if payload['follow'] not in FOLLOW_MODES:
                 abort(400)
@@ -110,7 +110,7 @@ def create_blueprint(requires_auth):
             changes['idle_resume'] = bool(payload['idle_resume'])
         if not changes:
             abort(400)
-        var.bot.save_channel_settings(**changes)
+        web_context.session().save_channel_settings(**changes)
         log.info("web: %s changed channel settings: %s", current_user_name(), changes)
         return jsonify(overview())
 
@@ -118,20 +118,20 @@ def create_blueprint(requires_auth):
     @requires_auth
     def channel_join():
         cid = _parse_id(_payload().get('channel_id'))
-        if not var.bot._joinable(cid):
+        if not web_context.session()._joinable(cid):
             abort(404)
-        if not var.bot.move_to_channel(cid, f"requested by {current_user_name()} on the web") \
-                and var.bot.my_channel_id() != cid:
+        if not web_context.session().move_to_channel(cid, f"requested by {current_user_name()} on the web") \
+                and web_context.session().my_channel_id() != cid:
             abort(502)
         return jsonify(overview())
 
     @api.route('/leave', methods=['POST'])
     @requires_auth
     def channel_leave():
-        if var.bot.my_channel_id() is not None:
+        if web_context.session().my_channel_id() is not None:
             log.info("web: %s asked the bot to leave the voice channel", current_user_name())
-            var.bot.pause()
-            var.bot.leave_voice()
+            web_context.session().pause()
+            web_context.session().leave_voice()
         return jsonify(overview())
 
     return api

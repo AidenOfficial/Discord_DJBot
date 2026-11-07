@@ -34,12 +34,12 @@ def cmd_play_bilibili(bot, user, text, command, parameter):
     url = util.get_bilibili_url_from_input(parameter)
     if url:
         music_wrapper = get_cached_wrapper_from_scrap(type='url', url=url, user=user)
-        var.playlist.append(music_wrapper)
+        bot.playlist.append(music_wrapper)
 
         log.info("cmd: add to playlist: " + music_wrapper.format_debug_string())
-        send_item_added_message(bot, music_wrapper, len(var.playlist) - 1, text)
+        send_item_added_message(bot, music_wrapper, len(bot.playlist) - 1, text)
 
-        if len(var.playlist) == 2:
+        if len(bot.playlist) == 2:
             # If I am the second item on the playlist. (I am the next one!)
             bot.async_download_next()
     else:
@@ -49,9 +49,9 @@ def cmd_play_bilibili(bot, user, text, command, parameter):
 def _enqueue_live(bot, user, url, title, text):
     music_wrapper = get_cached_wrapper_from_scrap(
         type='livestream', url=url, title=title, user=user)
-    var.playlist.append(music_wrapper)
+    bot.playlist.append(music_wrapper)
     log.info("cmd: add to playlist: " + music_wrapper.format_debug_string())
-    send_item_added_message(bot, music_wrapper, len(var.playlist) - 1, text)
+    send_item_added_message(bot, music_wrapper, len(bot.playlist) - 1, text)
 
 
 def cmd_play_live(bot, user, text, command, parameter):
@@ -93,15 +93,23 @@ def cmd_play_live(bot, user, text, command, parameter):
 # keeps the playback queue topped up, instead of downloading everything up
 # front. Feeders are cancelled when the queue is cleared or a new playlist
 # is started.
+# 每个会话(服务器)自己的 feeder:一个服务器换歌单 / 停止,不影响别的服务器正在喂的歌单。
 _spotify_feeder_lock = threading.Lock()
-_spotify_feeders = []          # list[threading.Event]
 
 
-def _cancel_spotify_feeders():
+def _spotify_feeders(bot):
+    feeders = getattr(bot, 'spotify_feeders', None)   # list[threading.Event]
+    if feeders is None:
+        feeders = bot.spotify_feeders = []
+    return feeders
+
+
+def _cancel_spotify_feeders(bot):
     with _spotify_feeder_lock:
-        for cancel_event in _spotify_feeders:
+        feeders = _spotify_feeders(bot)
+        for cancel_event in feeders:
             cancel_event.set()
-        _spotify_feeders.clear()
+        feeders.clear()
 
 
 def _spotify_feeder_loop(bot, user, url, cancel_event):
@@ -126,9 +134,9 @@ def _spotify_feeder_loop(bot, user, url, cancel_event):
         # buffer_depth = ready tracks queued after the current one. This is
         # valid across every playback mode (in one-shot, current_index stays
         # 0 and played items are removed, so it still equals len - 1 - index).
-        with var.playlist.playlist_lock:
-            playlist_len = len(var.playlist)
-            current_index = var.playlist.current_index
+        with bot.playlist.playlist_lock:
+            playlist_len = len(bot.playlist)
+            current_index = bot.playlist.current_index
         buffer_depth = playlist_len - 1 - current_index
 
         if buffer_depth >= buffer_target:
@@ -154,7 +162,7 @@ def _spotify_feeder_loop(bot, user, url, cancel_event):
         if paths:
             for path in paths:
                 music_wrapper = get_cached_wrapper_from_scrap(type='file', path=path, user=user)
-                var.playlist.append(music_wrapper)
+                bot.playlist.append(music_wrapper)
                 log.info("cmd: spotify feeder added: " + music_wrapper.format_debug_string())
         else:
             log.info("cmd: spotify feeder found no match for '%s', skipping"
@@ -166,11 +174,11 @@ def _spotify_feeder_loop(bot, user, url, cancel_event):
 
 def _start_spotify_feeder(bot, user, url, text):
     # A new playlist takes over the feed: cancel any feeder already running.
-    _cancel_spotify_feeders()
+    _cancel_spotify_feeders(bot)
 
     cancel_event = threading.Event()
     with _spotify_feeder_lock:
-        _spotify_feeders.append(cancel_event)
+        _spotify_feeders(bot).append(cancel_event)
 
     bot.send_msg(tr('spotify_playlist_loading'), text)
 
@@ -182,8 +190,9 @@ def _start_spotify_feeder(bot, user, url, text):
             bot.send_channel_msg(tr('spotify_error', url=url))
         finally:
             with _spotify_feeder_lock:
-                if cancel_event in _spotify_feeders:
-                    _spotify_feeders.remove(cancel_event)
+                feeders = _spotify_feeders(bot)
+                if cancel_event in feeders:
+                    feeders.remove(cancel_event)
 
     threading.Thread(target=run, name="SpotifyFeeder", daemon=True).start()
 
@@ -250,7 +259,7 @@ def cmd_play_spotify(bot, user, text, command, parameter):
             music_wrappers.append(music_wrapper)
             log.info("cmd: add to playlist: " + music_wrapper.format_debug_string())
 
-        var.playlist.extend(music_wrappers)
+        bot.playlist.extend(music_wrappers)
 
         if len(music_wrappers) == 1:
             bot.send_channel_msg(tr('file_added', item=music_wrappers[0].format_song_string()))

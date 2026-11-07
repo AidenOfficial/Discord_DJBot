@@ -25,9 +25,9 @@ def cmd_play_file(bot, user, text, command, parameter, do_not_refresh_cache=Fals
     # assume parameter is a path
     music_wrappers = get_cached_wrappers_from_dicts(var.music_db.query_music(Condition().and_equal('path', parameter)), user)
     if music_wrappers:
-        var.playlist.append(music_wrappers[0])
+        bot.playlist.append(music_wrappers[0])
         log.info("cmd: add to playlist: " + music_wrappers[0].format_debug_string())
-        send_item_added_message(bot, music_wrappers[0], len(var.playlist) - 1, text)
+        send_item_added_message(bot, music_wrappers[0], len(bot.playlist) - 1, text)
         return
 
     # assume parameter is a folder
@@ -41,7 +41,7 @@ def cmd_play_file(bot, user, text, command, parameter, do_not_refresh_cache=Fals
             log.info("cmd: add to playlist: " + music_wrapper.format_debug_string())
             msgs.append("<b>{:s}</b> ({:s})".format(music_wrapper.item().title, music_wrapper.item().path))
 
-        var.playlist.extend(music_wrappers)
+        bot.playlist.extend(music_wrappers)
 
         send_multi_lines_in_channel(bot, msgs)
         return
@@ -52,17 +52,17 @@ def cmd_play_file(bot, user, text, command, parameter, do_not_refresh_cache=Fals
                                        .and_like('path', '%' + parameter + '%', case_sensitive=False))
     if len(matches) == 1:
         music_wrapper = get_cached_wrapper_from_dict(matches[0], user)
-        var.playlist.append(music_wrapper)
+        bot.playlist.append(music_wrapper)
         log.info("cmd: add to playlist: " + music_wrapper.format_debug_string())
-        send_item_added_message(bot, music_wrapper, len(var.playlist) - 1, text)
+        send_item_added_message(bot, music_wrapper, len(bot.playlist) - 1, text)
         return
     elif len(matches) > 1:
-        _shared.song_shortlist = matches
+        _shared.set_shortlist(bot, matches)
         # Play the best (first) match right away so the common case is a single
         # command, but still list every candidate so the user can pick a
         # different one with !sl if the guess was wrong.
         music_wrapper = get_cached_wrapper_from_dict(matches[0], user)
-        var.playlist.append(music_wrapper)
+        bot.playlist.append(music_wrapper)
         log.info("cmd: add to playlist: " + music_wrapper.format_debug_string())
         msgs = [tr('played_best_match', item=matches[0]['title'])]
         for index, match in enumerate(matches):
@@ -106,7 +106,7 @@ def cmd_play_file_match(bot, user, text, command, parameter, do_not_refresh_cach
 
             if count != 0:
                 msgs.append("</ul>")
-                var.playlist.extend(music_wrappers)
+                bot.playlist.extend(music_wrappers)
                 send_multi_lines_in_channel(bot, msgs, "")
             else:
                 if do_not_refresh_cache:
@@ -129,12 +129,12 @@ def cmd_play_url(bot, user, text, command, parameter):
         return
     if url:
         music_wrapper = get_cached_wrapper_from_scrap(type='url', url=url, user=user)
-        var.playlist.append(music_wrapper)
+        bot.playlist.append(music_wrapper)
 
         log.info("cmd: add to playlist: " + music_wrapper.format_debug_string())
-        send_item_added_message(bot, music_wrapper, len(var.playlist) - 1, text)
+        send_item_added_message(bot, music_wrapper, len(bot.playlist) - 1, text)
 
-        if len(var.playlist) == 2:
+        if len(bot.playlist) == 2:
             # If I am the second item on the playlist. (I am the next one!)
             bot.async_download_next()
     else:
@@ -161,7 +161,7 @@ def cmd_play_playlist(bot, user, text, command, parameter):
             if len(wrappers) > 1:
                 # 整个播放列表在网页队列里折叠成一组
                 tag_group(wrappers, items[0].get('playlist_title') or url, 'url_playlist', url)
-            items = var.playlist.extend(wrappers)
+            items = bot.playlist.extend(wrappers)
             for music in items:
                 log.info("cmd: add to playlist: " + music.format_debug_string())
         else:
@@ -188,9 +188,9 @@ def cmd_play_radio(bot, user, text, command, parameter):
         if url:
             music_wrapper = get_cached_wrapper_from_scrap(type='radio', url=url, user=user)
 
-            var.playlist.append(music_wrapper)
+            bot.playlist.append(music_wrapper)
             log.info("cmd: add to playlist: " + music_wrapper.format_debug_string())
-            send_item_added_message(bot, music_wrapper, len(var.playlist) - 1, text)
+            send_item_added_message(bot, music_wrapper, len(bot.playlist) - 1, text)
         else:
             bot.send_msg(tr('bad_url'), text)
 
@@ -277,7 +277,7 @@ def cmd_rb_play(bot, user, text, command, parameter):
         if url != "-1":
             log.info('cmd: Found url: ' + url)
             music_wrapper = get_cached_wrapper_from_scrap(type='radio', url=url, name=stationname, user=user)
-            var.playlist.append(music_wrapper)
+            bot.playlist.append(music_wrapper)
             log.info("cmd: add to playlist: " + music_wrapper.format_debug_string())
             bot.async_download_next()
         else:
@@ -288,8 +288,14 @@ def cmd_rb_play(bot, user, text, command, parameter):
 
 YT_SEARCH_LIMIT = 20
 YT_ITEMS_PER_PAGE = 5
-# 每个用户自己的 !ysearch 结果和当前页:user -> (results, page)
-_yt_search_state = {}
+# 每个用户自己的 /ysearch 结果和当前页:user -> (results, page)。按会话(服务器)分开存
+
+
+def _yt_search_state(bot):
+    state = getattr(bot, 'yt_search_state', None)
+    if state is None:
+        state = bot.yt_search_state = {}
+    return state
 
 
 def _yt_search(query, limit=YT_SEARCH_LIMIT):
@@ -304,7 +310,7 @@ def _yt_search(query, limit=YT_SEARCH_LIMIT):
 def _yt_show_page(bot, text, results, page):
     start = page * YT_ITEMS_PER_PAGE
     shown = results[start:start + YT_ITEMS_PER_PAGE]
-    _shared.song_shortlist = [{'type': 'url', 'url': r['url'], 'title': r['title']} for r in shown]
+    _shared.set_shortlist(bot, [{'type': 'url', 'url': r['url'], 'title': r['title']} for r in shown])
     bot.send_msg(tr('yt_result', result_table=_yt_format_result(shown)), text)
 
 
@@ -314,10 +320,10 @@ def cmd_yt_search(bot, user, text, command, parameter):
         return
 
     if parameter.startswith("-n"):
-        results, page = _yt_search_state.get(user, ([], 0))
+        results, page = _yt_search_state(bot).get(user, ([], 0))
         page += 1
         if len(results) > page * YT_ITEMS_PER_PAGE:
-            _yt_search_state[user] = (results, page)
+            _yt_search_state(bot)[user] = (results, page)
             _yt_show_page(bot, text, results, page)
         else:
             bot.send_msg(tr('yt_no_more'), text)
@@ -325,7 +331,7 @@ def cmd_yt_search(bot, user, text, command, parameter):
 
     results = _yt_search(parameter)
     if results:
-        _yt_search_state[user] = (results, 0)
+        _yt_search_state(bot)[user] = (results, 0)
         _yt_show_page(bot, text, results, 0)
     else:
         bot.send_msg(tr('yt_query_error'), text)
@@ -358,7 +364,7 @@ def cmd_list_file(bot, user, text, command, parameter):
                                      .and_equal('type', 'file')
                                      .order_by('path'))
 
-    _shared.song_shortlist = files
+    _shared.set_shortlist(bot, files)
 
     msgs = [tr("multiple_file_found") + "<ul>"]
     try:

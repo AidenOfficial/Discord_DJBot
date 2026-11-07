@@ -2,7 +2,6 @@
 """State and helpers shared by every command module."""
 import logging
 
-import variables as var
 from constants import tr_cli as tr
 
 try:
@@ -19,8 +18,15 @@ log = logging.getLogger("bot")
 ITEMS_PER_PAGE = 50
 
 # Last search/browse results (/filematch, /ysearch, /search, /listfile,
-# /findtagged ...) - read back by /pick and /delete.
-song_shortlist = []
+# /findtagged ...) - read back by /pick and /delete. Kept per session (server):
+# a search in one server must not change what /pick 2 means in another.
+
+def shortlist(bot):
+    return getattr(bot, 'song_shortlist', None) or []
+
+
+def set_shortlist(bot, items):
+    bot.song_shortlist = list(items)
 
 
 def send_multi_lines(bot, lines, text, linebreak="<br />"):
@@ -54,14 +60,14 @@ def send_multi_lines_in_channel(bot, lines, linebreak="<br />"):
 
 
 def send_item_added_message(bot, wrapper, index, text):
-    if index == var.playlist.current_index + 1:
+    if index == bot.playlist.current_index + 1:
         bot.send_msg(tr('file_added', item=wrapper.format_song_string()) +
                      tr('position_in_the_queue', position=tr('next_to_play')), text)
-    elif index == len(var.playlist) - 1:
+    elif index == len(bot.playlist) - 1:
         bot.send_msg(tr('file_added', item=wrapper.format_song_string()) +
                      tr('position_in_the_queue', position=tr('last_song_on_the_queue')), text)
     else:
         bot.send_msg(tr('file_added', item=wrapper.format_song_string()) +
-                     tr('position_in_the_queue', position=f"{index + 1}/{len(var.playlist)}."), text)
+                     tr('position_in_the_queue', position=f"{index + 1}/{len(bot.playlist)}."), text)
 
 
