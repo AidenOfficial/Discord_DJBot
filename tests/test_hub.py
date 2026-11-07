@@ -66,7 +66,7 @@ class FakeSession:
             self.last_loop_at = time.time()
             time.sleep(0.01)
 
-    def stop(self):
+    def stop_session(self):
         self.exit = True
 
     def save_queue(self):
@@ -328,3 +328,12 @@ class ContractTest(HubCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_stop_playback_is_not_overridden_by_session_exit():
+    # 回归:DJBot 上的会话退出方法曾叫 stop(),盖掉了 PlayerMixin.stop(),
+    # /stop、/leave、网页停止键会让播放循环退出、整个进程重启
+    from bot.core import DJBot
+    from bot.player import PlayerMixin
+    assert DJBot.stop is PlayerMixin.stop
+    assert callable(DJBot.stop_session)

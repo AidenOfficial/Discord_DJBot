@@ -180,7 +180,7 @@ class Hub:
         self.exit = True
         for session in self.sessions():
             try:
-                session.stop()
+                session.stop_session()
             except Exception:
                 log.exception("bot: could not stop session %s", session.guild_id)
         self._check_done()
