@@ -82,6 +82,43 @@ class PlayHistoryTestCase(unittest.TestCase):
         self.db.mark_skipped('zzz')
         self.assertEqual([], self.db.stats()['most_skipped'])
 
+    def test_guild_filter(self):
+        base = self.seed()                                      # 4 条旧记录:guild_id 是 NULL
+        self.db.record('x', 'Song X', 'url', 'eve', 60, base + 10, guild_id='1')
+        self.db.record('y', 'Song Y', 'url', 'eve', 60, base + 20, guild_id='2')
+        self.db.record('y', 'Song Y', 'url', 'eve', 60, base + 30, guild_id='2')
+        self.assertEqual(7, self.db.stats()['total_plays'])
+        self.assertEqual(1, self.db.stats(guild_id='1')['total_plays'])
+        self.assertEqual(5, self.db.stats(guild_id='1', include_unscoped=True)['total_plays'])
+        two = self.db.stats(guild_id=2)
+        self.assertEqual((2, 1), (two['total_plays'], two['unique_tracks']))
+        self.assertEqual([{'item_id': 'y', 'title': 'Song Y', 'count': 2}], two['top_tracks'])
+        self.assertEqual(0, self.db.stats(guild_id='3')['total_plays'])
+
+    def test_mark_skipped_per_guild(self):
+        base = time.time()
+        self.db.record('a', 'Song A', 'url', 'u', 60, base, guild_id='1')
+        self.db.record('a', 'Song A', 'url', 'u', 60, base + 5, guild_id='2')   # 另一个服务器更晚放
+        self.db.mark_skipped('a', guild_id='1')
+        self.assertEqual(1, len(self.db.stats(guild_id='1')['most_skipped']))
+        self.assertEqual([], self.db.stats(guild_id='2')['most_skipped'])
+
+    def test_old_table_gets_guild_column(self):
+        import sqlite3
+        path = os.path.join(self.dir.name, 'old.db')
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE play_history (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT NOT NULL, "
+                     "title TEXT NOT NULL DEFAULT '', type TEXT NOT NULL DEFAULT '', user TEXT NOT NULL DEFAULT '', "
+                     "duration REAL NOT NULL DEFAULT 0, played_at REAL NOT NULL, skipped INTEGER NOT NULL DEFAULT 0)")
+        conn.execute("INSERT INTO play_history (item_id, played_at) VALUES ('old', 1)")
+        conn.commit()
+        conn.close()
+        db = PlayHistoryDatabase(path)
+        PlayHistoryDatabase(path)                               # 第二次打开不再 ALTER
+        db.record('new', 'N', 'url', 'u', guild_id='9')
+        self.assertEqual(1, db.stats(guild_id='9')['total_plays'])
+        self.assertEqual(2, db.stats(guild_id='9', include_unscoped=True)['total_plays'])
+
     def test_empty_db_stats(self):
         stats = self.db.stats()
         self.assertEqual(0, stats['total_plays'])

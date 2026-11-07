@@ -136,8 +136,8 @@ class URLItem(BaseItem):
                     artwork.ensure(self)
                     return True
 
-            # Check if this url is banned
-            if var.db.has_option('url_ban', self.url):
+            # Check if this url is banned (global rules; per-guild bans are checked when the command comes in)
+            if var.store is not None and var.store.has_rule('url_ban', self.url):
                 raise ValidationFailedError(tr('url_ban', url=self.url))
 
             # avoid multiple process validating in the meantime
@@ -149,7 +149,7 @@ class URLItem(BaseItem):
             # Check if the song is too long and is not whitelisted
             max_duration = var.config.getint('bot', 'max_track_duration') * 60
             if max_duration and \
-                    not var.db.has_option('url_whitelist', self.url) and \
+                    not (var.store is not None and var.store.has_rule('url_whitelist', self.url)) and \
                     self.duration > max_duration:
                 log.info(
                     "url: " + self.url + " has a duration of " + str(self.duration / 60) + " min -- too long")

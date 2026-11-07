@@ -173,9 +173,10 @@ class URLMetadataTest(Base):
         with tempfile.TemporaryDirectory() as tmp:
             item = self.make_item(tmp)
             var.config = make_config(max_track_duration='60')
-            var.db = mock.Mock()
-            var.db.has_option.return_value = False
-            with self.fake_ydl({'duration': None, 'title': None}):
+            store = mock.Mock()
+            store.has_rule.return_value = False
+            with mock.patch.object(var, 'store', store), \
+                    self.fake_ydl({'duration': None, 'title': None}):
                 self.assertTrue(item.validate())
             self.assertEqual(item.duration, 0)
             self.assertEqual(item.ready, 'validated')

@@ -10,7 +10,6 @@ import time
 
 import commands
 import constants
-import media.playlist
 import util
 import variables as var
 from database import SettingsDatabase, MusicDatabase, DatabaseMigration, PlayHistoryDatabase
@@ -20,6 +19,7 @@ from media.cache import MusicCache
 from . import logbuffer
 from .cleanup import CacheCleaner
 from .core import DJBot
+from .store import GuildStore
 
 
 def start_web_interface(addr, port):
@@ -160,6 +160,8 @@ def main():
         var.music_db = MusicDatabase(":memory:")
 
     DatabaseMigration(var.db, var.music_db).migrate()
+    # 按服务器分开的设置 / 队列 / 封禁规则(settings 库里的 guild_* / access_rule 表)
+    var.store = GuildStore(var.settings_db_path)
 
     # Play log for the web interface statistics; lives next to the music
     # database (own table, created on first use).
@@ -207,31 +209,12 @@ def main():
         var.cache.build_dir_cache()
 
     # ======================
-    #   Load playback mode
-    # ======================
-    playback_mode = None
-    if var.db.has_option("playlist", "playback_mode"):
-        playback_mode = var.db.get('playlist', 'playback_mode')
-    else:
-        playback_mode = var.config.get('bot', 'playback_mode')
-
-    if playback_mode in ["one-shot", "repeat", "single", "random", "autoplay"]:
-        playlist = media.playlist.get_playlist(playback_mode)
-    else:
-        raise KeyError(f"Unknown playback mode '{playback_mode}'")
-
-    # ======================
     #  Create bot instance
     # ======================
+    # 播放模式、音量、上次的队列是按服务器存的:start() 连上 Discord、知道服务器之后才读
     var.bot = DJBot(args)
-    var.bot.set_playlist(playlist)
     commands.register_all_commands(var.bot)
     var.bot.start()
-
-    # load playlist
-    if var.config.getboolean('bot', 'save_playlist'):
-        var.bot_logger.info("bot: load playlist from previous session")
-        var.bot.playlist.load()
 
     # ============================
     #   Start the web interface

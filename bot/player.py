@@ -247,7 +247,7 @@ class PlayerMixin(SessionQueue):
                 var.play_history.record(
                     item.id, item.format_title(), getattr(item, 'type', ''),
                     getattr(music_wrapper, 'user', '') or '',
-                    getattr(item, 'duration', 0) or 0)
+                    getattr(item, 'duration', 0) or 0, guild_id=self.guild_id or None)
             except Exception:
                 self.log.debug("bot: could not record play history", exc_info=True)
 

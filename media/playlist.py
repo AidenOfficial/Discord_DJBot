@@ -1,4 +1,3 @@
-import json
 import threading
 import logging
 import random
@@ -266,28 +265,26 @@ class BasePlaylist(list):
 
     def save(self):
         with self.playlist_lock:
-            var.db.remove_section("playlist_item")
             assert self.current_index is not None
-            var.db.set("playlist", "current_index", self.current_index)
-
-            for index, music in enumerate(self):
+            entries = []
+            for music in self:
                 record = {'id': music.id, 'user': music.user}
                 if getattr(music, 'group', None):
                     record['group'] = music.group
-                var.db.set("playlist_item", str(index), json.dumps(record))
+                entries.append(record)
+            store, guild_id = self._store()
+            store.save_queue(guild_id, self.current_index, entries)
 
     def load(self):
-        current_index = var.db.getint("playlist", "current_index", fallback=-1)
+        store, guild_id = self._store()
+        current_index, items = store.load_queue(guild_id)
         if current_index == -1:
             return
 
-        items = var.db.items("playlist_item")
         if items:
             music_wrappers = []
             groups = {}  # 同一组的条目共用一个 dict,和入队时一样
-            items.sort(key=lambda v: int(v[0]))
             for item in items:
-                item = json.loads(item[1])
                 music_wrapper = get_cached_wrapper_by_id(item['id'], item['user'])
                 if music_wrapper:
                     group = item.get('group')
@@ -350,6 +347,12 @@ class BasePlaylist(list):
 
     def _owner(self):
         return self.session if self.session is not None else var.bot
+
+    def _store(self):
+        """队列存在哪:(GuildStore, guild_id)。没归属会话(测试)就是全局 store 的 '' 服务器。"""
+        if self.session is not None:
+            return self.session.store, self.session.guild_id
+        return var.store, ''
 
     def _drop(self, item_id):
         # 由 bot 决定删掉当前曲后指针怎么走(见 PlayerMixin.drop_from_queue)

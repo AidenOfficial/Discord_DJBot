@@ -14,6 +14,7 @@ import variables as var  # noqa: E402
 from bot.core import DJBot  # noqa: E402
 from bot.discord_link import CommandContext  # noqa: E402
 from commands.slash import Spec, _d  # noqa: E402
+from bot.store import GuildStore  # noqa: E402
 from database import SettingsDatabase  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -42,10 +43,11 @@ class FakeLink:
 class CoreTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self._saved = (var.db, var.config, var.user_db)
+        self._saved = (var.db, var.config, var.user_db, var.store)
         var.db = SettingsDatabase(os.path.join(self.tmp.name, 's.db'))
         from database import DatabaseMigration, MusicDatabase
         DatabaseMigration(var.db, MusicDatabase(os.path.join(self.tmp.name, 'm.db'))).migrate()
+        var.store = GuildStore(var.db.db_path)
         var.user_db = None
         config = configparser.ConfigParser(interpolation=None, allow_no_value=True)
         config.read(os.path.join(ROOT, 'configuration.default.ini'), encoding='utf-8')
@@ -79,7 +81,7 @@ class CoreTest(unittest.TestCase):
         self.bot = bot
 
     def tearDown(self):
-        var.db, var.config, var.user_db = self._saved
+        var.db, var.config, var.user_db, var.store = self._saved
         self.tmp.cleanup()
 
     def ctx(self, command, argument='', voice=None, admin=False, actor=42):
@@ -90,15 +92,26 @@ class CoreTest(unittest.TestCase):
         b = self.bot
         self.assertEqual(b.precheck(self.ctx('kill')), constants.tr_cli('not_admin'))
         self.assertIsNone(b.precheck(self.ctx('kill', admin=True)))
-        var.db.set('user_ban', '42', 'Aiden')
+        var.store.add_rule('', 'user_ban', '42', note='Aiden')
         self.assertEqual(b.precheck(self.ctx('queue')), constants.tr_cli('user_ban'))
         self.assertIsNone(b.precheck(self.ctx('queue', admin=True)))   # 管理员不受封禁影响
         self.assertIsNone(b.precheck(self.ctx('queue', actor=43)))
 
     def test_precheck_url_ban(self):
-        var.db.set('url_ban', 'https://bad.example/x', None)
+        var.store.add_rule('', 'url_ban', 'https://bad.example/x')
         refusal = self.bot.precheck(self.ctx('play', 'https://bad.example/x', voice=1))
         self.assertIn('https://bad.example/x', refusal)
+
+    def test_guild_scoped_bans_only_apply_in_that_guild(self):
+        b = self.bot
+        var.store.add_rule('777', 'user_ban', '42')
+        var.store.add_rule('777', 'url_ban', 'https://bad.example/y')
+        self.assertIsNone(b.precheck(self.ctx('queue')))               # 还没绑定服务器:只看全局
+        b.bind_guild(888)
+        self.assertIsNone(b.precheck(self.ctx('queue')))
+        b.bind_guild(777)
+        self.assertEqual(b.precheck(self.ctx('queue')), constants.tr_cli('user_ban'))
+        self.assertIn('https://bad.example/y', b.precheck(self.ctx('play', 'https://bad.example/y', voice=1, actor=43)))
 
     def test_precheck_voice_channel_rules(self):
         b = self.bot
@@ -149,7 +162,7 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
 
     def test_banned_user_is_rechecked(self):
-        var.db.set('user_ban', '42', 'Aiden')
+        var.store.add_rule('', 'user_ban', '42', note='Aiden')
         self.bot._handle_command(self.ctx('queue'))
         self.assertEqual(self.calls, [])
 

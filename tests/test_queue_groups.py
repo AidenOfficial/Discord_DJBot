@@ -76,9 +76,11 @@ class GroupPersistenceTest(unittest.TestCase):
     def setUp(self):
         from database import SettingsDatabase, MusicDatabase, DatabaseMigration
         self.tmp = tempfile.TemporaryDirectory()
-        self._saved = {n: getattr(var, n, None) for n in ('db', 'cache')}
+        from bot.store import GuildStore
+        self._saved = {n: getattr(var, n, None) for n in ('db', 'cache', 'store')}
         var.db = SettingsDatabase(os.path.join(self.tmp.name, 's.db'))
         DatabaseMigration(var.db, MusicDatabase(os.path.join(self.tmp.name, 'm.db'))).migrate()
+        var.store = GuildStore(var.db.db_path)
 
         class Cache(dict):
             def get_item_by_id(self, _id):

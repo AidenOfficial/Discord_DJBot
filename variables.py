@@ -2,6 +2,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import bot.cleanup
+    import bot.store
     import bot.core
     import media.playlist
     import media.cache
@@ -14,6 +15,7 @@ cache: 'media.cache.MusicCache' = None
 cleaner: 'bot.cleanup.CacheCleaner' = None
 play_history: 'database.PlayHistoryDatabase' = None
 user_db: 'web_users.UserDatabase' = None
+store: 'bot.store.GuildStore' = None  # 按服务器分开的设置 / 队列 / 封禁规则
 
 user = ""
 is_proxified = False

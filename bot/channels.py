@@ -1,6 +1,6 @@
 """语音频道:服务器频道树、默认频道(Web 可配置)、自动跟随用户。
 
-设置存在 settings 数据库的 channel 段,优先于 configuration.ini 的 [server] channel:
+设置按服务器存(GuildStore,key 是 channel.<名字>),优先于 configuration.ini 的 [server] channel:
   default   默认语音频道路径(JSON 名字列表 [分类, 频道],不在分类里的频道就是 [频道];
             [] = 不自动进频道,等有人 /play 或 /join);启动时进这里
   follow    跟随模式:off / auto / user
@@ -26,14 +26,12 @@ import logging
 import threading
 import time
 
-import variables as var
-
 from .session_queue import SessionQueue
 
 log = logging.getLogger("bot")
 
 FOLLOW_MODES = ('off', 'auto', 'user')
-SECTION = 'channel'
+PREFIX = 'channel.'
 DEBOUNCE_SECONDS = 2.5
 LAST_LEAVER_TTL = 60  # "最后离开的人去了哪"多久内有效
 
@@ -42,9 +40,12 @@ class ChannelMixin(SessionQueue):
 
     # ---- 设置 -----------------------------------------------------------
 
+    def _channel_opt(self, name, default=None):
+        return self.setting(PREFIX + name, default)
+
     def channel_settings(self):
         default = None
-        raw = var.db.get(SECTION, 'default', fallback=None)
+        raw = self._channel_opt('default')
         if raw is not None:
             try:
                 default = json.loads(raw)
@@ -53,39 +54,38 @@ class ChannelMixin(SessionQueue):
         if default is None:
             # 没在 Web 上配置过:沿用 ini / 命令行的 channel(A/B 形式)
             default = [p for p in (self.channel or '').split('/') if p]
-        mode = var.db.get(SECTION, 'follow', fallback='off')
+        mode = self._channel_opt('follow', 'off')
         return {
             'default': default,
             'follow': mode if mode in FOLLOW_MODES else 'off',
-            'follow_user': var.db.get(SECTION, 'follow_user', fallback=''),
-            'return_home': var.db.get(SECTION, 'return_home', fallback='1') == '1',
+            'follow_user': self._channel_opt('follow_user', ''),
+            'return_home': self._channel_opt('return_home', '1') == '1',
             'idle_pause_minutes': self._idle_minutes(),
-            'idle_resume': var.db.get(SECTION, 'idle_resume', fallback='1') == '1',
+            'idle_resume': self._channel_opt('idle_resume', '1') == '1',
         }
 
-    @staticmethod
-    def _idle_minutes():
+    def _idle_minutes(self):
         try:
-            return max(0, int(var.db.get(SECTION, 'idle_pause_minutes', fallback='5')))
+            return max(0, int(self._channel_opt('idle_pause_minutes', '5')))
         except ValueError:
             return 5
 
     def save_channel_settings(self, default=None, follow=None, follow_user=None, return_home=None,
                               idle_pause_minutes=None, idle_resume=None):
+        if follow is not None and follow not in FOLLOW_MODES:
+            raise ValueError(follow)
         if default is not None:
-            var.db.set(SECTION, 'default', json.dumps(list(default), ensure_ascii=False))
+            self.save_setting(PREFIX + 'default', json.dumps(list(default), ensure_ascii=False))
         if follow is not None:
-            if follow not in FOLLOW_MODES:
-                raise ValueError(follow)
-            var.db.set(SECTION, 'follow', follow)
+            self.save_setting(PREFIX + 'follow', follow)
         if follow_user is not None:
-            var.db.set(SECTION, 'follow_user', follow_user)
+            self.save_setting(PREFIX + 'follow_user', follow_user)
         if return_home is not None:
-            var.db.set(SECTION, 'return_home', '1' if return_home else '0')
+            self.save_setting(PREFIX + 'return_home', '1' if return_home else '0')
         if idle_pause_minutes is not None:
-            var.db.set(SECTION, 'idle_pause_minutes', str(max(0, int(idle_pause_minutes))))
+            self.save_setting(PREFIX + 'idle_pause_minutes', str(max(0, int(idle_pause_minutes))))
         if idle_resume is not None:
-            var.db.set(SECTION, 'idle_resume', '1' if idle_resume else '0')
+            self.save_setting(PREFIX + 'idle_resume', '1' if idle_resume else '0')
         self.schedule_follow_check(delay=0.2)
 
     # ---- 频道树 -----------------------------------------------------------

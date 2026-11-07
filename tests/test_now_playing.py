@@ -22,6 +22,8 @@ import variables as var  # noqa: E402
 from bot import discord_link as dl  # noqa: E402
 from bot import now_playing as np  # noqa: E402
 from bot.discord_link import DiscordLink, User  # noqa: E402
+from bot.session_queue import SessionQueue  # noqa: E402
+from bot.store import GuildStore  # noqa: E402
 from database import SettingsDatabase  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -67,8 +69,8 @@ class FakePlaylist(list):
         return self[self.current_index] if 0 <= self.current_index < len(self) else None
 
 
-class FakeBot:
-    # 测试替身:会话的队列就是全局 var.playlist
+class FakeBot(SessionQueue):
+    # 测试替身:会话的队列就是全局 var.playlist;设置走 var.store
     playlist = property(lambda self: var.playlist)
 
     def __init__(self):
@@ -110,10 +112,11 @@ class FakeLink:
 class _VarCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self._saved = (var.db, var.config, var.playlist, var.user_db)
+        self._saved = (var.db, var.config, var.playlist, var.user_db, var.store)
         var.db = SettingsDatabase(os.path.join(self.tmp.name, 's.db'))
         from database import DatabaseMigration, MusicDatabase
         DatabaseMigration(var.db, MusicDatabase(os.path.join(self.tmp.name, 'm.db'))).migrate()
+        var.store = GuildStore(var.db.db_path)
         var.user_db = None
         config = configparser.ConfigParser(interpolation=None, allow_no_value=True)
         config.read(os.path.join(ROOT, 'configuration.default.ini'), encoding='utf-8')
@@ -124,7 +127,7 @@ class _VarCase(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def tearDown(self):
-        var.db, var.config, var.playlist, var.user_db = self._saved
+        var.db, var.config, var.playlist, var.user_db, var.store = self._saved
         self.tmp.cleanup()
 
 
@@ -335,7 +338,7 @@ class ControllerTest(_VarCase):
 
     def test_panel_survives_restart(self):
         self.np.tick(now=1)
-        self.assertEqual(var.db.get('discord', 'panel_message'), '500:900')
+        self.assertEqual(self.bot.setting('panel_message'), '500:900')
 
         link = FakeLink()
         again = np.NowPlaying(self.bot, link)

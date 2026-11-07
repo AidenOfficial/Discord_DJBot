@@ -85,14 +85,6 @@ class FakeVolume:
         self.plain_volume_set = value
 
 
-class FakeDB:
-    def __init__(self):
-        self.saved = {}
-
-    def set(self, section, option, value):
-        self.saved[(section, option)] = value
-
-
 class FakeBot:
     # 测试替身:会话的队列就是全局 var.playlist
     playlist = property(lambda self: var.playlist)
@@ -105,6 +97,11 @@ class FakeBot:
         self.on_ducking = False
         self.wait_for_ready = False
         self.calls = []
+        self.guild_id = '1'
+        self.settings = {}  # 会话(服务器)设置:save_setting 写到这里
+
+    def save_setting(self, key, value):
+        self.settings[key] = value
 
     def pause(self):
         self.calls.append('pause')
@@ -162,7 +159,6 @@ class WebApiTestCase(unittest.TestCase):
         self.item = FakeItem()
         var.playlist = FakePlaylist([FakeWrapper(self.item)])
         var.cache = FakeCache({self.item.id: self.item})
-        var.db = FakeDB()
         config = configparser.ConfigParser(interpolation=None, allow_no_value=True)
         config.add_section('bot')
         config.set('bot', 'clear_when_stop_in_oneshot', 'False')
@@ -296,7 +292,7 @@ class WebApiTestCase(unittest.TestCase):
         data = self.post_controls(action='volume', volume=0.7).get_json()
         self.assertEqual(0.7, var.bot.volume_helper.plain_volume_set)
         self.assertEqual(0.7, data['volume'])
-        self.assertIn(('bot', 'volume'), var.db.saved)
+        self.assertEqual('0.7', var.bot.settings['volume'])
 
     def test_controls_volume_clamped(self):
         self.post_controls(action='volume', volume=3)
@@ -320,7 +316,7 @@ class WebApiTestCase(unittest.TestCase):
         self.assertEqual(200, rv.status_code)
         self.assertEqual('repeat', var.playlist.mode)
         self.assertEqual(list(playlist), list(var.playlist))
-        self.assertEqual(('playlist', 'playback_mode'), list(var.db.saved)[-1])
+        self.assertEqual('repeat', var.bot.settings['playback_mode'])
 
     # ---- queue ------------------------------------------------------------
 

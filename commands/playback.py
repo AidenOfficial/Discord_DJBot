@@ -177,7 +177,7 @@ def cmd_skip(bot, user, text, command, parameter):
         try:
             current = bot.playlist.current_item()
             if current:
-                var.play_history.mark_skipped(current.id)
+                var.play_history.mark_skipped(current.id, bot.guild_id or None)
         except Exception:
             pass
 
@@ -280,7 +280,7 @@ def cmd_mode(bot, user, text, command, parameter):
     if mode is None:
         bot.send_msg(tr('unknown_mode', mode=parameter), text)
     else:
-        var.db.set('playlist', 'playback_mode', mode)
+        bot.save_setting('playback_mode', mode)
         bot.set_playlist(media.playlist.get_playlist(mode, bot.playlist))
         log.info(f"command: playback mode changed to {mode}.")
         bot.send_msg(tr("change_mode", mode=bot.playlist.mode,

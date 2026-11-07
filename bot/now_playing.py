@@ -17,7 +17,6 @@ import threading
 import time
 from io import BytesIO
 
-import variables as var
 from constants import tr_cli as tr
 
 log = logging.getLogger("bot")
@@ -387,10 +386,10 @@ class NowPlaying:
     # ---- 重启后接着用上次的面板 ----
 
     def _adopt_panel(self):
-        if not self.panel_enabled or var.db is None:
+        if not self.panel_enabled or getattr(self.bot, 'store', None) is None:
             return
         try:
-            ref = var.db.get('discord', 'panel_message', fallback='')
+            ref = self.bot.setting('panel_message', '')
             channel_id, message_id = (int(x) for x in ref.split(':'))
         except Exception:
             return
@@ -400,10 +399,10 @@ class NowPlaying:
 
     def _save_panel_ref(self):
         ref = self.link.panel_ref
-        if ref is None or ref == self._saved_ref or var.db is None:
+        if ref is None or ref == self._saved_ref or getattr(self.bot, 'store', None) is None:
             return
         try:
-            var.db.set('discord', 'panel_message', f"{ref[0]}:{ref[1]}")
+            self.bot.save_setting('panel_message', f"{ref[0]}:{ref[1]}")
             self._saved_ref = ref
         except Exception:
             log.debug("now playing: could not remember the panel message", exc_info=True)

@@ -9,6 +9,7 @@ import threading
 import time
 import traceback
 
+import media.playlist
 import util
 import variables as var
 from constants import tr_cli as tr
@@ -17,6 +18,22 @@ from .channels import ChannelMixin
 from .discord_link import CommandContext, DiscordLink
 from .now_playing import NowPlaying
 from .player import PlayerMixin
+
+
+PLAYBACK_MODES = ("one-shot", "repeat", "single", "random", "autoplay")
+
+
+def new_queue(mode):
+    if mode not in PLAYBACK_MODES:
+        raise KeyError(f"Unknown playback mode '{mode}'")
+    return media.playlist.get_playlist(mode)
+
+
+def _as_float(value, fallback):
+    try:
+        return float(value) if value is not None else fallback
+    except ValueError:
+        return fallback
 
 
 class DJBot(PlayerMixin, ChannelMixin):
@@ -102,17 +119,13 @@ class DJBot(PlayerMixin, ChannelMixin):
             voice=var.config.getboolean('discord', 'voice_channel_status', fallback=True))
 
         # ====== Volume ======
+        # 先用配置文件的值;服务器自己存的音量 / 播放模式 / 队列连上 Discord 后再读(load_guild_state)
         self.volume_helper = util.VolumeHelper()
-
-        max_vol = var.config.getfloat('bot', 'max_volume')
-        if var.db.has_option('bot', 'max_volume'):
-            max_vol = var.db.getfloat('bot', 'max_volume')
-        _volume = var.config.getfloat('bot', 'volume')
-        if var.db.has_option('bot', 'volume'):
-            _volume = var.db.getfloat('bot', 'volume')
-        _volume = min(_volume, max_vol)
-        self.volume_helper.set_volume(_volume)
+        self.volume_helper.set_volume(min(var.config.getfloat('bot', 'volume'),
+                                          var.config.getfloat('bot', 'max_volume')))
         self.last_volume_cycle_time = time.time()
+        self._guild_state_loaded = False
+        self.set_playlist(new_queue(var.config.get('bot', 'playback_mode')))
 
         assert var.config.get("bot", "when_nobody_in_channel") in ['pause', 'pause_resume', 'stop', 'nothing', ''], \
             "Unknown action for when_nobody_in_channel"
@@ -147,6 +160,8 @@ class DJBot(PlayerMixin, ChannelMixin):
         except Exception as e:
             self.log.error("bot: failed to connect to Discord: %s", e)
             sys.exit(1)
+        self.bind_guild(self.link.guild_id)
+        self.load_guild_state()
         self.now_playing.start()
         # 启动时已经在语音里的人不会逐个触发"加入"回调:直接从快照记下每人所在频道,跟随逻辑要用
         for user in self.link.users.values():
@@ -157,13 +172,35 @@ class DJBot(PlayerMixin, ChannelMixin):
         # 默认频道可能本来就没人:连上后按跟随设置检查一次
         self.schedule_follow_check(delay=5)
 
+    def load_guild_state(self):
+        """读这个服务器存的音量、播放模式和队列(bind_guild 之后)。第一次先接收旧版不分服务器的设置。"""
+        if self.guild_id:
+            self.store.adopt_legacy(self.guild_id)
+
+        max_vol = _as_float(self.setting('max_volume'), var.config.getfloat('bot', 'max_volume'))
+        volume = _as_float(self.setting('volume'), var.config.getfloat('bot', 'volume'))
+        self.volume_helper.set_volume(min(volume, max_vol))
+
+        mode = self.setting('playback_mode') or var.config.get('bot', 'playback_mode')
+        if mode not in PLAYBACK_MODES:
+            self.log.warning("bot: unknown saved playback mode %r, using the configured one", mode)
+            mode = var.config.get('bot', 'playback_mode')
+        self.set_playlist(new_queue(mode))
+
+        if var.config.getboolean('bot', 'save_playlist'):
+            self.log.info("bot: load playlist from previous session")
+            self.playlist.load()
+        self._guild_state_loaded = True
+
     # Set the CTRL+C shortcut
     def ctrl_caught(self, signal, frame):
         self.log.info(
             "\nSIGINT caught, quitting, {} more to kill".format(2 - self.nb_exit))
 
+        # 还没读出存的队列就退出(连接 Discord 时被停):别拿空队列覆盖掉
         if var.config.getboolean('bot', 'save_playlist') \
-                and var.config.get("bot", "save_music_library"):
+                and var.config.get("bot", "save_music_library") \
+                and getattr(self, '_guild_state_loaded', True):
             self.log.info("bot: save playlist into database")
             self.playlist.save()
 
@@ -263,12 +300,12 @@ class DJBot(PlayerMixin, ChannelMixin):
         spec = entry['spec']
         admin = self.is_admin(ctx)
 
-        if not admin and var.db.has_option('user_ban', str(ctx.actor)):
+        if not admin and self.has_rule('user_ban', str(ctx.actor)):
             return tr('user_ban')
 
         if not admin and ctx.argument:
             input_url = util.get_url_from_input(ctx.argument)
-            if input_url and var.db.has_option('url_ban', input_url):
+            if input_url and self.has_rule('url_ban', input_url):
                 return tr('url_ban', url=input_url)
 
         if spec.admin and not admin:
@@ -298,7 +335,7 @@ class DJBot(PlayerMixin, ChannelMixin):
         if spec.admin and not admin:
             self.send_msg(tr('not_admin'), ctx)
             return
-        if not admin and var.db.has_option('user_ban', str(ctx.actor)):
+        if not admin and self.has_rule('user_ban', str(ctx.actor)):
             self.send_msg(tr('user_ban'), ctx)
             return
         self._refresh_discord_link(ctx)
