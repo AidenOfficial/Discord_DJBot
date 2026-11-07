@@ -383,6 +383,7 @@ def test_shell_loads_without_login_inside_discord(env):
     ('http://i.ytimg.com/vi/abc/mqdefault.jpg', False),          # 只认 https
     ('https://ytimg.com.evil.example/x.jpg', False),
     ('https://evilytimg.com/x.jpg', False),
+    ('https://unknown.ytimg.com/x.jpg', False),                 # 只认列出来的主机名
     ('https://i.ytimg.com:8443/x.jpg', False),
     ('https://user:pw@i.ytimg.com/x.jpg', False),
     ('https://127.0.0.1/x.jpg', False),
@@ -392,6 +393,16 @@ def test_shell_loads_without_login_inside_discord(env):
 ])
 def test_image_url_allowlist(env, url, ok):
     assert env.mod.allowed_image_url(url) is ok
+
+
+def test_image_url_is_rebuilt_from_the_allowlist(env):
+    assert env.mod.safe_image_url('https://I.YTIMG.COM./vi/a/1.jpg?x=1#frag') == 'https://i.ytimg.com/vi/a/1.jpg?x=1'
+    assert env.mod.safe_image_url('https://cdn.discordapp.com') == 'https://cdn.discordapp.com/'
+    assert env.mod.safe_image_url('https://i.ytimg.com/a\\b') is None
+
+
+def test_log_values_cannot_forge_lines(env):
+    assert env.mod._for_log('1\r\nWARNING fake') == '1  WARNING fake'
 
 
 class FakeImageResp:

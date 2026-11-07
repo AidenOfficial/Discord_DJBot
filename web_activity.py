@@ -18,7 +18,6 @@ Activity 只是个遥控器:声音照旧由 bot 推进语音频道,iframe 里显
 - [webinterface] activity_enabled = False 时这些都不存在(接口 404,Bearer 一律不认)。
 """
 
-import ipaddress
 import logging
 import secrets
 import threading
@@ -262,7 +261,7 @@ def is_member(guild_id, user_id, oauth_guilds):
         try:
             return bool(h.is_member(guild_id, user_id))
         except Exception:
-            log.debug("web: is_member(%s, %s) failed", guild_id, user_id, exc_info=True)
+            log.debug("web: is_member(%s, %s) failed", _for_log(guild_id), _for_log(user_id), exc_info=True)
     return False
 
 
@@ -276,6 +275,11 @@ def check_context(user_id, guild_id, channel_id, oauth_guilds):
         raise Rejected('not_in_voice_channel')
 
 
+def _for_log(value):
+    """写进日志的外部值:去掉换行,防止伪造日志行。"""
+    return str(value).replace('\r', ' ').replace('\n', ' ')
+
+
 def _snowflake(value):
     value = str(value or '').strip()
     return value if value.isdigit() and len(value) <= 20 else None
@@ -286,9 +290,18 @@ def _snowflake(value):
 # =====================================================================
 
 # Activity 的 iframe 只能访问自己的域名(其他域名要在 Developer Portal 一个个登记 URL Mapping),
-# 所以封面、头像、服务器图标都从这里转一道。只代理这些图床,防 SSRF。
-IMAGE_HOSTS = ('ytimg.com', 'ggpht.com', 'googleusercontent.com', 'hdslb.com',
-               'cdn.discordapp.com', 'media.discordapp.net', 'scdn.co', 'sndcdn.com')
+# 所以封面、头像、服务器图标都从这里转一道。只代理这些图床(主机名完全一致),防 SSRF。
+IMAGE_HOSTS = (
+    # YouTube 视频封面 / 频道头像
+    'i.ytimg.com', 'i1.ytimg.com', 'i2.ytimg.com', 'i3.ytimg.com', 'i4.ytimg.com', 'i9.ytimg.com',
+    'yt3.ggpht.com', 'yt3.googleusercontent.com', 'lh3.googleusercontent.com',
+    # Bilibili 封面
+    'i0.hdslb.com', 'i1.hdslb.com', 'i2.hdslb.com',
+    # Discord 头像 / 服务器图标
+    'cdn.discordapp.com', 'media.discordapp.net',
+    # Spotify / SoundCloud 封面
+    'i.scdn.co', 'i1.sndcdn.com',
+)
 IMAGE_TYPES = {'image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'}
 IMAGE_MAX_BYTES = 4 * 1024 * 1024
 IMAGE_CACHE_MAX = 256
@@ -299,25 +312,33 @@ _image_lock = threading.Lock()
 _image_cache = OrderedDict()  # url -> (取到的时间, content type, bytes)
 
 
-def allowed_image_url(url):
+def safe_image_url(url):
+    """白名单里的 https 图片地址 → 重新拼好的地址(主机名取自 IMAGE_HOSTS 常量);不认 → None。"""
     try:
         parsed = urlparse(url or '')
+        port = parsed.port
     except ValueError:
-        return False
+        return None
     if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
-        return False
-    if parsed.port not in (None, 443):
-        return False
-    host = parsed.hostname.lower().rstrip('.')
-    try:
-        ipaddress.ip_address(host)
-        return False  # 不认 IP 地址
-    except ValueError:
-        pass
-    return any(host == h or host.endswith('.' + h) for h in IMAGE_HOSTS)
+        return None
+    if port not in (None, 443):
+        return None
+    wanted = parsed.hostname.lower().rstrip('.')
+    host = next((h for h in IMAGE_HOSTS if h == wanted), None)
+    if host is None:
+        return None
+    path = parsed.path or '/'
+    if not path.startswith('/') or any(c in path for c in '\r\n\\'):
+        return None
+    return f"https://{host}{path}" + (f"?{parsed.query}" if parsed.query else '')
+
+
+def allowed_image_url(url):
+    return safe_image_url(url) is not None
 
 
 def _fetch_image(url):
+    """url 必须是 safe_image_url() 的结果。"""
     with _image_lock:
         hit = _image_cache.get(url)
         if hit is not None and time.time() - hit[0] < IMAGE_CACHE_TTL:
@@ -328,7 +349,7 @@ def _fetch_image(url):
         resp = requests.get(url, timeout=IMAGE_TIMEOUT, stream=True, allow_redirects=False,
                             headers={'User-Agent': 'Discord-DJBot image proxy'})
     except requests.RequestException as e:
-        log.debug("web: image proxy failed for %s: %s", url, e)
+        log.debug("web: image proxy failed for %s: %s", _for_log(url), e)
         return None
     try:
         ctype = (resp.headers.get('Content-Type') or '').split(';')[0].strip().lower()
@@ -396,14 +417,15 @@ def create_blueprint(requires_auth):
             check_context(user['id'], guild_id, channel_id, guilds)
         except Rejected as e:
             log.info("web: Activity login of discord:%s for %s/%s refused: %s",
-                     user['id'], guild_id, channel_id, e.error)
+                     _for_log(user['id']), _for_log(guild_id), _for_log(channel_id), e.error)
             return _error(e.error, e.status)
 
         identity = web_auth_discord._link_on_login(user)
         web_auth_discord._store(user['id'], token=token, guilds=guilds)
         ours, expires_at = issue(user, guild_id, channel_id)
         log.info("web: %s (discord:%s) opened the Activity in %s/%s as %s",
-                 web_auth_discord.display_name(user), user['id'], guild_id, channel_id, identity)
+                 _for_log(web_auth_discord.display_name(user)), _for_log(user['id']),
+                 _for_log(guild_id), _for_log(channel_id), _for_log(identity))
         return jsonify({
             'token': ours,
             'expires_at': expires_at,
@@ -447,8 +469,8 @@ def create_blueprint(requires_auth):
     @api.route('/thumbnail/external', methods=['GET'])
     @requires_auth
     def external_thumbnail():
-        url = request.args.get('url', '')
-        if not allowed_image_url(url):
+        url = safe_image_url(request.args.get('url', ''))
+        if url is None:
             abort(400)
         result = _fetch_image(url)
         if result is None:
