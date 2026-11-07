@@ -246,7 +246,9 @@ class PlayerMixin:
             except Exception:
                 self.log.debug("bot: could not record play history", exc_info=True)
 
-        if var.config.getboolean('bot', 'announce_current_music') and not quiet:
+        # 开着"正在播放"面板时不再另发一条文字公告(面板本身就是)
+        panel = getattr(getattr(self, 'now_playing', None), 'panel_enabled', False)
+        if var.config.getboolean('bot', 'announce_current_music') and not quiet and not panel:
             self.send_channel_msg(music_wrapper.format_current_playing())
         self.update_activity(music_wrapper.format_title())
 

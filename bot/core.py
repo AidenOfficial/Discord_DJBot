@@ -15,6 +15,7 @@ from constants import tr_cli as tr
 
 from .channels import ChannelMixin
 from .discord_link import CommandContext, DiscordLink
+from .now_playing import NowPlaying
 from .player import PlayerMixin
 
 
@@ -94,6 +95,11 @@ class DJBot(PlayerMixin, ChannelMixin):
             bitrate=var.config.getint("discord", "bitrate"),
             language=var.language,
             debug=var.config.getboolean('debug', 'discord_connection'))
+        # 公告频道里的"正在播放"面板 + 语音频道状态
+        self.now_playing = NowPlaying(
+            self, self.link,
+            panel=var.config.getboolean('discord', 'now_playing_panel', fallback=True),
+            voice=var.config.getboolean('discord', 'voice_channel_status', fallback=True))
 
         # ====== Volume ======
         self.volume_helper = util.VolumeHelper()
@@ -134,11 +140,13 @@ class DJBot(PlayerMixin, ChannelMixin):
         self.link.on_user_updated = self._on_user_updated
         self.link.on_user_left = self._on_user_removed
         self.link.on_self_moved = self._on_self_moved
+        self.link.on_panel_button = self.now_playing.resolve_button
         try:
             self.link.connect()
         except Exception as e:
             self.log.error("bot: failed to connect to Discord: %s", e)
             sys.exit(1)
+        self.now_playing.start()
         # 启动时已经在语音里的人不会逐个触发"加入"回调:直接从快照记下每人所在频道,跟随逻辑要用
         for user in self.link.users.values():
             self._user_channels[user.session] = user.channel_id

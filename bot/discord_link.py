@@ -5,6 +5,7 @@ bot 其余部分是线程模型,discord.py 是 asyncio:这里把 discord.py 放�
 
   - 状态快照:users(user_id -> User)、myself、my_channel_id、channels(channel_id -> dict)
   - 命令:reply / finish(回复斜杠命令)、send_announcement(发到公告频道)、move / leave_voice
+  - "正在播放":panel_show / panel_end(公告频道里的 embed 面板 + 按钮)、set_voice_status(语音频道状态)
   - 音频:write_audio(阻塞到缓冲有空位)、audio_buffered、clear_audio、cut_audio、volume
   - 回调:on_command / on_precheck / on_autocomplete / on_user_joined / on_user_updated / on_user_left
 
@@ -24,6 +25,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
+from io import BytesIO
 from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Tuple
 
 import audioop  # Python 3.13+ 由 audioop-lts 提供
@@ -51,6 +53,8 @@ INTERACTION_TTL = 14 * 60
 FINISH_GRACE = 3.0
 
 SILENCE = b'\x00' * FRAME_BYTES
+#: 面板封面附件的文件名(embed 里用 attachment://<名字> 引用)
+PANEL_COVER_NAME = 'cover.jpg'
 
 
 # =========================================================================
@@ -357,8 +361,19 @@ class DiscordLink:
         self.on_user_updated: Optional[Callable[[User, frozenset], None]] = None
         self.on_user_left: Optional[Callable[[User], None]] = None
         self.on_self_moved: Optional[Callable[[Optional[int], Optional[int]], None]] = None
+        #: 面板按钮 -> (命令 key, 参数);由 NowPlaying 提供。要很快返回(在事件循环里调用)
+        self.on_panel_button: Optional[Callable[[str], Optional[Tuple[str, Dict[str, Any]]]]] = None
         self._specs: List[Tuple[str, Any]] = []
         self._spec_by_key: Dict[str, Any] = {}
+
+        # "正在播放"面板
+        self._panel_msg: Any = None             # discord.Message / PartialMessage
+        self._panel_adopted: Optional[Tuple[int, int]] = None  # 上次运行留下的 (频道, 消息)
+        self._panel_cover: Optional[bytes] = None
+        self._panel_view: Any = None            # 持久按钮(on_ready 里建,View 要在事件循环里创建)
+        # 语音频道状态:(频道 id, 文字),是我们设置的
+        self._voice_status: Tuple[Optional[int], str] = (None, '')
+        self._voice_status_warned = False
 
     # ---- 生命周期 ----------------------------------------------------------
 
@@ -413,6 +428,7 @@ class DiscordLink:
 
     async def _shutdown(self):
         guild = self._guild()
+        await self._clear_voice_status()
         if guild is not None and guild.voice_client is not None:
             try:
                 await guild.voice_client.disconnect(force=True)
@@ -503,6 +519,10 @@ class DiscordLink:
                 log.info("discord: synced %d slash commands to %s", len(synced), guild.name)
             except Exception:
                 log.exception("discord: could not sync slash commands")
+        if self._panel_view is None:
+            # 持久按钮:custom_id 固定,bot 重启后旧面板上的按钮照样能用
+            self._panel_view = _PanelView(self)
+            self._client.add_view(self._panel_view)
         log.info("discord: logged in as %s, serving %s", self._client.user, guild.name if guild else '-')
         self._ready.set()
 
@@ -676,6 +696,8 @@ class DiscordLink:
         if vc is not None and vc.is_connected():
             if vc.channel and vc.channel.id == channel.id:
                 return True
+            # 走之前清掉旧频道的状态(离开后就没权限改它了)
+            await self._clear_voice_status()
             await vc.move_to(channel)
         else:
             if vc is not None:
@@ -692,6 +714,7 @@ class DiscordLink:
 
     async def _leave(self):
         guild = self._guild()
+        await self._clear_voice_status()
         if guild is not None and guild.voice_client is not None:
             # force=True:语音正在重连时 force=False 会提前返回,bot 留在频道里成了"幽灵"
             await guild.voice_client.disconnect(force=True)
@@ -873,7 +896,9 @@ class DiscordLink:
         except Exception:
             log.warning("discord: could not send an announcement", exc_info=True)
 
-    async def _announce(self, text):
+    def _announce_channels(self, need=()):
+        """能发公告的频道,按优先级:配置的 announce_channel → 最近一次发命令的频道 → bot 所在语音频道的文字区。
+        need:除了"看得到、能发言"之外还要的权限(如 embed_links)。"""
         guild = self._guild()
         me = guild.me if guild is not None else None
         tried = set()
@@ -889,6 +914,19 @@ class DiscordLink:
                 perms = channel.permissions_for(me)
                 if not (perms.view_channel and perms.send_messages):
                     continue
+                if not all(getattr(perms, p, True) for p in need):
+                    continue
+            yield channel
+
+    def _may(self, channel, permission):
+        guild = self._guild()
+        me = guild.me if guild is not None else None
+        if me is None or not hasattr(channel, 'permissions_for'):
+            return True
+        return bool(getattr(channel.permissions_for(me), permission, True))
+
+    async def _announce(self, text):
+        for channel in self._announce_channels():
             try:
                 for chunk in split_message(text):
                     await channel.send(chunk, suppress_embeds=True)
@@ -896,6 +934,185 @@ class DiscordLink:
             except discord.Forbidden:
                 continue
         log.debug("discord: no channel to post announcements in")
+
+    # ---- "正在播放"面板 -----------------------------------------------------
+    #
+    # 面板内容是 now_playing.build_panel() 产出的 dict:author / title / url / description / fields /
+    # footer / color / has_cover / buttons,可选的 cover(JPEG 字节,封面换了才带)。
+
+    @property
+    def panel_ref(self) -> Optional[Tuple[int, int]]:
+        """面板消息的 (频道 id, 消息 id),bot 重启后用它接着编辑同一条。"""
+        msg = self._panel_msg
+        if msg is None:
+            return None
+        return msg.channel.id, msg.id
+
+    def panel_adopt(self, channel_id, message_id):
+        self._panel_adopted = (int(channel_id), int(message_id))
+
+    def panel_show(self, panel, new_track=False):
+        """显示 / 更新面板。new_track:换歌了,面板已经被聊天顶上去的话删掉重发到最底下。返回是否成功。"""
+        try:
+            return bool(self._call(self._panel_show(panel, new_track), timeout=30))
+        except Exception:
+            log.warning("discord: could not update the now-playing panel", exc_info=True)
+            return False
+
+    def panel_end(self, panel):
+        """播放结束:面板换成 panel 的内容并去掉按钮;panel 为 None 时只去掉按钮。"""
+        try:
+            return bool(self._call(self._panel_end(panel), timeout=30))
+        except Exception:
+            log.warning("discord: could not finish the now-playing panel", exc_info=True)
+            return False
+
+    def _take_adopted_panel(self):
+        if self._panel_msg is not None or self._panel_adopted is None:
+            return
+        channel_id, message_id = self._panel_adopted
+        self._panel_adopted = None
+        channel = self._client.get_channel(channel_id)
+        if channel is not None and hasattr(channel, 'get_partial_message'):
+            self._panel_msg = channel.get_partial_message(message_id)
+
+    def _panel_embed(self, panel):
+        embed = discord.Embed(title=_clip(panel.get('title'), 256) or None,
+                              url=panel.get('url') or None,
+                              description=_clip(panel.get('description'), 4096) or None,
+                              color=panel.get('color'))
+        if panel.get('author'):
+            embed.set_author(name=_clip(panel['author'], 256))
+        for name, value in panel.get('fields') or ():
+            embed.add_field(name=_clip(name, 256), value=_clip(value, 1024), inline=True)
+        if panel.get('footer'):
+            embed.set_footer(text=_clip(panel['footer'], 2048))
+        if panel.get('has_cover') and self._panel_cover:
+            embed.set_thumbnail(url=f'attachment://{PANEL_COVER_NAME}')
+        return embed
+
+    def _cover_file(self):
+        return discord.File(BytesIO(self._panel_cover), filename=PANEL_COVER_NAME)
+
+    async def _panel_is_latest(self, msg, channel):
+        """面板还是频道里最新的一条消息吗(否则换歌时删掉重发,免得面板埋在聊天记录里)。"""
+        if channel is None or msg.channel.id != channel.id:
+            return False
+        try:
+            async for latest in channel.history(limit=1):
+                return latest.id == msg.id
+        except discord.HTTPException:
+            return False
+        return False
+
+    async def _panel_show(self, panel, new_track):
+        if 'cover' in panel:
+            self._panel_cover = panel['cover']
+        self._take_adopted_panel()
+        msg = self._panel_msg
+        target = None
+        if new_track or msg is None:
+            target = next(self._announce_channels(need=('embed_links',)), None)
+            if msg is not None and not await self._panel_is_latest(msg, target):
+                try:
+                    await msg.delete()
+                except discord.HTTPException:
+                    pass
+                self._panel_msg = msg = None
+        view = self._panel_view if panel.get('buttons') else None
+
+        if msg is not None:
+            kwargs = {'embed': self._panel_embed(panel), 'view': view}
+            if 'cover' in panel:
+                kwargs['attachments'] = [self._cover_file()] if self._panel_cover else []
+            try:
+                self._panel_msg = await msg.edit(**kwargs)
+                return True
+            except discord.NotFound:
+                self._panel_msg = None  # 被人删了:下面重发一条
+            except discord.HTTPException as e:
+                log.warning("discord: could not edit the now-playing panel: %s", e)
+                return False
+
+        if target is None:
+            target = next(self._announce_channels(need=('embed_links',)), None)
+        if target is None:
+            log.debug("discord: no channel to post the now-playing panel in")
+            return False
+        attach = bool(self._panel_cover) and self._may(target, 'attach_files')
+        embed = self._panel_embed(panel if attach else {**panel, 'has_cover': False})
+        kwargs = {'embed': embed}
+        if view is not None:
+            kwargs['view'] = view
+        if attach:
+            kwargs['file'] = self._cover_file()
+        self._panel_msg = await target.send(**kwargs)
+        return True
+
+    async def _panel_end(self, panel):
+        self._take_adopted_panel()
+        msg = self._panel_msg
+        if msg is None:
+            return True
+        try:
+            if panel is None:
+                await msg.edit(view=None)
+            else:
+                self._panel_msg = await msg.edit(embed=self._panel_embed(panel), view=None)
+        except discord.NotFound:
+            self._panel_msg = None
+        except discord.HTTPException as e:
+            log.warning("discord: could not finish the now-playing panel: %s", e)
+            return False
+        return True
+
+    async def _on_panel_button(self, interaction, action):
+        """面板按钮:换算成命令,和斜杠命令走同一套预检查 / 处理流程,回复只给点按钮的人看。"""
+        resolver = self.on_panel_button
+        resolved = resolver(action) if resolver is not None else None
+        entry = self._spec_by_key.get(resolved[0]) if resolved else None
+        if entry is None:
+            await interaction.response.send_message("The bot is still starting, try again in a moment.",
+                                                    ephemeral=True)
+            return
+        await self._invoke(entry[1], interaction, resolved[1], ephemeral=True)
+
+    # ---- 语音频道状态 -------------------------------------------------------
+
+    def set_voice_status(self, text):
+        """bot 所在语音频道的状态文字(频道名下面那行);'' 清除。没权限 / 不在语音里返回 False。"""
+        try:
+            return bool(self._call(self._set_voice_status(text), timeout=15))
+        except Exception:
+            log.debug("discord: could not set the voice channel status", exc_info=True)
+            return False
+
+    async def _set_voice_status(self, text):
+        guild = self._guild()
+        vc = guild.voice_client if guild is not None else None
+        channel = vc.channel if vc is not None and vc.is_connected() else None
+        if channel is None:
+            return False
+        if not self._may(channel, 'set_voice_channel_status'):
+            if not self._voice_status_warned:
+                self._voice_status_warned = True
+                log.warning("discord: no 'Set Voice Channel Status' permission in %s, so the song is not "
+                            "shown under the voice channel. Re-invite the bot with the link in the README "
+                            "or give its role that permission.", channel.name)
+            return False
+        await self._client.http.edit_voice_channel_status(text or None, channel_id=channel.id)
+        self._voice_status = (channel.id, text) if text else (None, '')
+        return True
+
+    async def _clear_voice_status(self):
+        channel_id, text = self._voice_status
+        self._voice_status = (None, '')
+        if channel_id is None or not text:
+            return
+        try:
+            await self._client.http.edit_voice_channel_status(None, channel_id=channel_id)
+        except discord.HTTPException:
+            log.debug("discord: could not clear the voice channel status", exc_info=True)
 
     def set_activity(self, text):
         """bot 的状态:"正在听 {text}";None 清除。"""
@@ -971,7 +1188,7 @@ class DiscordLink:
 
         return autocomplete
 
-    def _context(self, spec, interaction, kwargs):
+    def _context(self, spec, interaction, kwargs, ephemeral=None):
         member = interaction.user
         voice = getattr(member, 'voice', None)
         role_ids = tuple(r.id for r in getattr(member, 'roles', ()) or ())
@@ -1008,16 +1225,18 @@ class DiscordLink:
             guild_id=interaction.guild_id,
             role_ids=role_ids,
             is_admin=bool(is_admin),
-            ephemeral=bool(spec.ephemeral) if spec is not None else True,
+            ephemeral=(bool(ephemeral) if ephemeral is not None
+                       else bool(spec.ephemeral) if spec is not None else True),
             interaction=interaction,
         )
 
-    async def _invoke(self, spec, interaction, kwargs):
+    async def _invoke(self, spec, interaction, kwargs, ephemeral=None):
+        """ephemeral:覆盖命令自己的设置(面板按钮的回复只给点的人看)。"""
         if interaction.guild_id is None or interaction.guild_id != self.guild_id:
             await interaction.response.send_message(
                 "This bot only works in its home server for now.", ephemeral=True)
             return
-        ctx = self._context(spec, interaction, kwargs)
+        ctx = self._context(spec, interaction, kwargs, ephemeral=ephemeral)
         if self.on_precheck is not None:
             try:
                 refusal = await asyncio.wait_for(
@@ -1047,6 +1266,31 @@ class DiscordLink:
                 await interaction.response.send_message("Something went wrong.", ephemeral=True)
         except Exception:
             pass
+
+
+def _clip(text, limit):
+    text = str(text or '')
+    return text if len(text) <= limit else text[:limit - 1] + '…'
+
+
+#: 面板按钮:(动作, 图标)。custom_id 是 djbot:np:<动作>,重启后旧面板上的按钮照样能点
+PANEL_BUTTONS = (('toggle', '⏯️'), ('skip', '⏭️'), ('stop', '⏹️'), ('mode', '🔁'))
+
+
+class _PanelView(discord.ui.View):
+    def __init__(self, link):
+        super().__init__(timeout=None)
+        for action, emoji in PANEL_BUTTONS:
+            button = discord.ui.Button(emoji=emoji, style=discord.ButtonStyle.secondary,
+                                       custom_id=f'djbot:np:{action}')
+            button.callback = self._callback(link, action)
+            self.add_item(button)
+
+    @staticmethod
+    def _callback(link, action):
+        async def callback(interaction: discord.Interaction):
+            await link._on_panel_button(interaction, action)
+        return callback
 
 
 def _annotation(opt):
