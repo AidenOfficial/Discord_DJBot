@@ -1,6 +1,9 @@
 """曲库 API(/api/library/*):Library 页的检索与加入队列。
 
 取代旧 jQuery 界面的 /library/info、/library(action=query)和 /post(add_item_*)。
+
+曲库是所有服务器共用的。多服务器(有 Hub)时缓存下来的网址条目(type=url)会暴露别的服务器
+放过什么,只有 bot 主人能看到;本地文件 / 上传的照常对所有人可见。
 """
 
 import logging
@@ -12,6 +15,8 @@ from flask import Blueprint, abort, jsonify, request
 
 import util
 import variables as var
+import web_context
+import web_upload
 from database import Condition
 from media.cache import get_cached_wrapper_by_id
 from media.item import dicts_to_items
@@ -43,11 +48,21 @@ def get_all_dirs():
     return dirs
 
 
-def build_query_condition(payload):
-    """type(逗号分隔)/ dir(仅 type=file)/ tags(逗号分隔,全部命中)/ keywords(空格分隔,全部命中)。"""
+def visible_types():
+    if web_context.hub() is not None and not web_context.is_owner():
+        return tuple(t for t in ITEM_TYPES if t != 'url')
+    return ITEM_TYPES
+
+
+def build_query_condition(payload, allowed=ITEM_TYPES):
+    """type(逗号分隔)/ dir(仅 type=file)/ tags(逗号分隔,全部命中)/ keywords(空格分隔,全部命中)。
+    allowed 之外的类型静默去掉;去完什么都不剩返回 None。"""
     types = [t for t in str(payload.get('type') or ','.join(ITEM_TYPES)).split(',') if t]
     if not types or any(t not in ITEM_TYPES for t in types):
         abort(400)
+    types = [t for t in types if t in allowed]
+    if not types:
+        return None
     condition = Condition()
     sub_cond = Condition()
     for item_type in types:
@@ -100,7 +115,9 @@ def create_blueprint(requires_auth):
         return jsonify({
             'dirs': get_all_dirs(),
             'tags': var.music_db.query_all_tags(),
-            'upload_enabled': var.config.getboolean("webinterface", "upload_enabled"),
+            # 前端据此显示上传按钮:多服务器时只有能上传的人才显示
+            'upload_enabled': var.config.getboolean("webinterface", "upload_enabled")
+            and web_upload.may_upload(),
             'max_upload_file_size': util.parse_file_size(
                 var.config.get("webinterface", "max_upload_file_size")),
         })
@@ -109,11 +126,12 @@ def create_blueprint(requires_auth):
     @requires_auth
     def library_query():
         payload = _payload()
-        condition = build_query_condition(payload)
+        condition = build_query_condition(payload, visible_types())
 
         total_count = 0
         try:
-            total_count = var.music_db.query_music_count(condition)
+            if condition is not None:
+                total_count = var.music_db.query_music_count(condition)
         except sqlite3.OperationalError:
             pass
         if not total_count:

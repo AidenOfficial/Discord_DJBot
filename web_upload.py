@@ -14,6 +14,9 @@
 完成后:视频文件默认只抽出音轨(ffmpeg -c:a copy 进 .mka,不重编码,几 GB 的视频
 通常变成几十到几百 MB),然后直接登记进曲库,不用再手动 rescan。
 暂存在 <tmp_folder>/.uploads/,超过一天没动的半成品会被清掉。
+
+多服务器(有 Hub)时上传的文件进的是所有服务器共用的曲库:只有 bot 主人和
+[webinterface] uploaders 里列出的 Discord 用户 id 能传。
 """
 
 import json
@@ -27,16 +30,20 @@ import threading
 import time
 import uuid
 
-from flask import Blueprint, abort, jsonify, request
+from flask import Blueprint, abort, jsonify, make_response, request
 
 import util
 import variables as var
-from web_users import current_user_name
+import web_context
+from web_users import current_identity, current_user_name
 
 log = logging.getLogger("bot")
 
 CHUNK_SIZE = 32 * 1024 * 1024   # 远低于 Cloudflare 100MB 的请求体上限
+CHUNK_SLACK = 64 * 1024         # 分片请求体上限 = CHUNK_SIZE + 这么多(全局 MAX_CONTENT_LENGTH 小得多)
 STALE_SECONDS = 24 * 3600
+DISK_RESERVE = 2 * 1024 ** 3    # 磁盘至少留这么多,别让上传把缓存 / 数据库所在的盘写满
+MAX_OPEN_PER_USER = 2
 _ID_RE = re.compile(r'^[0-9a-f]{32}$')
 _lock = threading.Lock()
 
@@ -70,6 +77,41 @@ def _save(meta):
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(meta, f, ensure_ascii=False)
     os.replace(tmp, _meta_path(meta['id']))
+
+
+def _uploader_ids():
+    raw = var.config.get('webinterface', 'uploaders', fallback='') if var.config is not None else ''
+    return {u.strip() for u in (raw or '').replace(';', ',').split(',') if u.strip().isdigit()}
+
+
+def may_upload():
+    """当前用户能不能上传。没有 Hub 的单服务器旧模式照旧谁都能传。"""
+    if web_context.hub() is None or web_context.is_owner():
+        return True
+    discord_id = web_context.linked_discord_id(current_identity())
+    return bool(discord_id) and discord_id in _uploader_ids()
+
+
+def _uploader_key():
+    ident = current_identity()
+    return ident.key or f"guest:{request.remote_addr}"
+
+
+def _in_flight():
+    """还在传的上传的 meta(prune_stale 之后调用,过期的已经清掉了)。"""
+    folder = staging_dir()
+    metas = []
+    for name in os.listdir(folder):
+        if not name.endswith('.json'):
+            continue
+        try:
+            with open(os.path.join(folder, name), encoding='utf-8') as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if meta.get('status') == 'uploading':
+            metas.append(meta)
+    return metas
 
 
 def max_upload_bytes():
@@ -191,9 +233,14 @@ def finalize(upload_id):
 def create_blueprint(requires_auth):
     api = Blueprint('upload', __name__, url_prefix='/api/upload')
 
+    def _require_uploader():
+        if not may_upload():
+            abort(make_response(jsonify({'error': 'upload_forbidden'}), 403))
+
     def _check_enabled():
         if not var.config.getboolean('webinterface', 'upload_enabled'):
             abort(403)
+        _require_uploader()
 
     @api.route('/init', methods=['POST'])
     @requires_auth
@@ -214,17 +261,24 @@ def create_blueprint(requires_auth):
         if size > limit:
             return jsonify({'error': 'too_large', 'limit': limit}), 413
         resolve_target_dir(payload.get('targetdir'))  # 先校验,防路径穿越
-        prune_stale()
-        free = shutil.disk_usage(staging_dir()).free
-        if size * 1.05 > free:
-            return jsonify({'error': 'no_space', 'free': free}), 507
-        upload_id = uuid.uuid4().hex
-        meta = {'id': upload_id, 'filename': filename, 'size': size, 'kind': kind,
-                'targetdir': (payload.get('targetdir') or '').strip() or 'uploads/',
-                'received': 0, 'status': 'uploading', 'user': current_user_name(),
-                'created_at': time.time()}
-        open(_data_path(upload_id), 'wb').close()
-        _save(meta)
+        owner = _uploader_key()
+        with _lock:
+            prune_stale()
+            in_flight = _in_flight()
+            if sum(1 for m in in_flight if m.get('owner') == owner) >= MAX_OPEN_PER_USER:
+                return jsonify({'error': 'too_many_uploads', 'limit': MAX_OPEN_PER_USER}), 429
+            # 还没传完的上传要占的空间也算上,不然几个人同时开始上传就能一起把盘写满
+            outstanding = sum(max(0, int(m.get('size', 0)) - int(m.get('received', 0))) for m in in_flight)
+            free = shutil.disk_usage(staging_dir()).free
+            if size + outstanding > free - DISK_RESERVE:
+                return jsonify({'error': 'no_space', 'free': max(0, free - DISK_RESERVE - outstanding)}), 507
+            upload_id = uuid.uuid4().hex
+            meta = {'id': upload_id, 'filename': filename, 'size': size, 'kind': kind,
+                    'targetdir': (payload.get('targetdir') or '').strip() or 'uploads/',
+                    'received': 0, 'status': 'uploading', 'user': current_user_name(),
+                    'owner': owner, 'created_at': time.time()}
+            open(_data_path(upload_id), 'wb').close()
+            _save(meta)
         log.info("upload: %s started %s (%.1f MB)", meta['user'], filename, size / 1048576)
         return jsonify({'upload_id': upload_id, 'chunk_size': CHUNK_SIZE})
 
@@ -236,6 +290,10 @@ def create_blueprint(requires_auth):
             offset = int(request.args.get('offset', -1))
         except ValueError:
             abort(400)
+        limit = CHUNK_SIZE + CHUNK_SLACK
+        if (request.content_length or 0) > limit:
+            abort(413)
+        request.max_content_length = limit  # 没有 Content-Length(分块传输)时由 werkzeug 截断
         with _lock:
             meta = _load(upload_id)
             if meta['status'] != 'uploading':
@@ -292,6 +350,7 @@ def create_blueprint(requires_auth):
     @api.route('/<upload_id>', methods=['DELETE'])
     @requires_auth
     def upload_cancel(upload_id):
+        _require_uploader()
         meta = _load(upload_id)
         for path in (_data_path(upload_id), _meta_path(upload_id)):
             try:
