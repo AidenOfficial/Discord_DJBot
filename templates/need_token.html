@@ -21,6 +21,8 @@
         .row { display: flex; gap: 8px; }
         input { flex: 1; min-width: 0; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border);
                 background: var(--bg); color: var(--text); font: inherit; }
+        /* 16px or more stops iOS from zooming in when the field gets focus */
+        @media (pointer: coarse) { input { font-size: max(1rem, 1em); } }
         button { padding: 9px 16px; border: 0; border-radius: 8px; background: var(--accent); color: #fff;
                  font: inherit; font-weight: 600; cursor: pointer; }
         .discord { display: block; margin-top: 16px; padding: 10px 16px; border-radius: 8px; background: #5865f2;
@@ -36,7 +38,7 @@
     <form action="" method="get">
         <label for="token_input">{{ token_label }}</label>
         <div class="row">
-            <input type="password" id="token_input" name="token" autocomplete="off" autofocus>
+            <input type="password" id="token_input" name="token" autocomplete="current-password" required autofocus>
             <button type="submit">{{ submit }}</button>
         </div>
     </form>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import {
   fetchChannels, joinChannel, leaveChannel, saveChannelSettings, type ChannelNode, type ChannelOverview,
   type FollowMode,
@@ -12,18 +12,18 @@ import { useMe } from '../composables/useMe'
 import { selectedGuild } from '../guild'
 import { t, tParts } from '../i18n'
 import type { Key } from '../i18n/en'
+import { announce } from '../composables/useAnnounce'
+import { getItem, setItem } from '../storage'
 
 const { me } = useMe()
 const { canManage } = useGuilds()
 type Tab = 'channel' | 'server' | 'logs'
 const tab = ref<Tab>('channel')
-try {
-  const saved = localStorage.getItem('settingsTab')
-  if (saved === 'logs' || saved === 'server') tab.value = saved
-} catch { /* ignore */ }
+const savedTab = getItem('settingsTab')
+if (savedTab === 'logs' || savedTab === 'server') tab.value = savedTab
 function setTab(next: Tab) {
   tab.value = next
-  try { localStorage.setItem('settingsTab', next) } catch { /* ignore */ }
+  setItem('settingsTab', next)
 }
 // 服务器管理只给能管理当前服务器的人,日志只给能看日志的人
 const tabs = computed<Tab[]>(() => [
@@ -38,12 +38,20 @@ const data = ref<ChannelOverview | null>(null)
 const error = ref('')
 const busy = ref(false)
 const toast = ref('')
+const toastOk = ref(true)
 
 let toastTimer: ReturnType<typeof setTimeout> | undefined
-function say(msg: string) {
+/** Failures stay until the next message or until dismissed; successes fade after 3 s. */
+function say(msg: string, ok = true) {
   toast.value = msg
+  toastOk.value = ok
   clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => (toast.value = ''), 3000)
+  if (ok) toastTimer = setTimeout(() => (toast.value = ''), 3000)
+  announce(msg, { assertive: !ok })
+}
+function dismissToast() {
+  clearTimeout(toastTimer)
+  toast.value = ''
 }
 
 async function reload() {
@@ -54,7 +62,10 @@ async function reload() {
     data.value = fresh
     error.value = ''
   } catch {
-    if (guild === selectedGuild.value) error.value = t('set.readFailed')
+    if (guild !== selectedGuild.value) return
+    // Polling repeats every few seconds: announce only when the error first appears
+    if (!error.value) announce(t('set.readFailed'), { assertive: true })
+    error.value = t('set.readFailed')
   }
 }
 
@@ -67,12 +78,16 @@ watch(selectedGuild, () => {
 /** 不能改这个服务器的频道设置(只能移动 / 离开) */
 const locked = computed(() => data.value?.can_edit_settings === false)
 
-// 频道里的人随时在变,定时刷新
+// 频道里的人随时在变,定时刷新;只在"频道"子标签打开时轮询
 let timer: ReturnType<typeof setInterval> | undefined
-onMounted(() => {
-  reload()
-  timer = setInterval(reload, 4000)
-})
+watch(activeTab, (next) => {
+  clearInterval(timer)
+  timer = undefined
+  if (next === 'channel') {
+    reload()
+    timer = setInterval(reload, 4000)
+  }
+}, { immediate: true })
 onBeforeUnmount(() => clearInterval(timer))
 
 function findPath(node: ChannelNode | null, id: string | null): string {
@@ -92,15 +107,24 @@ const defaultName = computed(() => {
   return findPath(data.value?.tree ?? null, s.default_channel_id)
 })
 
+// Auto-saving controls stay enabled while a save is in flight (disabling the focused
+// control drops keyboard focus to <body>), so saves can overlap: only the latest
+// response is applied.
+let applySeq = 0
+let pending = 0
 async function apply(promise: Promise<ChannelOverview>, msg: string) {
+  const mySeq = ++applySeq
+  pending++
   busy.value = true
   try {
-    data.value = await promise
+    const fresh = await promise
+    if (mySeq === applySeq) data.value = fresh
     say(msg)
   } catch {
-    say(t('common.saveFailed'))
+    say(t('common.saveFailed'), false)
+    if (mySeq === applySeq) reload() // put the controls back to what the server has
   } finally {
-    busy.value = false
+    busy.value = --pending > 0
   }
 }
 
@@ -144,10 +168,12 @@ const modeHint = computed(() => {
   <section class="mx-auto w-full max-w-3xl px-4 py-8">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <h1 class="text-xl font-semibold">{{ t('set.title') }}</h1>
-      <div v-if="tabs.length > 1" class="flex gap-1 rounded-full p-1" :style="{ background: 'var(--c-surface-2)' }">
+      <div v-if="tabs.length > 1" role="group" :aria-label="t('set.sections')" class="flex gap-1 rounded-full p-1" :style="{ background: 'var(--c-surface-2)' }">
         <button
           v-for="tb in tabs"
           :key="tb"
+          type="button"
+          :aria-pressed="tb === activeTab"
           class="cursor-pointer rounded-full border-0 px-3.5 py-1 text-xs font-medium"
           :style="tb === activeTab
             ? { background: 'var(--c-surface)', color: 'var(--c-text)', boxShadow: 'var(--shadow-1)' }
@@ -162,7 +188,7 @@ const modeHint = computed(() => {
 
     <template v-else>
     <p v-if="locked" class="mt-3 rounded-lg px-3 py-2 text-xs" :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text-muted)' }"><Icon icon="lock" class="mr-1.5" aria-hidden="true" />{{ t('set.manageOnly') }}</p>
-    <p v-if="error" class="mt-3 rounded-lg px-3 py-2 text-sm" :style="{ background: 'var(--c-accent-soft)', color: 'var(--c-danger)' }">{{ error }}</p>
+    <p v-if="error" class="mt-3 rounded-lg px-3 py-2 text-sm" :style="{ background: 'var(--c-accent-soft)', color: 'var(--c-danger)' }"><Icon icon="triangle-exclamation" class="mr-1.5" aria-hidden="true" />{{ error }}</p>
 
     <template v-if="data">
       <!-- 跟随 -->
@@ -191,28 +217,36 @@ const modeHint = computed(() => {
           ><Icon icon="xmark" class="mr-1" />{{ t('set.clearDefault') }}</button>
         </div>
 
-        <div class="mt-4 grid grid-cols-3 gap-1 rounded-2xl p-1 sm:inline-grid sm:rounded-full" :style="{ background: 'var(--c-surface-2)' }">
+        <div
+          role="group"
+          :aria-label="t('set.followMode')"
+          aria-describedby="follow-mode-hint"
+          class="mt-4 grid grid-cols-3 gap-1 rounded-2xl p-1 sm:inline-grid sm:rounded-full"
+          :style="{ background: 'var(--c-surface-2)' }"
+        >
           <button
             v-for="m in MODES"
             :key="m.key"
+            type="button"
+            :aria-pressed="data.settings.follow === m.key"
             class="cursor-pointer rounded-xl border-0 px-2 py-1.5 text-xs font-medium sm:rounded-full sm:px-3.5"
             :style="data.settings.follow === m.key
               ? { background: 'var(--c-accent)', color: 'var(--c-on-accent)' }
               : { background: 'transparent', color: 'var(--c-text-muted)' }"
-            :disabled="busy || locked"
-            @click="setFollow(m.key)"
-          >{{ t(m.label) }}</button>
+            :disabled="locked"
+            @click="data.settings.follow !== m.key && setFollow(m.key)"
+          ><Icon v-if="data.settings.follow === m.key" icon="check" class="mr-1" aria-hidden="true" />{{ t(m.label) }}</button>
         </div>
-        <p class="mt-2 text-xs" :style="{ color: 'var(--c-text-muted)' }">{{ modeHint }}</p>
+        <p id="follow-mode-hint" class="mt-2 text-xs" :style="{ color: 'var(--c-text-muted)' }">{{ modeHint }}</p>
 
         <div v-if="data.settings.follow === 'user'" class="mt-3 flex items-center gap-2 text-sm">
           <label for="follow-user" :style="{ color: 'var(--c-text-muted)' }">{{ t('set.follow') }}</label>
           <select
             id="follow-user"
             :value="data.settings.follow_user"
-            class="rounded-full border px-3 py-1.5 text-sm outline-none"
+            class="rounded-full border px-3 py-1.5 text-sm"
             :style="{ background: 'var(--c-bg)', borderColor: 'var(--c-border)', color: 'var(--c-text)' }"
-            :disabled="busy || locked"
+            :disabled="locked"
             @change="apply(saveChannelSettings({ follow_user: ($event.target as HTMLSelectElement).value }), t('common.saved'))"
           >
             <option v-if="!followChoices.length" value="">{{ t('set.nobody') }}</option>
@@ -226,7 +260,7 @@ const modeHint = computed(() => {
           <input
             type="checkbox"
             :checked="data.settings.return_home"
-            :disabled="busy || locked"
+            :disabled="locked"
             class="h-4 w-4"
             :style="{ accentColor: 'var(--c-accent)' }"
             @change="apply(saveChannelSettings({ return_home: ($event.target as HTMLInputElement).checked }), t('common.saved'))"
@@ -234,7 +268,18 @@ const modeHint = computed(() => {
           {{ t('set.returnHome') }}
         </label>
 
-        <p v-if="toast" class="mt-3 text-xs" :style="{ color: 'var(--c-success)' }">{{ toast }}</p>
+        <p v-if="toast" class="mt-3 flex items-start gap-1.5 text-xs" :style="{ color: toastOk ? 'var(--c-success)' : 'var(--c-danger)' }">
+          <Icon :icon="toastOk ? 'check' : 'triangle-exclamation'" class="mt-0.5" aria-hidden="true" />
+          <span class="min-w-0 flex-1">{{ toast }}</span>
+          <button
+            v-if="!toastOk"
+            type="button"
+            class="cursor-pointer rounded border-0 bg-transparent px-1 text-xs"
+            :style="{ color: 'var(--c-text-muted)' }"
+            :aria-label="t('common.dismiss')"
+            @click="dismissToast"
+          ><Icon icon="xmark" aria-hidden="true" /></button>
+        </p>
       </div>
 
       <!-- 没人时自动暂停 -->
@@ -248,21 +293,22 @@ const modeHint = computed(() => {
             min="0"
             max="1440"
             :value="data.settings.idle_pause_minutes"
-            :disabled="busy || locked"
-            class="w-20 rounded-lg border px-2 py-1 text-sm tabular-nums outline-none"
+            :disabled="locked"
+            aria-describedby="idle-hint"
+            class="w-20 rounded-lg border px-2 py-1 text-sm tabular-nums"
             :style="{ background: 'var(--c-bg)', borderColor: 'var(--c-border)', color: 'var(--c-text)' }"
             @change="onIdleMinutes"
           />
           <span>{{ t('set.minutes') }}</span>
         </div>
-        <p class="mt-1 text-xs" :style="{ color: 'var(--c-text-muted)' }">
+        <p id="idle-hint" class="mt-1 text-xs" :style="{ color: 'var(--c-text-muted)' }">
           {{ t('set.idleHint') }}
         </p>
         <label class="mt-3 flex cursor-pointer items-center gap-2 text-sm">
           <input
             type="checkbox"
             :checked="data.settings.idle_resume"
-            :disabled="busy || locked || data.settings.idle_pause_minutes === 0"
+            :disabled="locked || data.settings.idle_pause_minutes === 0"
             class="h-4 w-4"
             :style="{ accentColor: 'var(--c-accent)' }"
             @change="apply(saveChannelSettings({ idle_resume: ($event.target as HTMLInputElement).checked }), t('common.saved'))"
@@ -277,14 +323,14 @@ const modeHint = computed(() => {
           <h2 class="text-sm font-semibold uppercase tracking-wider" :style="{ color: 'var(--c-text-muted)' }">{{ t('set.channels') }}</h2>
           <span class="text-[11px]" :style="{ color: 'var(--c-text-faint)' }">{{ t('set.online', { n: data.online_users.length }) }}</span>
         </div>
-        <ul v-if="data.tree">
+        <ul v-if="data.tree" role="list">
           <ChannelTreeNode
             :node="data.tree"
             :current-id="data.current_channel_id"
             :default-id="data.settings.default_channel_id"
             :busy="busy"
             @move="(id: string) => apply(joinChannel(id), t(data?.settings.follow === 'off' ? 'set.moving' : 'set.movingFollow'))"
-            @set-default="(id: string) => locked ? say(t('set.manageOnly')) : apply(saveChannelSettings({ default_channel_id: id }), t('set.defaultSaved'))"
+            @set-default="(id: string) => locked ? say(t('set.manageOnly'), false) : apply(saveChannelSettings({ default_channel_id: id }), t('set.defaultSaved'))"
           />
         </ul>
         <p v-else class="px-2 py-4 text-sm" :style="{ color: 'var(--c-text-muted)' }">{{ t('set.notConnected') }}</p>
