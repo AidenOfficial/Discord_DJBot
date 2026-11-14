@@ -63,7 +63,7 @@ def _requester_id():
 
 def _fetch_voice_perms(guild_id, user_id):
     """在 Discord 事件循环里算这个成员对每个语音 / 舞台频道的 (view_channel, connect)。
-    查不到成员 / 连接不可用 → None。"""
+    不是成员 → {}(照常缓存,免得每次轮询都打一次 REST);连接不可用 / 查询出错 → None。"""
     import discord
 
     h = web_context.hub()
@@ -80,6 +80,8 @@ def _fetch_voice_perms(guild_id, user_id):
             # 没开 members intent:只有在语音里的成员在缓存里
             try:
                 member = await guild.fetch_member(user_id)
+            except discord.NotFound:
+                return {}
             except discord.HTTPException:
                 return None
         out = {}

@@ -2,8 +2,8 @@
 
 取代旧 jQuery 界面的 /library/info、/library(action=query)和 /post(add_item_*)。
 
-曲库是所有服务器共用的。多服务器(有 Hub)时缓存下来的网址条目(type=url)会暴露别的服务器
-放过什么,只有 bot 主人能看到;本地文件 / 上传的照常对所有人可见。
+曲库是所有服务器共用的。多服务器(有 Hub)时缓存下来的网址 / 电台条目(type=url / radio,
+都是有人播过才进库的)会暴露别的服务器放过什么,只有 bot 主人能看到;本地文件 / 上传的照常对所有人可见。
 """
 
 import logging
@@ -50,7 +50,7 @@ def get_all_dirs():
 
 def visible_types():
     if web_context.hub() is not None and not web_context.is_owner():
-        return tuple(t for t in ITEM_TYPES if t != 'url')
+        return ('file',)
     return ITEM_TYPES
 
 

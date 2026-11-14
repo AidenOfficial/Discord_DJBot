@@ -169,12 +169,16 @@ def test_library_info_upload_flag_follows_permission(monkeypatch, upload_env):
 class LibraryVisibilityTest(unittest.TestCase):
     def setUp(self):
         from tests import test_web_library as lib
+        import media.radio  # noqa: F401  注册 radio 类型
         import media.url  # noqa: F401  注册 url 类型
         self.lib = lib
         lib.WebLibraryTestCase.setUp(self)
         var.music_db.insert_music({
             'id': 'u' * 32, 'type': 'url', 'title': 'other guild song', 'url': 'https://e.com/x',
             'path': '', 'duration': 60, 'thumbnail': '', 'ready': 'yes', 'tags': [], 'keywords': 'song'})
+        var.music_db.insert_music({
+            'id': 'r' * 32, 'type': 'radio', 'title': 'other guild station', 'url': 'https://e.com/radio',
+            'path': '', 'duration': 0, 'thumbnail': '', 'ready': 'yes', 'tags': [], 'keywords': 'station'})
         self.mp = pytest.MonkeyPatch()
 
     def tearDown(self):
@@ -189,14 +193,17 @@ class LibraryVisibilityTest(unittest.TestCase):
     def test_non_owner_sees_only_local_files(self):
         as_user(self.mp, discord_id='42')
         self.assertEqual(['a.mp3', 'b.mp3', 'c.mp3'], self.titles())
+        self.assertEqual(['a.mp3', 'b.mp3', 'c.mp3'], self.titles(type='file,url,radio'))
         self.assertEqual([], self.titles(type='url'))
+        self.assertEqual([], self.titles(type='radio'))  # 电台也是别的服务器播过才进库的
         self.assertEqual(['a.mp3', 'b.mp3', 'c.mp3'], self.titles(type='file,url'))
         self.assertEqual(400, self.client.post('/api/library/query', json={'type': 'evil'}).status_code)
 
     def test_owner_and_legacy_mode_see_everything(self):
         as_user(self.mp, discord_id=OWNER, owner=True)
         self.assertEqual(['other guild song'], self.titles(type='url'))
-        self.assertEqual(4, len(self.titles()))
+        self.assertEqual(['other guild station'], self.titles(type='radio'))
+        self.assertEqual(5, len(self.titles()))
         as_user(self.mp, discord_id=None, hub=None)
         self.assertEqual(['other guild song'], self.titles(type='url'))
 
@@ -322,6 +329,26 @@ class ChannelPermissionTest(unittest.TestCase):
         self.assertNotIn('2', ids)  # Games 分类里只剩看不见的 Squad
         self.client.get('/api/channels')
         self.assertEqual(1, self.guild.fetched)
+
+    def test_non_member_is_cached_and_sees_no_voice_channels(self):
+        import discord
+
+        class NotFound(discord.NotFound):
+            def __init__(self):
+                pass
+
+        async def not_a_member(uid):
+            self.guild.fetched += 1
+            raise NotFound()
+
+        self.guild.cached = False
+        self.guild.fetch_member = not_a_member
+        self.user()
+        for _ in range(3):
+            data = self.client.get('/api/channels').get_json()
+            self.assertEqual(['0'], self.ids(data['tree']))
+        self.assertEqual(1, self.guild.fetched)  # 轮询不会每次都打 REST
+        self.assertEqual(403, self.client.post('/api/channels/join', json={'channel_id': '6'}).status_code)
 
     def test_unknown_member_sees_no_voice_channels(self):
         self.user(discord_id=None)
