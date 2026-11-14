@@ -389,7 +389,7 @@ def test_error_responses_not_cached(env):
     import flask
 
     import web_security
-    resp = flask.Response('x', status=404, headers={'Cache-Control': 'max-age=5'})
+    resp = flask.Response('x', status=404, headers={'Cache-Control': 'max-age=5'}, mimetype='application/json')
     assert web_security.apply_security_headers(resp).headers['Cache-Control'] == 'max-age=5'
 
 

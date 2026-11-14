@@ -89,6 +89,14 @@ def apply_security_headers(response):
     if response.status_code >= 400:
         # 401 / 403 里有登录地址、错误详情:别让 Cloudflare / 浏览器缓存
         headers.setdefault('Cache-Control', 'no-store')
+    if response.mimetype == 'text/html':
+        # Cloudflare 的 Rocket Loader 等会改写 HTML:把 <script> 换成它自己的加载器(主题预加载不再阻塞渲染、
+        # 模块入口由它重新执行),还往错误页里塞 CSP 不允许的内联脚本。no-transform 让边缘原样转发。
+        cc = headers.get('Cache-Control')
+        if not cc:
+            headers['Cache-Control'] = 'no-transform'
+        elif 'no-transform' not in cc:
+            headers['Cache-Control'] = cc + ', no-transform'
     return response
 
 

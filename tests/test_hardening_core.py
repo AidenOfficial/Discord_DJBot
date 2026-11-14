@@ -357,3 +357,12 @@ def test_unhashed_assets_are_revalidated(interface):
     assert interface._HASHED_ASSET.search('LibraryPage-DFSKy9t_.js')
     assert interface._HASHED_ASSET.search('index-CiqVPKEr.css')
     assert not interface._HASHED_ASSET.search('theme-init.js')
+
+
+def test_html_responses_forbid_edge_rewriting(interface, config):
+    # Cloudflare Rocket Loader 改写 <script>:HTML 一律带 no-transform,JSON 不受影响
+    client = interface.web.test_client()
+    rv = client.get('/no-such-page')
+    assert 'no-transform' in rv.headers['Cache-Control'] and 'no-store' in rv.headers['Cache-Control']
+    rv = client.get('/api/no-such-thing')
+    assert 'no-transform' not in rv.headers.get('Cache-Control', '')
