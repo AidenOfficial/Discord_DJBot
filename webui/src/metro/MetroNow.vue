@@ -240,7 +240,13 @@ let rubber = 0
 let lastInputAt = 0
 let pendingIdle = false
 let continuous = false
+/** 最后一次输入的方向(+1 往后 / -1 往前):惯性和落位都按它走。
+ *  不能用"目标 - 当前位置"的正负:一口气冲过头时位置在目标外面,那个差是反的,会被带回去 */
+let inputDir = 0
+/** 快拨的记录(只记同一方向的:一掉头就清空) */
 const notches: number[] = []
+/** 触控板甩出去最多这么远(可视宽度的比例) */
+const FLING_MAX = 0.6
 const recent: { t: number, d: number }[] = []
 
 function maxScroll(el: HTMLElement) {
@@ -263,18 +269,29 @@ function segments(el: HTMLElement) {
   const base = el.scrollLeft
   const pts = [0, max]
   for (const n of el.querySelectorAll<HTMLElement>('.g, .now-grid > *, .q-list > *, .q-more > *')) {
-    pts.push(clamp(Math.round(base + n.getBoundingClientRect().left - box.left - pad), 0, max))
+    // 进场动画还在跑时,磁贴带着 translate:量的是它最终的位置
+    const moving = parseFloat(getComputedStyle(n).translate) || 0
+    pts.push(clamp(Math.round(base + n.getBoundingClientRect().left - moving - box.left - pad), 0, max))
   }
   pts.sort((a, b) => a - b)
-  return pts.filter((p, i) => i === 0 || p - pts[i - 1] > 12)
+  const out = pts.filter((p, i) => i === 0 || p - pts[i - 1] > 12)
+  // 两头一定是落点:最后一列离末端很近时,留下的是末端而不是那一列
+  out[out.length - 1] = max
+  return out
 }
-function nearestSegment(el: HTMLElement, at: number) {
-  let best = clamp(at, 0, maxScroll(el))
-  let dist = Infinity
-  for (const p of segments(el)) {
-    if (Math.abs(p - at) < dist) { dist = Math.abs(p - at); best = p }
-  }
-  return best
+/** 落到哪一段:顺着运动方向走过两段之间的 25% 就落到前面那段,否则退回刚离开的那段 */
+function landingSegment(el: HTMLElement, at: number, dir: number) {
+  const pts = segments(el)
+  const p = clamp(at, 0, maxScroll(el))
+  let i = pts.findIndex((x) => x >= p)
+  if (i < 0) return pts[pts.length - 1]
+  if (pts[i] === p || i === 0) return pts[i]
+  const a = pts[i - 1]
+  const b = pts[i]
+  const frac = (p - a) / (b - a)
+  if (dir > 0) return frac > 0.25 ? b : a
+  if (dir < 0) return frac < 0.75 ? a : b
+  return frac < 0.5 ? a : b
 }
 /** 从 from 往 dir 方向走 count 段,每段至少 STEP_MIN 个可视宽度 */
 function nextSegment(el: HTMLElement, from: number, dir: number, count: number) {
@@ -314,19 +331,25 @@ function stopPhysics() {
 function onIdle(el: HTMLElement) {
   const max = maxScroll(el)
   const now = performance.now()
-  let projected = phys.target
+  const from = clamp(phys.target, 0, max)
+  let projected = from
   if (continuous) {
-    const span = recent.filter((r) => now - r.t < 120)
-    const vel = span.length > 1 ? span.reduce((s, r) => s + r.d, 0) / Math.max(16, now - span[0].t) * 1000 : 0
-    projected = clamp(phys.target, 0, max) + vel * FLING_S
+    // 从最后一次输入往前量 100ms(停手判定本身就要 110ms,从"现在"量的话窗口里只剩一个事件,速度恒为 0)
+    const span = recent.filter((r) => lastInputAt - r.t < 100)
+    const sum = span.reduce((s, r) => s + r.d, 0)
+    const lasted = span.length ? lastInputAt - span[0].t : 0
+    // 太短、太轻的一下(两三个事件、二三十像素)不算甩:两个点测出来的速度噪声很大,会把轻轻一碰放大成一整段
+    const vel = Math.abs(sum) >= 30 && lasted >= 30 ? sum / lasted * 1000 : 0
+    // 方向看这段时间的净位移:抬手那一下反向的小抖动不算掉头
+    if (sum) inputDir = Math.sign(sum)
+    const throwMax = el.clientWidth * FLING_MAX
+    projected = from + (Math.sign(vel) === inputDir ? clamp(vel * FLING_S, -throwMax, throwMax) : 0)
   } else {
     const quick = notches.filter((t) => now - t < 320).length
-    if (quick >= 3) {
-      const dir = Math.sign(phys.target - phys.x) || Math.sign(phys.v)
-      if (dir) projected = nextSegment(el, phys.target, dir, Math.min(2, quick - 2))
-    }
+    if (quick >= 3 && inputDir) projected = nextSegment(el, from, inputDir, Math.min(2, quick - 2))
   }
-  phys.target = nearestSegment(el, clamp(projected, 0, max))
+  // 已经在这一头了(一口气拨到底):落在这一头,越界的部分由弹簧拉回来,就是在底部回弹
+  phys.target = landingSegment(el, clamp(projected, 0, max), inputDir)
   notches.length = 0
   recent.length = 0
 }
@@ -335,10 +358,12 @@ function tick(now: number) {
   const el = scroller.value
   if (!el) { stopPhysics(); return }
   // 期间有人拖了滚动条、按了方向键、用触屏滑了:让给他们
-  if (written >= 0 && Math.abs(el.scrollLeft - written) > 2) { stopPhysics(); return }
+  if (written >= 0 && Math.abs(el.scrollLeft - written) > 1) { stopPhysics(); return }
   const dt = Math.min(physLast ? (now - physLast) / 1000 : 1 / 60, 0.05)
   physLast = now
   if (pendingIdle && now - lastInputAt >= IDLE_MS) { pendingIdle = false; onIdle(el) }
+  // 停手以后目标一定在范围里:内容中途变窄(换歌、队列刷新)时落到新的末端,由弹簧弹回去,不会一下跳回
+  if (!pendingIdle) phys.target = clamp(phys.target, 0, maxScroll(el))
   // 半隐式欧拉,4ms 一小步,刚度再大也稳
   const steps = Math.ceil(dt / 0.004)
   const h = dt / steps
@@ -365,13 +390,20 @@ function startPhysics(el: HTMLElement) {
 function onWheel(e: WheelEvent) {
   const el = scroller.value
   if (!el || e.ctrlKey) return
+  // 只接管横向全景(overflow-x: auto);竖向版面里进场动画临时撑出的一点横向溢出不算
+  if (getComputedStyle(el).overflowX !== 'auto') return
+  // 弹出的面板(加入歌单)在顶层显示,但在 DOM 里仍是滚动层的后代:它里面的滚轮不归全景
+  if (e.target instanceof Element && e.target.closest('[popover], dialog')) return
   const max = maxScroll(el)
   if (max < 2) return
   const horizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY)
   const raw = horizontal ? e.deltaX : e.deltaY
   const d = raw * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientWidth : 1)
   if (!d) return
-  if (!horizontal) {
+  const now = performance.now()
+  // 正在滑:这一串滚轮锁在全景上(和浏览器的滚动锁定一样),滑到指针下面的歌词不抢后面的格
+  const latched = physRaf !== 0 && now - lastInputAt < 250
+  if (!horizontal && !latched) {
     // 指针下面有能竖着滚的区域(歌词)且还没到头:让它自己滚
     for (let n = e.target instanceof Element ? e.target : null; n && n !== el.parentElement; n = n.parentElement) {
       if (n.scrollHeight - n.clientHeight < 2) continue
@@ -381,9 +413,11 @@ function onWheel(e: WheelEvent) {
     }
   }
   const dir = Math.sign(d)
-  const now = performance.now()
-  // 鼠标滚轮:一格一段(行模式,或者一下就是 50px 以上的整数);触控板:连续的小增量
-  const notch = !horizontal && (e.deltaMode !== 0 || (Math.abs(raw) >= 50 && Number.isInteger(raw)))
+  // 鼠标滚轮:一格一段(行模式,或者一下就是 50px 以上的整数);触控板:连续的小增量。
+  // 页面缩放不是 100% 时一格是 100/缩放 这样的小数:换回设备像素再看是不是整数。Shift+滚轮也是一格一格的
+  const devPx = Math.abs(raw) * (window.devicePixelRatio || 1)
+  const wholeStep = Math.abs(raw) >= 50 && (Number.isInteger(raw) || Math.abs(devPx - Math.round(devPx)) < 0.02)
+  const notch = (!horizontal || e.shiftKey) && (e.deltaMode !== 0 || wholeStep)
     && !(continuous && now - lastInputAt < 200)
 
   if (reduceMotion?.matches) {
@@ -391,6 +425,8 @@ function onWheel(e: WheelEvent) {
     const to = notch ? nextSegment(el, from, dir, 1) : clamp(from + d, 0, max)
     if (to === from) return
     e.preventDefault()
+    // 落位点有不少是列的开头,不是吸附点:开着吸附会被拉回组的开头,滚轮就卡在原地
+    el.classList.add('mn-scroll--gliding')
     el.scrollTo({ left: to, behavior: 'instant' as ScrollBehavior })
     return
   }
@@ -399,24 +435,49 @@ function onWheel(e: WheelEvent) {
   startPhysics(el)
   lastInputAt = now
   pendingIdle = true
+  const wasContinuous = continuous
   continuous = !notch
+  // 掉头:前一个方向攒下的快拨不能算成新方向的惯性
+  const reversed = inputDir !== 0 && dir !== inputDir
+  inputDir = dir
+  // 只清滚轮的快拨记录;触控板的方向本来就按最近 100ms 的净位移算,抬手时一下反向抖动不该把它清掉
+  if (reversed) notches.length = 0
   if (notch) {
     notches.push(now)
-    const from = clamp(phys.target, 0, max)
+    // 掉头时从眼下看到的位置往回走一段,不从还没走到的目标算
+    // (否则给的速度和"目标 - 位置"反向:先往回顿一下,再往前冲)
+    const from = clamp(reversed ? phys.x : phys.target, 0, max)
     const to = nextSegment(el, from, dir, 1)
-    if (to === from) phys.v += dir * BOUNCE_V
+    // 到头还在拨:往外给一个速度,弹簧拉回来就是回弹(这里也只给一次的量,不越叠越大)
+    if (to === from) phys.v = dir * Math.max(dir * phys.v, BOUNCE_V)
     // 一拨就走:按这一段的距离给初速度 ω·Δ。临界阻尼弹簧从这个速度出发正好是指数式的 ease-out
-    // (起步最快、越靠近越慢),连拨几格速度叠加,越滚越快
-    else phys.v += SPRING_W * (to - from)
+    // (起步最快、越靠近越慢)。连拨时速度只提到这个量,不叠加:叠加会让一口气拨到底时冲出去老远
+    else phys.v = dir * Math.max(dir * phys.v, SPRING_W * Math.abs(to - from))
     phys.target = to
   } else {
     recent.push({ t: now, d })
     if (recent.length > 12) recent.shift()
     const outside = phys.target < 0 || phys.target > max
     phys.target += d * (outside ? EDGE_RESIST : 1)
-    // 触控板要跟手:位置直接跟过去一半,不全等弹簧
-    phys.x += (phys.target - phys.x) * 0.5
+    // 触控板要跟手:位置直接跟过去一半,不全等弹簧。刚从一格一段切过来时目标还在老远,
+    // 跟一半就是一帧瞬移:这一下交给弹簧
+    if (wasContinuous) phys.x += (phys.target - phys.x) * 0.5
   }
+}
+
+/** Activity 改了大小:吸附已经关了,浏览器不会替我们重新对齐,手动落到最近的一列 */
+function realign() {
+  const el = scroller.value
+  if (!el || physRaf || !el.classList.contains('mn-scroll--gliding')) return
+  if (getComputedStyle(el).overflowX !== 'auto') return
+  const to = landingSegment(el, el.scrollLeft, 0)
+  if (Math.abs(to - el.scrollLeft) >= 1) el.scrollTo({ left: to, behavior: 'instant' as ScrollBehavior })
+}
+
+/** 方向键 / 翻页键 / Home / End:交给浏览器的平滑滚动 */
+const SCROLL_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '])
+function onKeyDown(e: KeyboardEvent) {
+  if (physRaf && SCROLL_KEYS.has(e.key)) stopPhysics()
 }
 
 /** 触屏用户:交还给原生滑动和吸附 */
@@ -464,7 +525,7 @@ onMounted(() => {
   if (typeof ResizeObserver === 'undefined') return
   resizeObs = new ResizeObserver((entries) => {
     for (const e of entries) {
-      if (e.target === root.value) measurePhone(e.contentRect.width)
+      if (e.target === root.value) { measurePhone(e.contentRect.width); realign() }
       else syncPos()
     }
   })
@@ -500,6 +561,7 @@ onBeforeUnmount(() => {
       tabindex="0"
       @wheel="onWheel"
       @touchstart.passive="onTouchStart"
+      @keydown="onKeyDown"
       @scroll.passive="syncPos"
     >
       <div class="mn-groups">
