@@ -14,6 +14,8 @@ export const zhCN: Record<Key, Msg> = {
   'common.addToQueue': '加入队列',
   'common.remove': '移除',
   'common.cancel': '取消',
+  'common.confirm': '确定',
+  'common.delete': '删除',
   'common.all': '全部',
   'common.songs': '{n} 首',
   'common.plays': '播放 {n} 次',

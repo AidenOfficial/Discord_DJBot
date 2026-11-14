@@ -14,6 +14,8 @@ export const ja: Record<Key, Msg> = {
   'common.addToQueue': 'キューに追加',
   'common.remove': '削除',
   'common.cancel': 'キャンセル',
+  'common.confirm': 'OK',
+  'common.delete': '削除',
   'common.all': 'すべて',
   'common.songs': '{n} 曲',
   'common.plays': '{n} 回再生',

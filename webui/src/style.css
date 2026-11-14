@@ -3,7 +3,16 @@
 /* ==========================================================================
    Design tokens - the single source of truth for color, radius and shadow.
    Light is the default; dark kicks in via prefers-color-scheme and can be
-   forced either way with [data-theme] set on <html> by the theme toggle.
+   forced either way with [data-theme] set on <html> by the theme toggle
+   (and before mount by public/assets/theme-init.js).
+
+   Contrast (WCAG 2.x, measured against --c-bg, --c-surface, --c-surface-2
+   and --c-accent-soft over bg/surface):
+   - text, text-muted, text-faint, accent, danger, success, warning are all
+     >= 4.5:1 in both schemes, so any of them can color small text.
+   - --c-decor is NOT text: only decorative or disabled glyphs (drag grip,
+     chevrons, placeholder art). It is ~2.5:1 on purpose.
+   - --c-accent is >= 3:1 everywhere, so it doubles as the focus ring color.
    ========================================================================== */
 
 :root {
@@ -15,18 +24,21 @@
 
   /* text */
   --c-text: #17171c;
-  --c-text-muted: #6d6d7a;
-  --c-text-faint: #a3a3b0;
+  --c-text-muted: #5b5b66;
+  --c-text-faint: #656571;
+  --c-decor: #a3a3b0;
 
   /* brand */
-  --c-accent: #6d5ef2;
-  --c-accent-strong: #5646e8;
+  --c-accent: #5848ec;
+  --c-accent-strong: #4838d8;
   --c-accent-soft: rgba(109, 94, 242, 0.12);
   --c-on-accent: #ffffff;
 
   /* feedback */
-  --c-danger: #dc3d51;
-  --c-success: #1fa060;
+  --c-danger: #c0283f;
+  --c-on-danger: #ffffff;
+  --c-success: #127a48;
+  --c-warning: #9a5700;
 
   /* shape */
   --radius-s: 8px;
@@ -48,12 +60,19 @@
 
     --c-text: #ececf1;
     --c-text-muted: #9a9aa8;
-    --c-text-faint: #5c5c6a;
+    --c-text-faint: #878791;
+    --c-decor: #5c5c6a;
 
-    --c-accent: #8577ff;
+    --c-accent: #8d80ff;
     --c-accent-strong: #9a8eff;
     --c-accent-soft: rgba(133, 119, 255, 0.16);
     --c-on-accent: #14121f;
+
+    --c-danger: #ef6b7a;
+
+    --c-on-danger: #14121f;
+    --c-success: #2aa568;
+    --c-warning: #d48806;
 
     --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.35);
     --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.45), 0 12px 32px rgba(0, 0, 0, 0.45);
@@ -68,29 +87,43 @@
   --c-surface-2: #eeeef2;
   --c-border: #e2e2e8;
   --c-text: #17171c;
-  --c-text-muted: #6d6d7a;
-  --c-text-faint: #a3a3b0;
-  --c-accent: #6d5ef2;
-  --c-accent-strong: #5646e8;
+  --c-text-muted: #5b5b66;
+  --c-text-faint: #656571;
+  --c-decor: #a3a3b0;
+  --c-accent: #5848ec;
+  --c-accent-strong: #4838d8;
   --c-accent-soft: rgba(109, 94, 242, 0.12);
   --c-on-accent: #ffffff;
+  --c-danger: #c0283f;
+  --c-on-danger: #ffffff;
+  --c-success: #127a48;
+  --c-warning: #9a5700;
   --shadow-1: 0 1px 2px rgba(20, 20, 30, 0.06), 0 2px 8px rgba(20, 20, 30, 0.06);
   --shadow-2: 0 4px 12px rgba(20, 20, 30, 0.10), 0 12px 32px rgba(20, 20, 30, 0.10);
   color-scheme: light;
 }
 
-:root[data-theme="dark"] {
+/* data-theme-default="dark": set by theme-init.js inside the Discord Activity on
+   WebKit (iOS), where prefers-color-scheme reports the phone setting rather than
+   Discord's theme. It only applies while nothing is pinned. */
+:root[data-theme="dark"],
+:root[data-theme-default="dark"]:not([data-theme]) {
   --c-bg: #101014;
   --c-surface: #17171d;
   --c-surface-2: #1f1f27;
   --c-border: #2a2a34;
   --c-text: #ececf1;
   --c-text-muted: #9a9aa8;
-  --c-text-faint: #5c5c6a;
-  --c-accent: #8577ff;
+  --c-text-faint: #878791;
+  --c-decor: #5c5c6a;
+  --c-accent: #8d80ff;
   --c-accent-strong: #9a8eff;
   --c-accent-soft: rgba(133, 119, 255, 0.16);
   --c-on-accent: #14121f;
+  --c-danger: #ef6b7a;
+  --c-on-danger: #14121f;
+  --c-success: #2aa568;
+  --c-warning: #d48806;
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.35);
   --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.45), 0 12px 32px rgba(0, 0, 0, 0.45);
   color-scheme: dark;
@@ -105,12 +138,15 @@
   --color-ink: var(--c-text);
   --color-muted: var(--c-text-muted);
   --color-faint: var(--c-text-faint);
+  --color-decor: var(--c-decor);
   --color-accent: var(--c-accent);
   --color-accent-strong: var(--c-accent-strong);
   --color-accent-soft: var(--c-accent-soft);
   --color-on-accent: var(--c-on-accent);
   --color-danger: var(--c-danger);
+  --color-on-danger: var(--c-on-danger);
   --color-success: var(--c-success);
+  --color-warning: var(--c-warning);
   --radius-s: var(--radius-s);
   --radius-m: var(--radius-m);
   --radius-l: var(--radius-l);
@@ -138,5 +174,98 @@ html.embedded body {
     var(--discord-safe-area-inset-bottom, 0px)
     var(--discord-safe-area-inset-left, 0px);
   box-sizing: border-box;
+}
+
+/* 真正滚动的是视口,视口只读根元素的 overscroll-behavior(不像 overflow 会从 body 传过去) */
+html.embedded {
+  overscroll-behavior: none;
+}
+
+/* ==========================================================================
+   Global accessibility layer. Everything below is deliberately NOT inside a
+   @layer: unlayered rules beat Tailwind's layered utilities (outline-none,
+   text-xs, animate-pulse ...) regardless of specificity, while :where() keeps
+   specificity at the pseudo-class alone so a component's own scoped
+   :focus-visible style still wins when it needs a different ring.
+   ========================================================================== */
+
+/* Focus ring: --c-accent is >= 3:1 against every surface in both schemes. */
+:where(a[href], button, input, select, textarea, summary, [role="slider"], [role="button"],
+  [role="tab"], [role="switch"], [role="option"], [tabindex], [contenteditable]):focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+/* iOS Safari / WKWebView zooms the page when a focused field is under 16px. Only
+   on touch-first devices, so desktop keeps the compact text-xs / text-sm look. */
+@media (pointer: coarse) {
+  :where(input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"],
+    [type="button"], [type="submit"], [type="reset"]), select, textarea) {
+    font-size: max(1rem, 1em);
+  }
+}
+
+/* Screen-reader-only text. Tailwind's `sr-only` is fine for static text; use
+   `visually-hidden` for anything focusable (skip links): it reappears on focus. */
+.visually-hidden:where(:not(:focus-within, :active)) {
+  position: absolute !important;
+  clip-path: inset(50%) !important;
+  overflow: hidden !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  white-space: nowrap !important;
+}
+
+/* Native modal <dialog> (ConfirmDialog.vue and any later one): keep scroll
+   gestures over the backdrop or inside the dialog from scrolling the page. */
+dialog:modal {
   overscroll-behavior: contain;
+}
+
+dialog::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+  background: rgba(10, 10, 16, 0.5);
+}
+
+/* Reduced motion: drop the indefinite pulse (final state = fully opaque) and slow
+   the spinner so it still reads as "loading". Color transitions stay. Prefer
+   `motion-safe:animate-*` in templates; this catches any plain usage. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse,
+  .animate-ping,
+  .animate-bounce {
+    animation: none;
+  }
+
+  .animate-spin {
+    animation-duration: 3s;
+  }
+}
+
+/* Windows High Contrast / forced colors: backgrounds and box-shadows are
+   replaced or dropped, so selection drawn with them disappears. Mark the
+   selected/pressed/current item with a system-colored outline instead. This
+   needs the component to expose the state with aria-current / aria-pressed /
+   aria-selected / aria-checked. */
+@media (forced-colors: active) {
+  :where([aria-current]:not([aria-current="false"]), [aria-pressed="true"],
+    [aria-selected="true"], [aria-checked="true"]) {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+
+  /* Re-declared after the selection rule so a focused selected item shows the focus ring. */
+  :where(a[href], button, input, select, textarea, summary, [role="slider"], [role="button"],
+    [role="tab"], [role="switch"], [role="option"], [tabindex], [contenteditable]):focus-visible {
+    outline: 2px solid CanvasText;
+    outline-offset: 2px;
+  }
+
+  dialog {
+    border: 1px solid CanvasText;
+  }
 }

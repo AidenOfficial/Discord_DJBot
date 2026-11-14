@@ -16,6 +16,8 @@ export const en = {
   'common.addToQueue': 'Add to queue',
   'common.remove': 'Remove',
   'common.cancel': 'Cancel',
+  'common.confirm': 'Confirm',
+  'common.delete': 'Delete',
   'common.all': 'All',
   'common.songs': { one: '{n} song', other: '{n} songs' },
   'common.plays': { one: '{n} play', other: '{n} plays' },
