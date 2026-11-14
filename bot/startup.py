@@ -1,6 +1,7 @@
 # coding=utf-8
 import argparse
 import configparser
+import datetime
 import logging
 import logging.handlers
 import os
@@ -40,22 +41,62 @@ class AccessLog:
         finally:
             # REMOTE_ADDR 是 ReverseProxied 换过的真实访问者 IP(它在 web.wsgi_app 里,比这一层先跑完)
             path = environ.get('SCRIPT_NAME', '') + environ.get('PATH_INFO', '')
-            self.logger.info('%s "%s %s" %s', environ.get('REMOTE_ADDR', '-'),
-                             environ.get('REQUEST_METHOD', '-'), path, seen.get('status', '-'))
+            self.logger.info('%s "%s %s" %s', _log_field(environ.get('REMOTE_ADDR', '-'), 64),
+                             _log_field(environ.get('REQUEST_METHOD', '-'), 16), _log_field(path, 512),
+                             seen.get('status', '-'))
+
+
+def _log_field(value, limit):
+    # 路径和 IP 头是访问者给的:转义换行 / 控制字符,免得伪造出多行日志
+    text = str(value).encode('unicode_escape').decode('ascii')
+    return text if len(text) <= limit else text[:limit] + '...'
+
+
+# 上传按 32 MiB 分片(web_upload),别的请求体都是小 JSON
+MAX_REQUEST_BODY = 33 * 1024 * 1024
+SESSION_LIFETIME = datetime.timedelta(days=7)
 
 
 def web_server_options():
-    """waitress 的参数。请求体上限跟着上传上限走(waitress 默认 1 GiB,max_upload_file_size 默认 4G)。"""
-    max_upload = util.parse_file_size(var.config.get('webinterface', 'max_upload_file_size', fallback='4G'))
+    """waitress 的参数。"""
     return {
         'threads': 8,
         'ident': 'DJBot',
-        # 上传以外的请求体都很小;留 16 MiB 给 multipart 的头部和其它字段
-        'max_request_body_size': (max_upload or 4 * 1024 ** 3) + 16 * 1024 * 1024,
+        'max_request_body_size': MAX_REQUEST_BODY,
         # 反向代理的头由 interface.ReverseProxied 处理(is_web_proxified),waitress 自己不认
         'trusted_proxy': None,
         'clear_untrusted_proxy_headers': False,
     }
+
+
+def _public_url():
+    return (var.config.get('webinterface', 'public_url', fallback='') or '').strip()
+
+
+def configure_session(app):
+    app.config.update(
+        SESSION_COOKIE_SAMESITE='Lax',
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SECURE=_public_url().lower().startswith('https://'),
+        PERMANENT_SESSION_LIFETIME=SESSION_LIFETIME,
+    )
+
+
+def warn_insecure_web_config(logger):
+    auth_method = (var.config.get('webinterface', 'auth_method', fallback='') or '').strip().lower()
+    public_url = _public_url()
+    activity = var.config.getboolean('webinterface', 'activity_enabled', fallback=False)
+    from interface import AUTH_METHODS
+    if auth_method not in AUTH_METHODS:
+        logger.error("web: unknown [webinterface] auth_method %r (expected one of %s): "
+                     "every web request will be refused", auth_method, ', '.join(AUTH_METHODS))
+    if auth_method == 'none' and (public_url or activity):
+        logger.warning("web: !!! [webinterface] auth_method = none while the web interface is public "
+                       "(public_url / activity_enabled set): ANYONE who can reach it controls the bot. "
+                       "Use auth_method = discord !!!")
+    if public_url and not (var.config.get('discord', 'allowed_guilds', fallback='') or '').strip():
+        logger.warning("web: [discord] allowed_guilds is empty while public_url is set: anyone who invites "
+                       "the bot to a server of their own can log in to the web interface")
 
 
 def start_web_interface(addr, port):
@@ -74,6 +115,8 @@ def start_web_interface(addr, port):
 
     interface.init_proxy()
     interface.web.secret_key = util.resolve_flask_secret()
+    configure_session(interface.web)
+    warn_insecure_web_config(logging.getLogger('bot'))
     try:
         import waitress
     except ImportError:
