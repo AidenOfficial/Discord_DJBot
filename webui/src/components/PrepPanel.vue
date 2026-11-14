@@ -1,20 +1,22 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { formatBytes, type PrepStatus } from '../api'
+import { announce } from '../composables/useAnnounce'
 import { t } from '../i18n'
 
 // 当前曲还没出声时显示:在等什么(阶段)、已经等了多久、还要多久开始播放
 const props = defineProps<{ prep: PrepStatus; syncedAt: number }>()
 
-// 两次轮询之间本地推算:已等待秒数往上走,预计剩余往下走
+// 两次轮询之间本地推算:已等待秒数往上走,预计剩余往下走。
+// 不到 10 秒时显示一位小数,每 0.25 秒刷新;之后只显示整秒,每秒刷新一次就够了。
 const now = ref(performance.now())
-let raf = 0
-function frame() {
+let timer: ReturnType<typeof setTimeout> | undefined
+function refresh() {
   now.value = performance.now()
-  raf = requestAnimationFrame(frame)
+  timer = setTimeout(refresh, elapsed.value < 10 ? 250 : 1000)
 }
-onMounted(() => (raf = requestAnimationFrame(frame)))
-onBeforeUnmount(() => cancelAnimationFrame(raf))
+onMounted(refresh)
+onBeforeUnmount(() => clearTimeout(timer))
 const sinceSync = computed(() => Math.max(0, (now.value - props.syncedAt) / 1000))
 
 const elapsed = computed(() => props.prep.elapsed + sinceSync.value)
@@ -35,6 +37,8 @@ const stepIndex = computed(() => {
     default: return 3
   }
 })
+// 只播报阶段变化;秒数和速度一直在变,放进 live region 会被不停地念
+watch(stepIndex, (i) => announce(t(STEPS[i]!.label)))
 
 // 缓冲进度:边下边播时只要攒够 target_secs 就开播,否则要等整个文件
 const bufferPct = computed(() => {
@@ -59,20 +63,19 @@ const etaText = computed(() => {
 </script>
 
 <template>
-  <div class="w-full max-w-xl rounded-2xl p-4" :style="{ background: 'var(--c-surface)', boxShadow: 'var(--shadow-1)' }"
-       role="status" aria-live="polite">
+  <div class="w-full max-w-xl rounded-2xl p-4" :style="{ background: 'var(--c-surface)', boxShadow: 'var(--shadow-1)' }">
     <div class="flex items-baseline justify-between gap-2">
       <p class="text-sm font-semibold" :style="{ color: 'var(--c-accent)' }">{{ etaText }}</p>
       <p class="text-xs tabular-nums" :style="{ color: 'var(--c-text-muted)' }">{{ t('prep.waiting', { t: secs(elapsed) }) }}</p>
     </div>
 
     <!-- 阶段 -->
-    <ol class="mt-3 grid grid-cols-4 gap-1.5">
-      <li v-for="(step, i) in STEPS" :key="step.key" class="min-w-0">
+    <ol class="mt-3 grid grid-cols-4 gap-1.5" role="list">
+      <li v-for="(step, i) in STEPS" :key="step.key" class="min-w-0" :aria-current="i === stepIndex ? 'step' : undefined">
         <div class="h-1.5 overflow-hidden rounded-full" :style="{ background: 'var(--c-surface-2)' }">
           <div
             class="h-full rounded-full"
-            :class="i === stepIndex && i < 3 ? 'animate-pulse' : ''"
+            :class="i === stepIndex && i < 3 ? 'motion-safe:animate-pulse' : ''"
             :style="{
               width: i < stepIndex ? '100%' : i === stepIndex ? (i === 2 ? `${Math.max(bufferPct, 6)}%` : '100%') : '0%',
               background: i < stepIndex ? 'var(--c-accent)' : 'var(--c-accent)',

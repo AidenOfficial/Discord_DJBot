@@ -1,19 +1,21 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { fetchLyrics, postLyricsOffset, type CurrentItem, type Lyrics } from '../api'
+import { useStatus } from '../composables/useStatus'
+import { getItem, setItem } from '../storage'
 import { t } from '../i18n'
 
-const props = defineProps<{ current: CurrentItem; playhead: number; canSeek: boolean }>()
+// previewAt:拖动进度条时预览的位置。平时直接读共享的播放头,
+// 这样 prop 不会每 0.25 秒变一次,只有换行时才重渲染。
+const props = defineProps<{ current: CurrentItem; previewAt?: number | null; canSeek: boolean }>()
 const emit = defineEmits<{ seek: [position: number] }>()
+const { clock } = useStatus()
 
 const STORAGE_KEY = 'lyricsHidden'
-function readHidden() {
-  try { return localStorage.getItem(STORAGE_KEY) === '1' } catch { return false }
-}
-const hidden = ref(readHidden())
+const hidden = ref(getItem(STORAGE_KEY) === '1')
 function toggle() {
   hidden.value = !hidden.value
-  try { localStorage.setItem(STORAGE_KEY, hidden.value ? '1' : '0') } catch { /* 隐私模式 */ }
+  setItem(STORAGE_KEY, hidden.value ? '1' : '0')
 }
 
 // ---- 取歌词:状态轮询里的 current.lyrics 变成 found / instrumental 才去取 ----
@@ -43,11 +45,13 @@ const lines = computed(() => lyrics.value?.lines ?? [])
 const offset = ref(0)
 watch(() => lyrics.value?.offset, (o) => { offset.value = o ?? 0 }, { immediate: true })
 const follows = computed(() => lines.value.length > 0 && (!!lyrics.value?.aligned || offset.value !== (lyrics.value?.offset ?? 0)))
+// 能点歌词跳转时每行是一个按钮(键盘也能用);否则就是普通文字
+const seekable = computed(() => props.canSeek && follows.value)
 
 // 当前行:歌词时间 <= 播放位置 - 偏移 的最后一行(提前 0.2 秒亮起,跟听感一致)
 const active = computed(() => {
   if (!follows.value) return -1
-  const at = props.playhead - offset.value + 0.2
+  const at = (props.previewAt ?? clock.playhead) - offset.value + 0.2
   const ls = lines.value
   let lo = 0
   let hi = ls.length - 1
@@ -79,7 +83,7 @@ watch(active, () => {
 watch([hidden, lyrics], () => nextTick(() => scrollToActive(false)))
 
 function onLineClick(time: number) {
-  if (!props.canSeek || !follows.value) return
+  if (!seekable.value) return
   emit('seek', Math.max(0, time + offset.value))
 }
 
@@ -126,18 +130,18 @@ const state = computed(() => props.current.lyrics ?? 'off')
     <div class="mb-2 flex items-center gap-2 text-xs" :style="{ color: 'var(--c-text-muted)' }">
       <button
         type="button"
-        class="flex cursor-pointer items-center gap-1.5 rounded-md border-0 bg-transparent px-1 py-0.5 text-xs font-medium"
+        class="lyr-toggle flex min-h-6 cursor-pointer items-center gap-1.5 rounded-md border-0 bg-transparent px-1 py-0.5 text-xs font-medium"
         :style="{ color: 'var(--c-text-muted)' }"
         :aria-expanded="!hidden"
         @click="toggle"
       >
-        <Icon icon="chevron-down" class="transition-transform" :class="hidden ? '-rotate-90' : ''" />
+        <Icon icon="chevron-down" class="transition-transform motion-reduce:transition-none" :class="hidden ? '-rotate-90' : ''" />
         {{ t('lyrics.title') }}
       </button>
       <span v-if="sourceLabel && !hidden" class="truncate" :style="{ color: 'var(--c-text-faint)' }">
         {{ t('lyrics.source', { source: sourceLabel }) }}
       </span>
-      <div v-if="!hidden && lines.length" class="ml-auto flex items-center gap-1">
+      <div v-if="!hidden && lines.length" class="ml-auto flex items-center gap-1 pointer-coarse:gap-2">
         <span v-if="offset !== 0" class="tabular-nums" :style="{ color: 'var(--c-text-faint)' }">{{ offsetLabel }}</span>
         <button type="button" class="lyr-btn" :title="t('lyrics.earlier')" :aria-label="t('lyrics.earlier')" @click="nudge(-0.5)">−0.5s</button>
         <button type="button" class="lyr-btn" :title="t('lyrics.later')" :aria-label="t('lyrics.later')" @click="nudge(0.5)">+0.5s</button>
@@ -156,32 +160,41 @@ const state = computed(() => props.current.lyrics ?? 'off')
         <p v-if="lines.length && !follows" class="mb-2 text-[11px]" :style="{ color: 'var(--c-text-faint)' }">
           {{ t('lyrics.unaligned') }}
         </p>
-        <div
-          ref="box"
-          class="lyr-box relative h-72 overflow-y-auto px-2 text-center"
-          :class="{ 'lyr-box--follow': follows }"
-          tabindex="0"
-          @wheel.passive="onUserScroll"
-          @touchmove.passive="onUserScroll"
-          @keydown="onUserScroll"
-        >
-          <div v-if="follows" class="h-28" aria-hidden="true" />
-          <template v-if="lines.length">
-            <p
-              v-for="(line, i) in lines"
-              :key="i"
-              :data-line="i"
-              class="lyr-line"
-              :class="{ 'lyr-line--active': i === active, 'lyr-line--past': follows && i < active, 'cursor-pointer': canSeek && follows }"
-              @click="onLineClick(line[0])"
-            >
-              <span v-if="line[1]">{{ line[1] }}</span>
-              <span v-else aria-hidden="true">♪</span>
-              <span v-if="line[2]" class="lyr-trans">{{ line[2] }}</span>
-            </p>
-          </template>
-          <p v-else class="whitespace-pre-line text-sm leading-7" :style="{ color: 'var(--c-text)' }">{{ lyrics.plain }}</p>
-          <div v-if="follows" class="h-28" aria-hidden="true" />
+        <!-- 渐变遮罩会把滚动框自己的焦点框也盖掉:焦点框画在外层 .lyr-wrap 上 -->
+        <div class="lyr-wrap">
+          <div
+            ref="box"
+            class="lyr-box relative h-72 overflow-y-auto px-2 text-center"
+            :class="{ 'lyr-box--follow': follows }"
+            :tabindex="seekable ? undefined : 0"
+            @wheel.passive="onUserScroll"
+            @touchmove.passive="onUserScroll"
+            @keydown="onUserScroll"
+          >
+            <div v-if="follows" class="h-28" aria-hidden="true" />
+            <template v-if="lines.length">
+              <p
+                v-for="(line, i) in lines"
+                :key="i"
+                :data-line="i"
+                class="lyr-line"
+                :class="{ 'lyr-line--active': i === active, 'lyr-line--past': follows && i < active }"
+              >
+                <button v-if="seekable" type="button" class="lyr-seek" @click="onLineClick(line[0])">
+                  <span v-if="line[1]">{{ line[1] }}</span>
+                  <span v-else aria-hidden="true">♪</span>
+                  <span v-if="line[2]" class="lyr-trans">{{ line[2] }}</span>
+                </button>
+                <template v-else>
+                  <span v-if="line[1]">{{ line[1] }}</span>
+                  <span v-else aria-hidden="true">♪</span>
+                  <span v-if="line[2]" class="lyr-trans">{{ line[2] }}</span>
+                </template>
+              </p>
+            </template>
+            <p v-else class="whitespace-pre-line text-sm leading-7" :style="{ color: 'var(--c-text)' }">{{ lyrics.plain }}</p>
+            <div v-if="follows" class="h-28" aria-hidden="true" />
+          </div>
         </div>
       </template>
     </template>
@@ -197,6 +210,9 @@ const state = computed(() => props.current.lyrics ?? 'off')
   color: var(--c-text-faint);
 }
 .lyr-btn {
+  position: relative;
+  min-block-size: 24px;
+  min-inline-size: 24px;
   cursor: pointer;
   border: 0;
   border-radius: var(--radius-s);
@@ -207,12 +223,32 @@ const state = computed(() => props.current.lyrics ?? 'off')
   font-variant-numeric: tabular-nums;
 }
 .lyr-btn:hover { color: var(--c-text); }
-.lyr-btn:focus-visible, .lyr-box:focus-visible { outline: 2px solid var(--c-accent); outline-offset: 2px; }
+/* 触屏:按钮外观不变,用伪元素把点击区域上下各扩 10px 到约 44px(左右不扩,避免互相重叠) */
+@media (pointer: coarse) {
+  .lyr-btn::after, .lyr-toggle::after {
+    content: '';
+    position: absolute;
+    inset: -10px 0;
+  }
+  .lyr-toggle { position: relative; }
+}
+.lyr-wrap { border-radius: var(--radius-m); }
+.lyr-wrap:has(> .lyr-box:focus-visible) { outline: 2px solid var(--c-accent); outline-offset: 2px; }
+/* 不支持 :has() 时退回内描边:两端会被淡出,但中间那段看得见 */
+@supports not selector(:has(*)) {
+  .lyr-box:focus-visible { outline: 2px solid var(--c-accent); outline-offset: -2px; }
+}
 .lyr-box {
   scrollbar-width: none;
+  overscroll-behavior: contain;
   border-radius: var(--radius-m);
+  /* 聚焦的歌词按钮滚进来时别停在两端的淡出带里 */
+  scroll-padding-block: 18%;
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 18%, #000 82%, transparent 100%);
   mask-image: linear-gradient(to bottom, transparent 0, #000 18%, #000 82%, transparent 100%);
+}
+@supports selector(:has(*)) {
+  .lyr-box:focus-visible { outline: none; }
 }
 .lyr-box::-webkit-scrollbar { display: none; }
 .lyr-line {
@@ -232,7 +268,22 @@ const state = computed(() => props.current.lyrics ?? 'off')
   font-weight: 600;
   transform: scale(1.04);
 }
-.lyr-box--follow .lyr-line:hover { opacity: 1; }
+.lyr-box--follow .lyr-line:hover, .lyr-box--follow .lyr-line:has(> .lyr-seek:focus-visible) { opacity: 1; }
+/* 整行按钮:去掉按钮外观,样式和普通歌词行一样 */
+.lyr-seek {
+  display: block;
+  inline-size: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+.lyr-seek:focus-visible { outline-offset: -2px; }
 .lyr-trans {
   display: block;
   font-size: 0.8rem;

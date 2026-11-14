@@ -8,6 +8,7 @@ import FavButton from './FavButton.vue'
 import PrepPanel from './PrepPanel.vue'
 import LyricsPanel from './LyricsPanel.vue'
 import { formatTime, useStatus } from '../composables/useStatus'
+import { announce } from '../composables/useAnnounce'
 import { modeLabel, t, typeLabel } from '../i18n'
 
 const { status, error, clock, syncedAt, applyStatus } = useStatus()
@@ -63,22 +64,52 @@ function onPointerCancel() {
   dragAt.value = null
 }
 
+function clampSeek(seconds: number) {
+  return Math.min(Math.max(0, duration.value - 1), Math.max(0, seconds))
+}
+
+// 键盘和读屏手势都只更新 dragAt,停下来 0.4 秒再真正跳转(每次跳转都要重启 ffmpeg)
 let keyTimer: ReturnType<typeof setTimeout> | undefined
-function onKey(e: KeyboardEvent) {
-  if (!canSeek.value) return
-  const step = { ArrowLeft: -5, ArrowRight: 5, PageDown: -30, PageUp: 30 }[e.key]
-  if (step === undefined && e.key !== 'Home') return
-  e.preventDefault()
-  const base = dragAt.value ?? clock.playhead
-  dragAt.value = e.key === 'Home' ? 0 : Math.min(duration.value - 1, Math.max(0, base + (step ?? 0)))
-  // 按住方向键时连续调整,停下来再真正跳转(每次跳转都要重启 ffmpeg)
+function scheduleSeek(target: number) {
+  dragAt.value = target
   clearTimeout(keyTimer)
   keyTimer = setTimeout(() => dragAt.value !== null && seek(dragAt.value), 400)
 }
 
+function onKey(e: KeyboardEvent) {
+  if (!canSeek.value) return
+  const step = { ArrowLeft: -5, ArrowDown: -5, ArrowRight: 5, ArrowUp: 5, PageDown: -30, PageUp: 30 }[e.key]
+  let target: number
+  if (e.key === 'Home') target = 0
+  else if (e.key === 'End') target = duration.value - 1
+  else if (step !== undefined) target = (dragAt.value ?? clock.playhead) + step
+  else return
+  e.preventDefault()  // 自己按 5 / 30 秒一步,不用原生 range 的 1 秒
+  scheduleSeek(clampSeek(target))
+}
+
+// 原生 range 只负责键盘焦点和读屏(指针由外层 div 处理):聚焦期间它的值不再每秒跟着
+// 播放头变,否则读屏会每秒播报一次。读屏的增减手势按 ±5 秒算,以实际播放位置为基准。
+const seekFocused = ref(false)
+const frozenAt = ref(0)
+const sliderValue = computed(() =>
+  Math.round(dragAt.value ?? (seekFocused.value ? frozenAt.value : clock.playhead)))
+function onSeekFocus() {
+  frozenAt.value = clock.playhead
+  seekFocused.value = true
+}
+function onSeekInput(e: Event) {
+  const delta = Number((e.target as HTMLInputElement).value) - sliderValue.value
+  if (!delta) return
+  const base = dragAt.value ?? clock.playhead
+  scheduleSeek(clampSeek(base + (Math.abs(delta) < 5 ? Math.sign(delta) * 5 : delta)))
+}
+
 async function seek(position: number) {
+  clearTimeout(keyTimer)
   seekingSince.value = performance.now()
   clock.playhead = position
+  frozenAt.value = position
   try {
     applyStatus(await postControls({ action: 'seek', position }))
   } catch {
@@ -121,16 +152,23 @@ const showAlbum = computed(() => {
 })
 
 const sourceLabel = computed(() => typeLabel(current.value?.type ?? ''))
+
+const notInVoice = computed(() => !!status.value && !status.value.voice_channel)
+watch(notInVoice, (now) => {
+  if (now) announce(t('np.notInVoice'))
+})
+watch(error, (e) => {
+  if (e) announce(t('np.unreachable', { error: e }), { assertive: true })
+})
 </script>
 
 <template>
   <section class="mx-auto flex w-full max-w-3xl flex-col items-center gap-6 px-4 py-8 sm:py-14">
     <!-- bot 不在语音频道里:播放进度照走,但没人听得到 -->
     <p
-      v-if="status && !status.voice_channel"
+      v-if="notInVoice"
       class="w-full rounded-xl px-3 py-2 text-sm"
       :style="{ background: 'var(--c-accent-soft)', color: 'var(--c-text)' }"
-      role="status"
     ><Icon icon="triangle-exclamation" class="mr-1.5" :style="{ color: 'var(--c-accent)' }" />{{ t('np.notInVoice') }}</p>
     <!-- artwork -->
     <div
@@ -150,6 +188,7 @@ const sourceLabel = computed(() => typeLabel(current.value?.type ?? ''))
         <AuthImg
           :src="artSrc"
           alt=""
+          fetchpriority="high"
           class="relative h-full w-full transition-[filter] duration-500"
           :class="[artKind === 'video' ? 'object-contain' : 'object-cover', artKind ? '' : 'scale-110 blur-xl']"
         />
@@ -168,12 +207,13 @@ const sourceLabel = computed(() => typeLabel(current.value?.type ?? ''))
       <template v-if="current">
         <!-- 还在读取信息时标题就是链接本身:先显示占位,链接用小字 -->
         <template v-if="titlePending">
-          <h1 class="max-w-full truncate text-xl font-semibold sm:text-2xl" :style="{ color: 'var(--c-text-muted)' }">
+          <h1 class="max-w-full text-xl font-semibold text-balance sm:text-2xl" :style="{ color: 'var(--c-text-muted)' }">
             {{ t('np.loadingTitle') }}
           </h1>
           <p class="max-w-full truncate text-xs" :style="{ color: 'var(--c-text-faint)' }">{{ current.title }}</p>
         </template>
-        <h1 v-else class="max-w-full truncate text-xl font-semibold sm:text-2xl" :title="current.title">
+        <!-- 标题最多两行,不截成一行省略号:触屏上看不到 title 提示 -->
+        <h1 v-else class="line-clamp-2 max-w-full text-xl font-semibold text-balance [overflow-wrap:anywhere] sm:text-2xl" :title="current.title">
           {{ displayTitle || t('common.untitled') }}
         </h1>
         <p class="flex items-center gap-2 text-sm" :style="{ color: 'var(--c-text-muted)' }">
@@ -206,28 +246,22 @@ const sourceLabel = computed(() => typeLabel(current.value?.type ?? ''))
     <!-- 还没出声:显示在等什么、还要多久 -->
     <PrepPanel v-if="showPrep && status?.prep" :prep="status.prep" :synced-at="syncedAt" />
 
-    <!-- progress:点击或拖动跳转,键盘 ←/→ 5 秒、PgUp/PgDn 30 秒 -->
+    <!-- progress:点击或拖动跳转,键盘 ←/→/↑/↓ 5 秒、PgUp/PgDn 30 秒、Home/End -->
     <div v-else-if="current" class="w-full max-w-xl">
+      <!-- 外层 div 处理指针(iOS 上原生 range 只能按住滑块本身拖)。命中区域 24px,
+           触屏 44px,用负外边距抵消多出的高度,版面不变 -->
       <div
         ref="bar"
-        class="group relative flex h-5 w-full touch-none items-center outline-none"
-        :class="canSeek ? 'cursor-pointer' : ''"
-        :role="canSeek ? 'slider' : 'progressbar'"
-        :tabindex="canSeek ? 0 : -1"
-        :aria-label="t('np.seek')"
-        :aria-valuenow="Math.round(shownPlayhead)"
-        aria-valuemin="0"
-        :aria-valuemax="Math.round(duration)"
-        :aria-valuetext="formatTime(shownPlayhead)"
+        class="seek-bar group relative flex h-6 w-full items-center pointer-coarse:-my-2.5 pointer-coarse:h-11"
+        :class="canSeek ? 'cursor-pointer touch-pan-y' : ''"
         @pointerdown="onPointerDown"
         @pointermove="onPointerMove"
         @pointerup="onPointerUp"
         @pointercancel="onPointerCancel"
         @pointerleave="hoverAt = null"
-        @keydown="onKey"
       >
         <div
-          class="relative h-1.5 w-full overflow-hidden rounded-full transition-[height] duration-150 group-focus-visible:h-2"
+          class="relative h-1.5 w-full overflow-hidden rounded-full transition-[height] duration-150 group-has-[:focus-visible]:h-2"
           :class="canSeek ? 'group-hover:h-2' : ''"
           :style="{ background: 'var(--c-surface-2)' }"
         >
@@ -237,31 +271,57 @@ const sourceLabel = computed(() => typeLabel(current.value?.type ?? ''))
             class="absolute inset-y-0 left-0 rounded-full"
             :style="{ width: `${current.download.progress * 100}%`, background: 'var(--c-accent-soft)', transition: 'width 800ms linear' }"
           />
+          <!-- 播放头每 0.25 秒更新一次:用 transform 过渡补齐中间,不触发 layout -->
           <div
-            class="relative h-full rounded-full"
-            :style="{ width: `${shownProgress * 100}%`, background: 'var(--c-accent)', transition: dragAt === null ? 'width 200ms linear' : 'none' }"
+            class="absolute inset-0 rounded-full"
+            :style="{
+              transform: `translateX(${(shownProgress - 1) * 100}%)`,
+              background: 'var(--c-accent)',
+              transition: dragAt === null ? 'transform 250ms linear' : 'none',
+            }"
           />
           <!-- SponsorBlock 会跳过的片段 -->
           <div
             v-for="(b, i) in skipBlocks"
             :key="i"
             class="absolute inset-y-0"
-            :style="{ left: `${b.left}%`, width: `${b.width}%`, background: 'repeating-linear-gradient(135deg, var(--c-text-faint) 0 3px, transparent 3px 6px)', opacity: 0.7 }"
+            :style="{ left: `${b.left}%`, width: `${b.width}%`, background: 'repeating-linear-gradient(135deg, var(--c-decor) 0 3px, transparent 3px 6px)', opacity: 0.7 }"
             :title="t('np.skipped', { from: formatTime(b.start), to: formatTime(b.end) })"
           />
         </div>
-        <!-- 拖动手柄:悬停 / 拖动 / 键盘聚焦时出现 -->
+        <!-- 拖动手柄:悬停 / 拖动 / 键盘聚焦时出现;100cqi 是整条进度条的宽度 -->
         <div
           v-if="canSeek"
-          class="pointer-events-none absolute top-1/2 h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+          class="pointer-events-none absolute top-1/2 left-0 h-3.5 w-3.5 rounded-full opacity-0 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"
           :class="dragAt !== null ? 'opacity-100' : ''"
-          :style="{ left: `${shownProgress * 100}%`, background: 'var(--c-accent)', boxShadow: 'var(--shadow-2)' }"
+          :style="{
+            transform: `translate(calc(${shownProgress} * 100cqi - 50%), -50%)`,
+            transition: dragAt === null ? 'opacity 150ms, transform 250ms linear' : 'opacity 150ms',
+            background: 'var(--c-accent)',
+            boxShadow: 'var(--shadow-2)',
+          }"
+        />
+        <input
+          v-if="canSeek"
+          type="range"
+          class="seek-input"
+          min="0"
+          :max="Math.max(1, Math.round(duration))"
+          step="1"
+          :value="sliderValue"
+          :aria-label="t('np.seek')"
+          :aria-valuetext="t('np.seekValue', { at: formatTime(sliderValue), total: formatTime(duration) })"
+          @focus="onSeekFocus"
+          @blur="seekFocused = false"
+          @keydown="onKey"
+          @input="onSeekInput"
         />
         <!-- 悬停 / 拖动时显示目标时间 -->
         <div
           v-if="canSeek && (dragAt ?? hoverAt) !== null"
           class="pointer-events-none absolute -top-6 -translate-x-1/2 rounded px-1.5 py-0.5 text-[11px] tabular-nums"
           :style="{ left: `${((dragAt ?? hoverAt)! / duration) * 100}%`, background: 'var(--c-surface-2)', color: 'var(--c-text)', boxShadow: 'var(--shadow-2)' }"
+          aria-hidden="true"
         >{{ formatTime((dragAt ?? hoverAt)!) }}</div>
       </div>
       <div class="mt-1.5 flex justify-between text-xs tabular-nums" :style="{ color: 'var(--c-text-muted)' }">
@@ -282,7 +342,7 @@ const sourceLabel = computed(() => typeLabel(current.value?.type ?? ''))
     <Controls />
 
     <!-- 歌词(lyrics_lookup 打开时才有) -->
-    <LyricsPanel v-if="current" :current="current" :playhead="shownPlayhead" :can-seek="canSeek" @seek="seek" />
+    <LyricsPanel v-if="current" :current="current" :preview-at="dragAt" :can-seek="canSeek" @seek="seek" />
 
     <!-- queue summary -->
     <p v-if="status && !status.empty" class="text-sm" :style="{ color: 'var(--c-text-muted)' }">
@@ -295,3 +355,27 @@ const sourceLabel = computed(() => typeLabel(current.value?.type ?? ''))
     </p>
   </section>
 </template>
+
+<style scoped>
+/* 进度条是尺寸容器:手柄用 100cqi(整条的宽度)换算位置 */
+.seek-bar { container-type: inline-size; }
+/* 透明的原生 range 盖满命中区域:只给键盘和读屏用,外观和指针交给上面几层 */
+.seek-input {
+  position: absolute;
+  inset: 0;
+  inline-size: 100%;
+  block-size: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 9999px;
+  appearance: none;
+  background: transparent;
+  pointer-events: none;
+}
+.seek-input::-webkit-slider-runnable-track { background: transparent; border: 0; }
+.seek-input::-webkit-slider-thumb { appearance: none; inline-size: 0; block-size: 0; border: 0; }
+.seek-input::-moz-range-track { background: transparent; border: 0; }
+.seek-input::-moz-range-thumb { inline-size: 0; block-size: 0; border: 0; background: transparent; }
+.seek-input:focus-visible { outline: 2px solid var(--c-accent); outline-offset: 2px; }
+</style>

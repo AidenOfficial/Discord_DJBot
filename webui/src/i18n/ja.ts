@@ -53,6 +53,7 @@ export const ja: Record<Key, Msg> = {
   'np.emptyHint': 'キューが空です。Discord の /play か検索ページから曲を追加してください。',
   'np.skipped': 'スキップ：{from}–{to}',
   'np.seek': '再生位置',
+  'np.seekValue': '{at}（全体 {total}）',
   'np.bgDownload': 'バックグラウンドでダウンロード中 · {pct}%',
   'np.bgDone': 'あと {eta}',
   'np.skipping': '音楽以外の {n} 区間をスキップ（SponsorBlock）',
