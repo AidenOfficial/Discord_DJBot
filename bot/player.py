@@ -234,7 +234,7 @@ class PlayerMixin(SessionQueue):
         self._quiet_relaunch = False
         if start_from == 0 and not quiet:
             try:
-                lyrics.ensure(music_wrapper.item(), urgent=True)  # 没打开 lyrics_lookup 时什么都不做
+                lyrics.ensure(music_wrapper.item(), urgent=True)  # 关掉了 lyrics_lookup 时什么都不做
             except Exception:
                 self.log.debug("bot: could not queue lyrics", exc_info=True)
 

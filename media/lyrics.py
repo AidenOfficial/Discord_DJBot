@@ -1,4 +1,4 @@
-"""歌词(默认关闭,[bot] lyrics_lookup = True 打开)。
+"""歌词(默认打开,[bot] lyrics_lookup = False 关掉)。
 
 来源(默认依次,[bot] lyrics_sources 可以改顺序):
   1. LRCLIB(lrclib.net):免费、不用 key,社区上传的 LRC。按歌名 + 歌手搜,再按时长挑。
@@ -47,7 +47,7 @@ _ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
 
 
 def enabled():
-    return var.config.getboolean('bot', 'lyrics_lookup', fallback=False) if var.config else False
+    return var.config.getboolean('bot', 'lyrics_lookup', fallback=True) if var.config else False
 
 
 # ---- 存储 -----------------------------------------------------------------------
