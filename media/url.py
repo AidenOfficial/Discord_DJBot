@@ -1,4 +1,5 @@
 import copy
+import gc
 import threading
 import logging
 import os
@@ -452,6 +453,10 @@ class URLItem(BaseItem):
                 self._enforce_cache_limit()
                 return True
             else:
+                if self._download_abort:
+                    # 中止时 yt-dlp 不关分片下载的输出文件(留在引用环里);Windows 上不回收就删不掉,
+                    # 而 .incomplete 标记照样删了,截断的文件下次会被当成下载完成
+                    gc.collect()
                 for f in glob.glob(base_path + "*"):
                     try:
                         os.remove(f)
@@ -544,7 +549,9 @@ class URLItem(BaseItem):
             elif time.time() > getattr(self, '_download_deadline', float('inf')):
                 self._download_abort = 'took longer than the download time limit'
             if getattr(self, '_download_abort', None):
-                raise youtube_dl.utils.DownloadError(self._download_abort)
+                # 不能抛 DownloadError:HLS/DASH 分片下载器把它当成"这个分片坏了",跳过后接着下一个分片,
+                # 整个 feed 照样一片片拉完。DownloadCancelled 是 yt-dlp 给钩子用来中止的,会一路抛出来
+                raise youtube_dl.utils.DownloadCancelled(self._download_abort)
         elif status == 'finished':
             self.progress = 1.0
 

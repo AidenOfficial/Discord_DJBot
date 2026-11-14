@@ -107,7 +107,7 @@ def test_progress_hook_aborts_when_downloaded_bytes_exceed_cap(config):
     item = make_item()
     item._download_cap = 1000
     item._ydl_progress_hook({'status': 'downloading', 'downloaded_bytes': 500})  # 没有 total 也照常
-    with pytest.raises(yt_dlp.utils.DownloadError):
+    with pytest.raises(yt_dlp.utils.DownloadCancelled):
         item._ydl_progress_hook({'status': 'downloading', 'downloaded_bytes': 1001})
 
 
@@ -115,7 +115,7 @@ def test_progress_hook_aborts_when_total_exceeds_cap(config):
     import yt_dlp
     item = make_item()
     item._download_cap = 1000
-    with pytest.raises(yt_dlp.utils.DownloadError):
+    with pytest.raises(yt_dlp.utils.DownloadCancelled):
         item._ydl_progress_hook({'status': 'downloading', 'downloaded_bytes': 10, 'total_bytes': 5000})
 
 
@@ -124,7 +124,7 @@ def test_progress_hook_aborts_after_wall_clock_limit(config):
     item = make_item()
     item._download_cap = 0
     item._download_deadline = 0  # 早就过了
-    with pytest.raises(yt_dlp.utils.DownloadError):
+    with pytest.raises(yt_dlp.utils.DownloadCancelled):
         item._ydl_progress_hook({'status': 'downloading', 'downloaded_bytes': 10})
 
 
@@ -259,11 +259,73 @@ def test_fetch_image_refuses_huge_dimensions(monkeypatch):
             artwork._fetch_image('https://img.example.com/bomb.png')
 
 
+def test_progress_hook_abort_is_not_a_download_error(config):
+    # 分片下载器吞掉 DownloadError(只当这个分片失败),中止必须用别的异常
+    import yt_dlp
+    item = make_item()
+    item._download_cap = 1000
+    with pytest.raises(Exception) as exc:
+        item._ydl_progress_hook({'status': 'downloading', 'downloaded_bytes': 1001})
+    assert not isinstance(exc.value, yt_dlp.utils.DownloadError)
+
+
+@pytest.fixture
+def hls_server():
+    """本机 HLS:40 个 64 KiB 分片,记下每个请求的路径。"""
+    import http.server
+    import threading
+    hits = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            hits.append(self.path)
+            if self.path.endswith('.m3u8'):
+                body = ('#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n'
+                        + ''.join('#EXTINF:10.0,\nseg%d.ts\n' % i for i in range(40))
+                        + '#EXT-X-ENDLIST\n').encode()
+                ctype = 'application/vnd.apple.mpegurl'
+            else:
+                body, ctype = b'\x47' * 65536, 'video/mp2t'
+            self.send_response(200)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield 'http://127.0.0.1:%d/a.m3u8' % server.server_address[1], hits
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_oversized_hls_download_stops_fetching_segments(config, monkeypatch, hls_server):
+    # 真的 yt-dlp:分片没有 Content-Length 总数,max_filesize 管不到,只能靠进度钩子
+    import media.url
+    from media.item import PreparationFailedError
+    url, hits = hls_server
+    config.set('bot', 'max_download_mb', '1')  # 40 x 64 KiB = 2.5 MiB
+    config.set('bot', 'download_attempts', '1')
+    monkeypatch.setattr(media.url.artwork, 'ensure', lambda *a, **k: None)
+    item = make_item(url)
+    with pytest.raises(PreparationFailedError):
+        item._download()
+    segments = [h for h in hits if h.endswith('.ts')]
+    assert len(segments) <= 18  # 1 MiB / 64 KiB = 16,再留点余量;以前 40 个全拉完
+    assert not [f for f in os.listdir(var.tmp_folder) if f.startswith(item.id)]
+    assert item.ready == 'failed'
+
+
 def test_quick_video_runs_on_bounded_pool(monkeypatch, config):
     import threading
     from media import artwork
     submitted = []
-    monkeypatch.setattr(artwork._thumb_pool, 'submit', lambda fn, *a: submitted.append((fn, a)))
+    monkeypatch.setattr(artwork._thumb_pool, 'submit', lambda key, fn, *a: submitted.append((fn, a)))
     monkeypatch.setattr(threading, 'Thread', mock.Mock(side_effect=AssertionError('no thread per item')))
     monkeypatch.setattr(artwork, 'has_hd', lambda _id: False)
     monkeypatch.setattr(artwork, '_queue', mock.Mock())
@@ -277,7 +339,22 @@ def test_quick_video_runs_on_bounded_pool(monkeypatch, config):
             artwork._quick.discard(item.id)
             artwork._queued.discard(item.id)
             artwork._infos.pop(item.id, None)
-    assert artwork._thumb_pool._max_workers == 2
+    assert artwork._thumb_pool._max == 2
+
+
+def test_thumb_pool_threads_do_not_block_exit():
+    # 排着几百个封面任务时停 bot,不能等它们全跑完进程才退
+    import threading
+    from media import artwork
+    seen = []
+    done = threading.Event()
+
+    def job():
+        seen.append(threading.current_thread().daemon)
+        done.set()
+    artwork._thumb_pool.submit('hardening-daemon-check', job)
+    assert done.wait(5)
+    assert seen == [True]
 
 
 # ---- media/radio.py -------------------------------------------------------------

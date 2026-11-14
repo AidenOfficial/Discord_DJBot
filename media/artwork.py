@@ -16,7 +16,6 @@
 """
 
 import base64
-import concurrent.futures
 import itertools
 import logging
 import os
@@ -30,6 +29,7 @@ from io import BytesIO
 from PIL import Image
 
 import variables as var
+from bot.executor import KeyedExecutor
 
 log = logging.getLogger("bot")
 
@@ -673,8 +673,9 @@ _infos = {}
 _lock = threading.Lock()
 _apply_lock = threading.Lock()
 _worker = None
-# 视频封面:每首歌一个线程的话,一次加整张歌单会同时开几百个连接
-_thumb_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix='Thumb')
+# 视频封面:每首歌一个线程的话,一次加整张歌单会同时开几百个连接。
+# 不用 ThreadPoolExecutor:它的线程不是 daemon,解释器退出前会把排队的几百个任务全跑完才退
+_thumb_pool = KeyedExecutor(max_workers=2, name='Thumb')
 
 
 def lookup_enabled():
@@ -725,8 +726,8 @@ def ensure(item, info=None, urgent=False):
         if not hd and item.type in URL_TYPES and (info or urgent) and item.id not in _quick:
             _quick.add(item.id)
             try:
-                _thumb_pool.submit(_quick_video, item, _infos.get(item.id))
-            except RuntimeError:  # 解释器正在退出
+                _thumb_pool.submit(item.id, _quick_video, item, _infos.get(item.id))
+            except RuntimeError:  # 开不了新线程
                 _quick.discard(item.id)
         if item.id in _active:
             return
