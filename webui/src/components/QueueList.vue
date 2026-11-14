@@ -143,7 +143,10 @@ async function onMove(index: number, dir: 'up' | 'down') {
     const row = listEl.value?.querySelector<HTMLElement>(`[data-key="${CSS.escape(rowKey)}"]`)
     const btn = row?.querySelector<HTMLButtonElement>(`[data-move="${dir}"]:not(:disabled)`)
       ?? row?.querySelector<HTMLButtonElement>('[data-move]:not(:disabled)')
-    if (btn && active !== btn) btn.focus()
+    if (!row || !btn) return
+    // 整行滚进视口(只 focus 按钮的话,行的其余部分可能还在视口外)
+    row.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    if (active !== btn) btn.focus({ preventScroll: true })
   }
   if (busy.value || to < 0 || to >= items.value.length) return
   const pending = moveItem(index, to)

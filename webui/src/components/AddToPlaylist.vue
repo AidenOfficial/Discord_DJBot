@@ -30,9 +30,9 @@ const trigger = ref<HTMLButtonElement | null>(null)
 const panel = ref<HTMLElement | null>(null)
 const nameInput = ref<HTMLInputElement | null>(null)
 const panelId = useId()
-// 默认在按钮右下方展开;放不下时改成向上 / 左对齐(见 place())
+// 默认在按钮右下方展开;放不下时向上翻 / 横向平移回视口内(见 place())
 const openUp = ref(false)
-const alignStart = ref(false)
+const shiftX = ref(0)
 let closeTimer: ReturnType<typeof setTimeout> | undefined
 
 // 有可见文字时就用可见文字当名字(Label in Name);只有图标时才用 aria-label
@@ -53,17 +53,23 @@ function close(focusTrigger = false) {
   if (closeCurrent === closeMe) closeCurrent = null
 }
 
-/** 面板在视口里放不下时翻到上方 / 改成左对齐(锚点定位在 Chromium 里还不能用) */
+/**
+ * 面板在视口里放不下时翻到上方,左右超出时平移回来(锚点定位在 Chromium 里还不能用)。
+ * 只换成左对齐不够:按钮在屏幕中间时左对齐会从右边超出去。
+ */
 function place() {
   openUp.value = false
-  alignStart.value = false
+  shiftX.value = 0
   void nextTick(() => {
     const el = panel.value
     const anchor = root.value
     if (!el || !anchor) return
     const r = el.getBoundingClientRect()
     const a = anchor.getBoundingClientRect()
-    if (r.left < 8) alignStart.value = true
+    const vw = document.documentElement.clientWidth
+    // 面板最宽 100vw - 2rem,所以移进一边后另一边不会再超出
+    if (r.left < 8) shiftX.value = 8 - r.left
+    else if (r.right > vw - 8) shiftX.value = vw - 8 - r.right
     if (r.bottom > window.innerHeight - 8 && a.top > window.innerHeight - a.bottom) openUp.value = true
   })
 }
@@ -176,9 +182,12 @@ onBeforeUnmount(() => {
       v-if="open"
       :id="panelId"
       ref="panel"
-      class="absolute z-30 w-56 max-w-[calc(100vw-2rem)] rounded-xl p-1.5 text-left text-sm"
-      :class="[openUp ? 'bottom-full mb-1' : 'top-full mt-1', alignStart ? 'left-0' : 'right-0']"
-      :style="{ background: 'var(--c-surface)', boxShadow: 'var(--shadow-2)', border: '1px solid var(--c-border)' }"
+      class="absolute right-0 z-30 w-56 max-w-[calc(100vw-2rem)] rounded-xl p-1.5 text-left text-sm"
+      :class="openUp ? 'bottom-full mb-1' : 'top-full mt-1'"
+      :style="{
+        background: 'var(--c-surface)', boxShadow: 'var(--shadow-2)', border: '1px solid var(--c-border)',
+        transform: shiftX ? `translateX(${shiftX}px)` : undefined,
+      }"
       @click.stop
     >
       <p class="px-2 pt-1 pb-1.5 text-[11px] font-semibold uppercase tracking-wider" :style="{ color: 'var(--c-text-faint)' }">
