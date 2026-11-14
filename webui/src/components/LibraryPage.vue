@@ -174,10 +174,11 @@ const TYPES = ['', 'file', 'url', 'radio'] as const
         @input="onInput"
       />
       <div class="flex flex-wrap items-center gap-2">
-        <div class="flex gap-1 rounded-full p-1" :style="{ background: 'var(--c-surface-2)' }">
+        <div role="group" :aria-label="t('lib.typeFilter')" class="flex gap-1 rounded-full p-1" :style="{ background: 'var(--c-surface-2)' }">
           <button
             v-for="k in TYPES"
             :key="k"
+            type="button"
             class="cursor-pointer rounded-full border-0 px-3 py-1 text-xs font-medium"
             :style="typeFilter === k
               ? { background: 'var(--c-accent)', color: 'var(--c-on-accent)' }
@@ -218,12 +219,14 @@ const TYPES = ['', 'file', 'url', 'radio'] as const
               <template v-else-if="u.phase === 'processing'">{{ t('lib.processing') }}</template>
             </span>
             <button v-if="u.phase === 'uploading'" class="shrink-0 cursor-pointer border-0 bg-transparent p-0 text-xs"
-                    :style="{ color: 'var(--c-text-faint)' }" :title="t('common.cancel')" :aria-label="t('common.cancel')"
-                    @click="u.ctrl.abort()"><Icon icon="xmark" /></button>
+                    :style="{ color: 'var(--c-text-faint)' }" :title="t('common.cancel')"
+                    :aria-label="t('common.itemAction', { action: t('common.cancel'), title: u.name })"
+                    @click="u.ctrl.abort()"><Icon icon="xmark" aria-hidden="true" /></button>
             <button v-if="u.phase === 'done' && u.itemId && !u.queued"
                     class="shrink-0 cursor-pointer rounded-md border-0 px-2 py-0.5 text-xs font-semibold"
                     :style="{ background: 'var(--c-accent)', color: 'var(--c-on-accent)' }"
-                    @click="queueUpload(u)"><Icon icon="plus" class="mr-1" />{{ t('common.queue') }}</button>
+                    :aria-label="t('common.itemAction', { action: t('common.queue'), title: u.name })"
+                    @click="queueUpload(u)"><Icon icon="plus" class="mr-1" aria-hidden="true" />{{ t('common.queue') }}</button>
             <span v-if="u.queued" class="shrink-0" :style="{ color: 'var(--c-accent)' }"><Icon icon="check" class="mr-1" />{{ t('common.queued') }}</span>
           </div>
           <progress v-if="u.phase === 'uploading'" class="bar mt-1.5" :value="u.sent" :max="Math.max(u.total, 1)"
@@ -265,22 +268,27 @@ const TYPES = ['', 'file', 'url', 'radio'] as const
             <Icon v-else-if="feedback[item.id] === 'err'" icon="xmark" />
             <template v-else>...</template>
           </span>
-          <FavButton :item-id="item.id" :source="{ source: 'library', item_id: item.id }" />
-          <AddToPlaylist :source="{ source: 'library', item_id: item.id }" />
+          <FavButton :item-id="item.id" :item-title="item.title || item.path" :source="{ source: 'library', item_id: item.id }" />
+          <AddToPlaylist :source="{ source: 'library', item_id: item.id }" :item-title="item.title || item.path" />
+          <!-- names start with the visible word and add the title (label in name) -->
           <button
+            type="button"
             class="cursor-pointer rounded-md border-0 px-2 py-1 text-xs aria-disabled:opacity-60"
             :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
             :title="t('common.playNext')"
+            :aria-label="t('common.itemAction', { action: t('lib.next'), title: item.title || item.path })"
             :aria-disabled="feedback[item.id] === '...' || undefined"
             @click="add(item, true)"
-          ><Icon icon="arrow-turn-up" class="mr-1" />{{ t('lib.next') }}</button>
+          ><Icon icon="arrow-turn-up" class="mr-1" aria-hidden="true" />{{ t('lib.next') }}</button>
           <button
+            type="button"
             class="cursor-pointer rounded-md border-0 px-2.5 py-1 text-xs font-semibold aria-disabled:opacity-60"
             :style="{ background: 'var(--c-accent)', color: 'var(--c-on-accent)' }"
             :title="t('common.addToQueue')"
+            :aria-label="t('common.itemAction', { action: t('common.queue'), title: item.title || item.path })"
             :aria-disabled="feedback[item.id] === '...' || undefined"
             @click="add(item, false)"
-          ><Icon icon="plus" class="mr-1" />{{ t('common.queue') }}</button>
+          ><Icon icon="plus" class="mr-1" aria-hidden="true" />{{ t('common.queue') }}</button>
         </div>
       </li>
     </ul>

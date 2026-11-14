@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 import { apiFetch, fetchLogs, logsDownloadUrl, setDebugLogging, type LogEntry, type LogLevel, type LogState } from '../api'
 import { embedded } from '../activity'
 import { locale, t } from '../i18n'
 import type { Key } from '../i18n/en'
 import { announce } from '../composables/useAnnounce'
+import { usePolling } from '../composables/usePolling'
 
 /** A log line plus its display time, formatted once when it arrives instead of on every render. */
 type Row = LogEntry & { stamp: string }
@@ -24,7 +25,6 @@ const scroller = ref<HTMLElement | null>(null)
 const expanded = ref<Record<number, boolean>>({})
 let lastSeq = 0
 let knownRun = '' // 当前 bot 进程的 run id;变了说明 bot 重启过,序号重新编过
-let timer: ReturnType<typeof setTimeout> | undefined
 let generation = 0 // 筛选条件一变就作废还在路上的请求
 
 const LEVELS: { key: LogLevel; label: Key }[] = [
@@ -84,10 +84,8 @@ async function poll() {
   }
 }
 
-function schedule() {
-  clearTimeout(timer)
-  if (live.value) timer = setTimeout(async () => { await poll(); schedule() }, POLL_MS)
-}
+// Live tail: pauses while the page is hidden and catches up at once when it is shown again
+const poller = usePolling(poll, POLL_MS)
 
 async function restart() {
   generation++
@@ -95,16 +93,16 @@ async function restart() {
   entries.value = []
   expanded.value = {}
   await poll()
-  schedule()
+  if (live.value) poller.start()
 }
 
 let debounce: ReturnType<typeof setTimeout> | undefined
 watch(level, restart)
 watch(query, () => { clearTimeout(debounce); debounce = setTimeout(restart, 350) })
-watch(live, (on) => (on ? poll().then(schedule) : clearTimeout(timer)))
+watch(live, (on) => (on ? poller.start(true) : poller.stop()))
 
 onMounted(restart)
-onBeforeUnmount(() => { clearTimeout(timer); clearTimeout(debounce); generation++ })
+onBeforeUnmount(() => { clearTimeout(debounce); generation++ })
 
 // The checkbox stays enabled while saving (disabling it would drop keyboard focus);
 // a toggle during a save is undone instead.
@@ -205,6 +203,18 @@ async function downloadEmbedded() {
   }
 }
 
+// Traceback disclosure: the name stays "traceback", aria-expanded carries the state
+const uid = useId()
+const traceId = (seq: number) => `${uid}-trace-${seq}`
+function toggleTrace(seq: number) {
+  expanded.value[seq] = !expanded.value[seq]
+}
+function onRowClick(seq: number) {
+  // Selecting part of the line to copy it is not a request to expand it
+  if (window.getSelection()?.toString()) return
+  toggleTrace(seq)
+}
+
 // Level picker: one tab stop, arrow keys move the selection (radio group pattern)
 function onLevelKey(e: KeyboardEvent) {
   const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1
@@ -298,20 +308,27 @@ function onLevelKey(e: KeyboardEvent) {
           {{ t('logs.restarted') }}
           <span class="h-px flex-1" :style="{ background: 'var(--c-border)' }" />
         </div>
+        <!-- A click anywhere on a row with a traceback toggles it (mouse shortcut); the
+             keyboard / screen-reader control is the disclosure button inside -->
         <div v-else class="flex gap-2 px-4 py-0.5"
              :class="row.e.exc ? 'cursor-pointer' : ''"
              :style="row.e.level === 'ERROR' || row.e.level === 'CRITICAL' ? { background: 'color-mix(in srgb, var(--c-danger) 8%, transparent)' }
                : row.e.level === 'WARNING' ? { background: 'color-mix(in srgb, var(--c-warning) 7%, transparent)' } : {}"
              :title="`${row.e.src} · ${row.e.thread}`"
-             @click="row.e.exc && (expanded[row.e.seq] = !expanded[row.e.seq])">
+             @click="row.e.exc && onRowClick(row.e.seq)">
           <span class="shrink-0 tabular-nums" :style="{ color: 'var(--c-text-faint)' }">{{ row.e.stamp }}</span>
           <span class="w-12 shrink-0 font-semibold" :style="{ color: LEVEL_COLOR[row.e.level] }">{{ LEVEL_SHORT[row.e.level] ?? row.e.level }}</span>
           <div class="min-w-0 flex-1">
             <p class="break-words whitespace-pre-wrap" :style="{ color: row.e.level === 'DEBUG' ? 'var(--c-text-muted)' : 'var(--c-text)' }">
-              <span v-if="row.e.name !== 'bot'" class="mr-1 rounded px-1" :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text-muted)' }">{{ row.e.name }}</span>{{ row.e.msg }}<span
-                v-if="row.e.exc && !expanded[row.e.seq]" class="ml-1 font-sans" :style="{ color: 'var(--c-accent)' }"><Icon icon="caret-right" class="mr-0.5" />{{ t('logs.showTrace') }}</span>
+              <span v-if="row.e.name !== 'bot'" class="mr-1 rounded px-1" :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text-muted)' }">{{ row.e.name }}</span>{{ row.e.msg }}<button
+                v-if="row.e.exc" type="button"
+                class="ml-1 cursor-pointer rounded border-0 bg-transparent p-0 font-sans"
+                :style="{ color: 'var(--c-accent)' }"
+                :aria-expanded="!!expanded[row.e.seq]"
+                :aria-controls="expanded[row.e.seq] ? traceId(row.e.seq) : undefined"
+                @click.stop="toggleTrace(row.e.seq)"><Icon :icon="expanded[row.e.seq] ? 'caret-down' : 'caret-right'" class="mr-0.5" aria-hidden="true" />{{ t('logs.showTrace') }}</button>
             </p>
-            <pre v-if="row.e.exc && expanded[row.e.seq]" class="mt-1 mb-1 overflow-x-auto rounded-lg p-2 text-[11px]"
+            <pre v-if="row.e.exc && expanded[row.e.seq]" :id="traceId(row.e.seq)" class="mt-1 mb-1 overflow-x-auto rounded-lg p-2 text-[11px]"
                  :style="{ background: 'var(--c-bg)', color: 'var(--c-danger)' }">{{ row.e.exc }}</pre>
           </div>
         </div>

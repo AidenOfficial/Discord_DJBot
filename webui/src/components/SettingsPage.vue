@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   fetchChannels, joinChannel, leaveChannel, saveChannelSettings, type ChannelNode, type ChannelOverview,
   type FollowMode,
@@ -13,6 +13,7 @@ import { selectedGuild } from '../guild'
 import { t, tParts } from '../i18n'
 import type { Key } from '../i18n/en'
 import { announce } from '../composables/useAnnounce'
+import { usePolling } from '../composables/usePolling'
 import { getItem, setItem } from '../storage'
 
 const { me } = useMe()
@@ -59,11 +60,11 @@ function dismissToast() {
   toast.value = ''
 }
 
-async function reload() {
+async function reload(background = false) {
   const guild = selectedGuild.value
   const seqAtStart = applySeq
   try {
-    const fresh = await fetchChannels()
+    const fresh = await fetchChannels({ background })
     if (guild !== selectedGuild.value) return  // 途中换了服务器
     if (inFlight.size || seqAtStart !== applySeq) return
     data.value = fresh
@@ -89,17 +90,16 @@ watch(selectedGuild, () => {
 /** 不能改这个服务器的频道设置(只能移动 / 离开) */
 const locked = computed(() => data.value?.can_edit_settings === false)
 
-// 频道里的人随时在变,定时刷新;只在"频道"子标签打开时轮询
-let timer: ReturnType<typeof setInterval> | undefined
+// 频道里的人随时在变,定时刷新;只在"频道"子标签打开、页面可见时轮询(低优先级)
+const poller = usePolling(() => reload(true), 4000)
 watch(activeTab, (next) => {
-  clearInterval(timer)
-  timer = undefined
   if (next === 'channel') {
     reload()
-    timer = setInterval(reload, 4000)
+    poller.start()
+  } else {
+    poller.stop()
   }
 }, { immediate: true })
-onBeforeUnmount(() => clearInterval(timer))
 
 function findPath(node: ChannelNode | null, id: string | null): string {
   if (!node || id === null) return ''

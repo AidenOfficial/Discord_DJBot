@@ -1,11 +1,11 @@
 <script lang="ts">
-// 所有实例共享:当前打开的面板。触发按钮用了 click.stop,别的实例的 document
-// 监听收不到这次点击,所以打开新的时由这里关掉旧的
+// 所有实例共享:当前打开的面板。同一时间只开一个:打开新的时由这里关掉旧的
+// (点击外部的捕获监听也会关,这里再兜一层,比如键盘或脚本打开时)
 let closeCurrent: (() => void) | null = null
 </script>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue'
 import { addToPlaylist, createPlaylist, type PlaylistSource } from '../api'
 import { useMe } from '../composables/useMe'
 import { useFavorites } from '../composables/useFavorites'
@@ -134,11 +134,13 @@ async function createAndAdd() {
   }
 }
 
-function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && open.value) {
-    e.preventDefault()
-    close(true)
-  }
+// 和 UserChip / GuildSwitcher 同一套:Esc 在哪儿按都关(焦点在面板里才交回按钮),
+// 点外面关,Tab 出去关。监听只在打开时挂(一页可能有上百个这个按钮)。
+function onKey(e: KeyboardEvent) {
+  // 输入法组字时的 Esc 先取消组字;Safari 报 keyCode 229
+  if (e.key !== 'Escape' || !open.value || e.defaultPrevented || e.isComposing || e.keyCode === 229) return
+  e.preventDefault()
+  close(!!root.value?.contains(document.activeElement))
 }
 
 function onFocusOut(e: FocusEvent) {
@@ -147,12 +149,22 @@ function onFocusOut(e: FocusEvent) {
   if (open.value && next && !root.value?.contains(next)) close()
 }
 
+// 捕获阶段:别的组件的 @click.stop 拦不住;点别的弹层的按钮时这个也会关
 function onDocClick(e: MouseEvent) {
   if (open.value && root.value && !root.value.contains(e.target as Node)) close()
 }
-onMounted(() => document.addEventListener('click', onDocClick))
+watch(open, (isOpen) => {
+  if (isOpen) {
+    document.addEventListener('click', onDocClick, true)
+    document.addEventListener('keydown', onKey)
+  } else {
+    document.removeEventListener('click', onDocClick, true)
+    document.removeEventListener('keydown', onKey)
+  }
+})
 onBeforeUnmount(() => {
-  document.removeEventListener('click', onDocClick)
+  document.removeEventListener('click', onDocClick, true)
+  document.removeEventListener('keydown', onKey)
   clearTimeout(closeTimer)
   if (closeCurrent === closeMe) closeCurrent = null
 })
@@ -163,7 +175,6 @@ onBeforeUnmount(() => {
     v-if="me?.can_have_playlists"
     ref="root"
     class="relative inline-flex"
-    @keydown="onKeydown"
     @focusout="onFocusOut"
   >
     <button
@@ -175,7 +186,7 @@ onBeforeUnmount(() => {
       :aria-label="ariaLabel"
       :aria-expanded="open"
       :aria-controls="open ? panelId : undefined"
-      @click.stop="toggle"
+      @click="toggle"
     ><Icon icon="list-ul" /><span v-if="props.label">{{ props.label }}</span></button>
 
     <div
@@ -188,7 +199,6 @@ onBeforeUnmount(() => {
         background: 'var(--c-surface)', boxShadow: 'var(--shadow-2)', border: '1px solid var(--c-border)',
         transform: shiftX ? `translateX(${shiftX}px)` : undefined,
       }"
-      @click.stop
     >
       <p class="px-2 pt-1 pb-1.5 text-[11px] font-semibold uppercase tracking-wider" :style="{ color: 'var(--c-text-faint)' }">
         {{ t('atp.header') }}

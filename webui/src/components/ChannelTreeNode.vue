@@ -48,23 +48,29 @@ const isCategory = computed(() => props.node.kind === 'category')
             :title="t(node.kind === 'stage' ? 'ch.stageTitle' : 'ch.noAccessTitle')"><Icon icon="lock" class="mr-0.5" />{{ t(node.kind === 'stage' ? 'ch.stage' : 'ch.noAccess') }}</span>
       <span v-if="people" class="text-[11px] tabular-nums" :style="{ color: 'var(--c-text-faint)' }">{{ people }} <Icon icon="user" class="text-[10px]" /></span>
 
-      <span v-if="canUse" class="ml-auto flex shrink-0 gap-1 opacity-70 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+      <!-- faded at rest only where hover exists (80% keeps the text readable), full while focused -->
+      <span v-if="canUse" class="ml-auto flex shrink-0 gap-1 transition-opacity [@media(hover:hover)]:opacity-80 group-hover:opacity-100 group-focus-within:opacity-100">
+        <!-- 名字带上频道名(以可见文字开头),读屏在一串"移到这里"里能分清是哪个频道 -->
         <button
           v-if="!isHere"
+          type="button"
           class="cursor-pointer rounded-md border-0 px-2 py-0.5 text-[11px]"
           :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
           :disabled="busy"
           :title="t('ch.moveTitle')"
+          :aria-label="t('common.itemAction', { action: t('ch.move'), title: node.name })"
           @click="emit('move', node.id)"
         >{{ t('ch.move') }}</button>
         <button
           v-if="!isDefault"
+          type="button"
           class="cursor-pointer rounded-md border-0 px-2 py-0.5 text-[11px]"
           :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
           :disabled="busy"
           :title="t('ch.setDefaultTitle')"
+          :aria-label="t('common.itemAction', { action: t('ch.setDefault'), title: node.name })"
           @click="emit('setDefault', node.id)"
-        ><Icon :icon="['far', 'star']" class="mr-0.5" />{{ t('ch.setDefault') }}</button>
+        ><Icon :icon="['far', 'star']" class="mr-0.5" aria-hidden="true" />{{ t('ch.setDefault') }}</button>
       </span>
 
       <!-- 频道里的人 -->

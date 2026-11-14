@@ -1,8 +1,21 @@
+<script lang="ts">
+import { ref } from 'vue'
+import type { QueueItem } from '../api'
+
+// 模块级:切到别的页面再回来时先显示上次的队列(和展开状态),后台再刷新,
+// 不会先空一下再弹出来。记下属于哪个服务器,换过服务器就不用。
+const items = ref<QueueItem[]>([])
+const expanded = ref<Set<string>>(new Set())
+const showAll = ref<Set<string>>(new Set())
+let cachedGuild: string | undefined
+</script>
+
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { fetchQueue, postQueue, type QueueAction, type QueueGroup, type QueueItem } from '../api'
+import { computed, nextTick, watch } from 'vue'
+import { fetchQueue, postQueue, type QueueAction, type QueueGroup } from '../api'
 import { formatTime, useStatus } from '../composables/useStatus'
 import { announce } from '../composables/useAnnounce'
+import { usePolling } from '../composables/usePolling'
 import AddToPlaylist from './AddToPlaylist.vue'
 import QueueRow from './QueueRow.vue'
 import { t } from '../i18n'
@@ -10,7 +23,6 @@ import { selectedGuild } from '../guild'
 
 const { status, applyStatus } = useStatus()
 
-const items = ref<QueueItem[]>([])
 const busy = ref(false)
 const dragFrom = ref<number | null>(null)
 const dragOver = ref<number | null>(null)
@@ -68,9 +80,7 @@ const rows = computed<Row[]>(() => {
   return out
 })
 
-// 展开状态按组 key 记(队列推进、下标变化时不会自己收起)
-const expanded = ref<Set<string>>(new Set())
-const showAll = ref<Set<string>>(new Set())
+// 展开状态按组 key 记(队列推进、下标变化时不会自己收起);见上面的模块级 expanded / showAll
 const PAGE = 100
 
 function toggled(set: Set<string>, key: string) {
@@ -159,32 +169,36 @@ function onDragEnd() {
   dragOver.value = null
 }
 
-async function reload() {
+async function reload(background = false) {
   const guild = selectedGuild.value
   try {
-    const q = await fetchQueue()
-    if (guild === selectedGuild.value) items.value = q.items  // 途中换了服务器:丢掉
+    const q = await fetchQueue({ background })
+    if (guild !== selectedGuild.value) return  // 途中换了服务器:丢掉
+    items.value = q.items
+    cachedGuild = guild
   } catch {
     /* the status poll already surfaces connectivity errors */
   }
 }
 
 // 换服务器时旧队列立刻清掉,展开状态也不带过去
-watch(selectedGuild, () => {
+function forgetQueue() {
   items.value = []
   expanded.value = new Set()
   showAll.value = new Set()
-})
+  cachedGuild = undefined
+}
+if (cachedGuild !== selectedGuild.value) forgetQueue()
+watch(selectedGuild, forgetQueue)
 
 // refresh whenever (guild, playlist version) changes (covers external edits too);
 // 不同服务器的队列版本号可能碰巧相同,所以服务器也算在内
-watch(() => [selectedGuild.value, status.value?.version] as const, reload, { immediate: true })
+// 两个源分开写:一个 getter 返回新数组的话,每次状态轮询都会被当成"变了"而重新拉队列
+watch([selectedGuild, () => status.value?.version], () => reload(), { immediate: true })
 
-let timer: ReturnType<typeof setInterval> | undefined
-onMounted(() => {
-  timer = setInterval(reload, 10000)
-})
-onBeforeUnmount(() => clearInterval(timer))
+// 兜底的定时刷新(下载进度等不改版本号的变化):有条目在后台下载时 3 秒一次,平时 10 秒;
+// 页面隐藏时暂停,低优先级
+usePolling(() => reload(true), () => (items.value.some((it) => it.download) ? 3000 : 10000)).start()
 
 async function act(body: QueueAction): Promise<boolean> {
   if (busy.value) return false

@@ -1,6 +1,10 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowReactive, watch,
+  type Component,
+} from 'vue'
 import NowPlaying from './components/NowPlaying.vue'
+import ViewLoadError, { RETRY_VIEW } from './components/ViewLoadError.vue'
 import QueueList from './components/QueueList.vue'
 import UserChip from './components/UserChip.vue'
 import GuildSwitcher from './components/GuildSwitcher.vue'
@@ -8,7 +12,7 @@ import ActivityMini from './components/ActivityMini.vue'
 import { embedded } from './activity'
 import { useGuilds } from './composables/useGuilds'
 import { getItem, removeItem, setItem } from './storage'
-import { LOCALES, locale, t } from './i18n'
+import { LOCALES, locale, setLocale, t, type Locale } from './i18n'
 import type { Key } from './i18n/en'
 
 // 首页之外的视图按需加载,首屏只需要 NowPlaying + QueueList
@@ -20,12 +24,36 @@ const loaders = {
   cache: () => import('./components/CachePage.vue'),
   settings: () => import('./components/SettingsPage.vue'),
 }
-const SearchPage = defineAsyncComponent(loaders.search)
-const LibraryPage = defineAsyncComponent(loaders.library)
-const PlaylistsPage = defineAsyncComponent(loaders.lists)
-const StatsPage = defineAsyncComponent(loaders.stats)
-const CachePage = defineAsyncComponent(loaders.cache)
-const SettingsPage = defineAsyncComponent(loaders.settings)
+type LazyView = keyof typeof loaders
+// 页面代码加载失败(断网、刚重新部署旧文件没了):先悄悄重试一次,还不行就显示
+// ViewLoadError,它的"重试"会重建这个组件,让浏览器再请求一次
+function lazyView(name: LazyView): Component {
+  return defineAsyncComponent({
+    loader: loaders[name],
+    errorComponent: ViewLoadError,
+    onError(_err, retry, fail, attempts) {
+      if (attempts <= 1) setTimeout(retry, 1000)
+      else fail()
+    },
+  })
+}
+const pages = shallowReactive({} as Record<LazyView, Component>)
+for (const name of Object.keys(loaders) as LazyView[]) pages[name] = lazyView(name)
+const mainEl = ref<HTMLElement | null>(null)
+provide(RETRY_VIEW, () => {
+  const v = view.value
+  if (v === 'home') return
+  // 点的"重试"按钮马上会被换掉:焦点先放到 <main> 开头,别掉回 body;
+  // 加载成功或再次失败,Tab 都从这里进入新内容。tabindex 只临时加,
+  // 平时点 main 的空白处不会把焦点落到 main 上
+  const el = mainEl.value
+  if (el) {
+    el.tabIndex = -1
+    el.addEventListener('blur', () => el.removeAttribute('tabindex'), { once: true })
+    el.focus()
+  }
+  pages[v] = lazyView(v)
+})
 
 type Theme = 'light' | 'dark' | 'auto'
 type Scheme = 'light' | 'dark'
@@ -99,6 +127,15 @@ function onStorage(e: StorageEvent) {
   applyTheme(e.newValue === 'light' || e.newValue === 'dark' ? e.newValue : 'auto', false)
 }
 window.addEventListener('storage', onStorage)
+
+// 语言包按需加载:加载失败时界面还是原来的语言,下拉框也要跟着退回去,
+// 不然显示的选项和界面语言对不上(下次再选会重新请求)
+async function onLangChange(e: Event) {
+  const sel = e.target as HTMLSelectElement
+  const want = sel.value as Locale
+  const ok = await setLocale(want)
+  if (!ok && sel.value === want) sel.value = locale.value
+}
 
 // ---- 页面标题 + 导航 ----
 watch([view, locale], () => {
@@ -205,7 +242,8 @@ onBeforeUnmount(() => {
         <div class="flex items-center gap-2">
           <UserChip />
           <select
-            v-model="locale"
+            :value="locale"
+            @change="onLangChange"
             class="h-9 cursor-pointer rounded-full border-0 px-2.5 text-xs"
             :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
             :title="t('lang.title')"
@@ -227,7 +265,7 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <main class="flex-1">
+    <main ref="mainEl" class="flex-1">
       <h1 v-if="NEEDS_HEADING.includes(view)" class="sr-only">{{ t(VIEW_LABEL[view]) }}</h1>
       <div v-if="noAccess" class="mx-auto mt-6 w-full max-w-3xl px-4">
         <div class="rounded-2xl p-5" :style="{ background: 'var(--c-surface)', boxShadow: 'var(--shadow-1)' }">
@@ -239,12 +277,7 @@ onBeforeUnmount(() => {
         <NowPlaying />
         <QueueList />
       </template>
-      <SearchPage v-else-if="view === 'search'" />
-      <LibraryPage v-else-if="view === 'library'" />
-      <PlaylistsPage v-else-if="view === 'lists'" />
-      <CachePage v-else-if="view === 'cache'" />
-      <SettingsPage v-else-if="view === 'settings'" />
-      <StatsPage v-else />
+      <component :is="pages[view]" v-else />
     </main>
   </div>
 </template>

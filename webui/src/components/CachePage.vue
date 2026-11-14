@@ -121,6 +121,10 @@ async function cleanup(mode: 'limit' | 'expired' | 'unpinned') {
   await reload()
 }
 
+// 每行按钮的名字带上标题,读屏在一串"删除"里能分清是哪一条
+const entryName = (e: CacheEntry) => e.title || e.url || t('cache.unknown', { id: e.id.slice(0, 8) })
+const named = (action: string, e: CacheEntry) => t('common.itemAction', { action, title: entryName(e) })
+
 const FILTERS = [
   { key: 'all', label: 'common.all' },
   { key: 'pinned', label: 'cache.fPinned' },
@@ -228,18 +232,18 @@ const FILTERS = [
           </p>
         </div>
         <div class="flex shrink-0 items-center gap-1">
-          <button class="cursor-pointer rounded-md border-0 px-2 py-1 text-xs"
+          <button type="button" class="cursor-pointer rounded-md border-0 px-2 py-1 text-xs"
                   :style="e.pinned ? { background: 'var(--c-accent)', color: 'var(--c-on-accent)' } : { background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
-                  :title="t(e.pinned ? 'cache.unpin' : 'cache.pin')" :aria-label="t('cache.pin')"
+                  :title="t(e.pinned ? 'cache.unpin' : 'cache.pin')" :aria-label="named(t('cache.pin'), e)"
                   :aria-pressed="e.pinned"
                   :disabled="rowBusy[e.id]" @click="togglePin(e)"><Icon icon="thumbtack" aria-hidden="true" /></button>
           <button class="cursor-pointer rounded-md border-0 px-2 py-1 text-xs"
                   :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
-                  :title="t('cache.copy')" :aria-label="t('cache.copy')"
+                  :title="t('cache.copy')" :aria-label="named(t('cache.copy'), e)"
                   :disabled="rowBusy[e.id] || !e.complete" @click="saveToLibrary(e)"><Icon icon="floppy-disk" aria-hidden="true" /></button>
           <button class="cursor-pointer rounded-md border-0 px-2 py-1 text-xs"
                   :style="{ background: 'var(--c-surface-2)', color: 'var(--c-danger)' }"
-                  :title="t('cache.delete')" :aria-label="t('cache.delete')" :disabled="rowBusy[e.id] || e.downloading" @click="remove(e)"><Icon icon="trash-can" aria-hidden="true" /></button>
+                  :title="t('cache.delete')" :aria-label="named(t('cache.delete'), e)" :disabled="rowBusy[e.id] || e.downloading" @click="remove(e)"><Icon icon="trash-can" aria-hidden="true" /></button>
         </div>
       </li>
     </ul>
