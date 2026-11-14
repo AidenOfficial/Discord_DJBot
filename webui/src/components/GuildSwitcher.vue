@@ -19,10 +19,10 @@ function initial(name: string) {
   return (name || '?').trim().charAt(0).toUpperCase()
 }
 
-function close(returnFocus = false) {
+function close(returnFocus = false, fromPointer = false) {
   if (!open.value) return
-  // 先把焦点还给按钮再移除列表,否则焦点会掉到 <body>
-  if (returnFocus) trigger.value?.focus()
+  // 先把焦点还给按钮再移除列表,否则焦点会掉到 <body>。鼠标点选后还回去的焦点不画焦点框
+  if (returnFocus) trigger.value?.focus({ focusVisible: !fromPointer })
   open.value = false
 }
 
@@ -32,9 +32,10 @@ function toggle() {
   else open.value = true
 }
 
-function pick(id: string) {
+function pick(id: string, e: MouseEvent) {
   selectGuild(id)
-  close(true)
+  // detail 为 0 是键盘(Enter / 空格)触发的 click
+  close(true, e.detail > 0)
 }
 
 // 捕获阶段监听:别的组件的 @click.stop 拦不住它
@@ -102,7 +103,7 @@ onBeforeUnmount(() => {
           :style="g.id === currentGuild.id
             ? { background: 'var(--c-accent-soft)', color: 'var(--c-text)' }
             : { background: 'transparent', color: 'var(--c-text)' }"
-          @click="pick(g.id)"
+          @click="pick(g.id, $event)"
         >
           <img v-if="g.icon" :src="g.icon" alt="" class="h-7 w-7 shrink-0 rounded-full" />
           <span

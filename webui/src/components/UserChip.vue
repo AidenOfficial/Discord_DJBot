@@ -253,6 +253,7 @@ const SOURCE_LABEL: Record<string, Key> = {
         :style="signedIn
           ? { background: 'var(--c-accent)', color: 'var(--c-on-accent)' }
           : { background: 'var(--c-border)', color: 'var(--c-text-muted)' }"
+        aria-hidden="true"
       >{{ signedIn ? initial : '?' }}</span>
       <span class="truncate">{{ signedIn ? me?.display_name : t('me.guest') }}</span>
     </button>
