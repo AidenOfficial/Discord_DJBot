@@ -33,6 +33,9 @@ export const zhCN: Record<Key, Msg> = {
   'theme.auto': '跟随系统',
   'theme.light': '浅色',
   'theme.dark': '深色',
+  'theme.autoAs': '跟随系统（{mode}）',
+  'theme.toDark': '切换到深色主题',
+  'theme.toLight': '切换到浅色主题',
   'lang.title': '语言',
 
   'type.url': '在线',
