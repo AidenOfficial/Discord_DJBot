@@ -344,7 +344,8 @@ def _csrf_protect():
         return None
     if not (request.path.startswith('/api/') or request.path.startswith('/auth/')):
         return None
-    if request.headers.get('Authorization', '').lower().startswith('bearer '):
+    # 只有 requires_auth 真的会用这个 Bearer 时才跳过:Activity 没开(或 /auth/ 下)它会退回去用 Cookie
+    if request.path.startswith('/api/') and web_activity.enabled() and web_activity.bearer_token() is not None:
         return None
     fetch_site = request.headers.get('Sec-Fetch-Site')
     if fetch_site is not None and fetch_site.lower() not in ('same-origin', 'none'):

@@ -214,6 +214,20 @@ def test_csrf_allows_activity_origin_and_bearer(interface, config, monkeypatch):
                 data=b'x', content_type='text/plain') is None
 
 
+def test_csrf_bearer_exempt_only_when_activity_uses_it(interface, config, monkeypatch):
+    monkeypatch.delenv('DISCORD_CLIENT_SECRET', raising=False)
+    evil = {'Origin': 'https://evil.example'}
+    # Activity 没开:Bearer 不被认,requires_auth 会退回 Cookie 会话,所以照样查
+    assert csrf(interface, headers=dict(evil, Authorization='Bearer abc'), json={}) == 403
+    config.set('webinterface', 'activity_enabled', 'True')
+    config.set('webinterface', 'discord_client_id', '123456')
+    config.set('webinterface', 'discord_client_secret', 'shh')
+    assert csrf(interface, headers=dict(evil, Authorization='Bearer abc'), json={}) is None
+    # 空令牌 / 非 /api/ 路径(/auth/logout 只看 Cookie)都不跳过
+    assert csrf(interface, headers=dict(evil, Authorization='Bearer '), json={}) == 403
+    assert csrf(interface, path='/auth/logout', headers=dict(evil, Authorization='Bearer abc')) == 403
+
+
 def test_csrf_end_to_end(interface):
     client = interface.web.test_client()
     rv = client.post('/auth/logout', headers={'Origin': 'https://evil.example'})
