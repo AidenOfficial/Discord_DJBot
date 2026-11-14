@@ -24,6 +24,8 @@ const selectedId = ref<number | null>(null)
 const detail = ref<PlaylistDetail | null>(null)
 const newName = ref('')
 const newNameInput = ref<HTMLInputElement>()
+const mineList = ref<HTMLUListElement>()
+const saveQueueBtn = ref<HTMLButtonElement>()
 const renaming = ref(false)
 const renameDraft = ref('')
 const renameInput = ref<HTMLInputElement>()
@@ -171,7 +173,8 @@ async function endRename() {
 }
 
 function cancelRename(e: KeyboardEvent) {
-  if (e.isComposing) return // Esc first cancels an IME composition
+  // Esc first cancels an IME composition; Safari reports that keydown as keyCode 229 with isComposing false
+  if (e.isComposing || e.keyCode === 229) return
   e.preventDefault()
   endRename()
 }
@@ -208,12 +211,16 @@ async function remove() {
   }
   selectedId.value = null
   detail.value = null
-  reloadPlaylists()
   if (wasFavorites) reloadFavorites()
   announce(t('pl.deleted', { name: wasFavorites ? t('fav.name') : name }))
-  // The delete button went away with the detail view.
+  // Wait for the list to drop the deleted row so focus does not land on it.
+  await reloadPlaylists()
+  // The delete button went away with the detail view. Prefer a playlist button over
+  // the name field, which would pop up the on-screen keyboard on phones.
   await nextTick()
-  newNameInput.value?.focus()
+  const next = mineList.value?.querySelector<HTMLButtonElement>('button')
+  if (next) next.focus()
+  else newNameInput.value?.focus()
 }
 
 async function play(mode: 'append' | 'next' | 'replace', opts: { shuffle?: boolean; item?: number } = {}) {
@@ -328,6 +335,7 @@ async function dropItem(rowId: number, index: number) {
     await nextTick()
     const buttons = itemList.value?.querySelectorAll<HTMLButtonElement>('[data-remove]')
     if (buttons?.length) buttons[Math.min(index, buttons.length - 1)]!.focus()
+    else saveQueueBtn.value?.focus() // last song removed: the list became the empty state
   }
 }
 
@@ -420,8 +428,9 @@ const totalDuration = computed(() =>
               aria-describedby="pl-import-hint"
               class="rounded-lg border px-3 py-1.5 text-xs"
               :style="{ background: 'var(--c-bg)', borderColor: 'var(--c-border)', color: 'var(--c-text)' }"
-              :disabled="importRunning"
+              :readonly="importRunning"
             />
+            <!-- readonly, not disabled: Enter in the field starts the import and focus must stay there -->
             <select
               v-model="importInto"
               :aria-label="t('pl.importTarget')"
@@ -458,7 +467,7 @@ const totalDuration = computed(() =>
         <h2 class="mt-5 mb-1 px-3 text-[11px] font-semibold uppercase tracking-wider" :style="{ color: 'var(--c-text-faint)' }">
           {{ t('pl.mine') }}
         </h2>
-        <ul role="list" class="flex flex-col gap-1">
+        <ul ref="mineList" role="list" class="flex flex-col gap-1">
           <li v-if="!hasFavorites">
             <button
               class="flex w-full cursor-pointer items-center justify-between gap-2 rounded-xl border-0 px-3 py-2.5 text-left"
@@ -679,7 +688,7 @@ const totalDuration = computed(() =>
              :style="{ background: 'var(--c-surface)', color: 'var(--c-text-muted)' }">
           <p>{{ t('pl.empty') }}</p>
           <p class="mt-1"><template v-for="(p, k) in tParts(detail.favorites ? 'fav.hint' : 'pl.emptyHint', { heart: 'heart' })" :key="k"><template v-if="p.param"><Icon icon="heart" :style="{ color: 'var(--c-danger)' }" /><span class="sr-only">{{ t('fav.heartWord') }}</span></template><template v-else>{{ p.text }}</template></template></p>
-          <button class="mt-3 cursor-pointer rounded-full border-0 px-4 py-2 text-xs font-semibold"
+          <button ref="saveQueueBtn" class="mt-3 cursor-pointer rounded-full border-0 px-4 py-2 text-xs font-semibold"
                   :style="{ background: 'var(--c-accent-soft)', color: 'var(--c-accent)' }"
                   @click="saveQueue">{{ t('pl.saveQueueHere') }}</button>
         </div>
