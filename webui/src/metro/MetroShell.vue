@@ -299,13 +299,13 @@ onBeforeUnmount(() => {
   /* 领头的那条边先走、快;跟在后面的那条晚一点出发、慢一点收拢。都是非线性的 */
   .ms-pivots--ready[data-ul-dir="fwd"]::before {
     transition:
-      inset-inline-end 280ms cubic-bezier(0.3, 0, 0.1, 1),
-      inset-inline-start 340ms cubic-bezier(0.5, 0, 0.1, 1) 150ms;
+      inset-inline-end 190ms cubic-bezier(0.3, 0, 0.1, 1),
+      inset-inline-start 230ms cubic-bezier(0.5, 0, 0.1, 1) 80ms;
   }
   .ms-pivots--ready[data-ul-dir="back"]::before {
     transition:
-      inset-inline-start 280ms cubic-bezier(0.3, 0, 0.1, 1),
-      inset-inline-end 340ms cubic-bezier(0.5, 0, 0.1, 1) 150ms;
+      inset-inline-start 190ms cubic-bezier(0.3, 0, 0.1, 1),
+      inset-inline-end 230ms cubic-bezier(0.5, 0, 0.1, 1) 80ms;
   }
 }
 
