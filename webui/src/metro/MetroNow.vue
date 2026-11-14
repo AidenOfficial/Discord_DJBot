@@ -221,6 +221,10 @@ const reduceMotion = typeof matchMedia === 'function' ? matchMedia('(prefers-red
 const SPRING_K = 150
 const SPRING_W = Math.sqrt(SPRING_K)
 const SPRING_C = 2 * SPRING_W
+/** 快速连拨时换成更硬的弹簧(同样临界阻尼):一格三四百像素、一秒二三十格时,软弹簧光是刹住就要滑出去几百像素,
+ *  手停了画面还在赶。单拨一格、慢慢拨还是用上面那个软的,一段走 0.4 秒左右的 ease-out */
+const FAST_K = 450
+const FAST_C = 2 * Math.sqrt(FAST_K)
 /** 鼠标滚轮一格至少推进可视宽度的这个比例 */
 const STEP_MIN = 0.2
 /** 停手多久算"停下"(之后才算惯性、落位) */
@@ -231,6 +235,8 @@ const FLING_S = 0.22
 const BOUNCE_V = 2600
 /** 触控板推过头时的阻力:越界部分只跟手这个比例 */
 const EDGE_RESIST = 0.35
+/** 越界往外冲时阻尼放大的倍数 */
+const EDGE_DAMPING = 2.4
 
 let phys = { x: 0, v: 0, target: 0 }
 let physRaf = 0
@@ -245,6 +251,16 @@ let continuous = false
 let inputDir = 0
 /** 快拨的记录(只记同一方向的:一掉头就清空) */
 const notches: number[] = []
+/** 目标位置的历史:估算"目标正以多快的速度前进",弹簧按这个速度跟(速度前馈)。
+ *  只追位置的弹簧追一个匀速前进的目标时,会稳定落后 2v/ω —— 快速滚的时候能差出几百像素,手停了画面还在赶 */
+const targetHist: { t: number, x: number }[] = []
+/** 前馈:两次输入间隔在这个时间以内才算"在快速滚",速度 = 这几次走过的距离 ÷ 它们之间的实际时间;
+ *  手停下以后,速度在这段时间里线性降到 0(这本身就是一段惯性)。单拨一格、慢慢拨都不受影响 */
+const FF_WINDOW_MS = 100
+/** 快速连滚停手后,再按内容此刻的速度多滑的时间(秒):前馈衰减已经带出一段惯性,这里只补一点 */
+const COAST_S = 0.05
+/** 每种 deltaMode 下"一格"的大小:取见过的最小值(缩放后一格是 90.9 这样的数)。合并成一个事件的几格按它拆开 */
+const notchUnit: Record<number, number> = {}
 /** 触控板甩出去最多这么远(可视宽度的比例) */
 const FLING_MAX = 0.6
 const recent: { t: number, d: number }[] = []
@@ -345,13 +361,18 @@ function onIdle(el: HTMLElement) {
     const throwMax = el.clientWidth * FLING_MAX
     projected = from + (Math.sign(vel) === inputDir ? clamp(vel * FLING_S, -throwMax, throwMax) : 0)
   } else {
+    // 快速连滚之后停手:按内容此刻真实的速度往前滑一段(惯性),但不会比已经拨到的地方近
     const quick = notches.filter((t) => now - t < 320).length
-    if (quick >= 3 && inputDir) projected = nextSegment(el, from, inputDir, Math.min(2, quick - 2))
+    if (quick >= 3 && inputDir && Math.sign(phys.v) === inputDir) {
+      const coast = phys.x + phys.v * COAST_S
+      projected = inputDir > 0 ? Math.max(from, coast) : Math.min(from, coast)
+    }
   }
   // 已经在这一头了(一口气拨到底):落在这一头,越界的部分由弹簧拉回来,就是在底部回弹
   phys.target = landingSegment(el, clamp(projected, 0, max), inputDir)
   notches.length = 0
   recent.length = 0
+  targetHist.length = 0
 }
 
 function tick(now: number) {
@@ -364,11 +385,44 @@ function tick(now: number) {
   if (pendingIdle && now - lastInputAt >= IDLE_MS) { pendingIdle = false; onIdle(el) }
   // 停手以后目标一定在范围里:内容中途变窄(换歌、队列刷新)时落到新的末端,由弹簧弹回去,不会一下跳回
   if (!pendingIdle) phys.target = clamp(phys.target, 0, maxScroll(el))
-  // 半隐式欧拉,4ms 一小步,刚度再大也稳
+  // 目标在最近 150ms 里前进的速度(只算顺着输入方向的):手停下以后窗口里没有新的前进,它自然降到 0
+  let vt = 0
+  let fast = false
+  const max = maxScroll(el)
+  const atWall = inputDir > 0 ? phys.target >= max : phys.target <= 0
+  if (pendingIdle && targetHist.length >= 2 && !atWall) {
+    // 只用输入样本算(目标会被"跟着内容走"改动)
+    const last = targetHist[targetHist.length - 1]
+    const first = targetHist.find((h) => last.t - h.t <= FF_WINDOW_MS) ?? last
+    // 停手后按你拨动的节奏衰减:每 50ms 一格,停下后 50ms 内降到 0,不会在两格之间冲过头
+    const prev = targetHist[targetHist.length - 2]
+    const beat = Math.min(FF_WINDOW_MS, Math.max(16, last.t - prev.t))
+    const fade = 1 - (now - last.t) / beat
+    if (first !== last && fade > 0) {
+      const v = (last.x - first.x) / ((last.t - first.t) / 1000) * fade
+      if (Math.sign(v) === inputDir) { vt = v; fast = !continuous }
+    }
+  }
+  // 手刚停、还没判定停手时,内容顺着方向冲过了目标:目标跟着内容走,只靠阻尼减速,不往回拉
+  // (否则会先往回缩一下、停手判定后再往前落位)。两头的目标还是钳在范围里,所以到头照样回弹
+  if (pendingIdle && inputDir && inputDir * (phys.x - phys.target) > 0) phys.target = clamp(phys.x, 0, max)
+  // 半隐式欧拉,4ms 一小步,刚度再大也稳。阻尼项拉向目标的速度,而不是拉向 0:快速滚动时跟得上手。
+  // 越界往外冲的时候阻尼加大:像碰到软墙,冲出去一小段就被拉住,不会一下甩出去老远
+  // 用软弹簧落位、目标又不在两头时:朝目标的速度不超过 ω·剩余距离。临界阻尼弹簧从不超过这个速度出发
+  // 就一定不会冲过目标 —— 快拨停在中间时不会冲过落点再退回来。目标在两头时不限,到头照样回弹
+  if (!fast && !continuous && phys.target > 0 && phys.target < max) {
+    const toGo = phys.target - phys.x
+    const cap = SPRING_W * Math.abs(toGo)
+    if (Math.sign(phys.v) === Math.sign(toGo) && Math.abs(phys.v) > cap) phys.v = Math.sign(phys.v) * cap
+  }
   const steps = Math.ceil(dt / 0.004)
   const h = dt / steps
   for (let i = 0; i < steps; i++) {
-    phys.v += (SPRING_K * (phys.target - phys.x) - SPRING_C * phys.v) * h
+    const over = phys.x < 0 ? phys.x : phys.x > max ? phys.x - max : 0
+    const k = fast ? FAST_K : SPRING_K
+    const c0 = fast ? FAST_C : SPRING_C
+    const c = over && Math.sign(phys.v) === Math.sign(over) ? c0 * EDGE_DAMPING : c0
+    phys.v += (k * (phys.target - phys.x) + c * (vt - phys.v)) * h
     phys.x += phys.v * h
   }
   const resting = !pendingIdle && Math.abs(phys.target - phys.x) < 0.4 && Math.abs(phys.v) < 6
@@ -441,19 +495,24 @@ function onWheel(e: WheelEvent) {
   const reversed = inputDir !== 0 && dir !== inputDir
   inputDir = dir
   // 只清滚轮的快拨记录;触控板的方向本来就按最近 100ms 的净位移算,抬手时一下反向抖动不该把它清掉
-  if (reversed) notches.length = 0
+  if (reversed) { notches.length = 0; targetHist.length = 0 }
   if (notch) {
     notches.push(now)
+    // 快速转的时候几格会合成一个事件(deltaY 200、300):有几格走几段
+    const unit = notchUnit[e.deltaMode] = Math.min(notchUnit[e.deltaMode] ?? Infinity, Math.abs(raw))
+    const count = clamp(Math.round(Math.abs(raw) / unit), 1, 5)
     // 掉头时从眼下看到的位置往回走一段,不从还没走到的目标算
     // (否则给的速度和"目标 - 位置"反向:先往回顿一下,再往前冲)
     const from = clamp(reversed ? phys.x : phys.target, 0, max)
-    const to = nextSegment(el, from, dir, 1)
+    const to = nextSegment(el, from, dir, count)
     // 到头还在拨:往外给一个速度,弹簧拉回来就是回弹(这里也只给一次的量,不越叠越大)
     if (to === from) phys.v = dir * Math.max(dir * phys.v, BOUNCE_V)
     // 一拨就走:按这一段的距离给初速度 ω·Δ。临界阻尼弹簧从这个速度出发正好是指数式的 ease-out
     // (起步最快、越靠近越慢)。连拨时速度只提到这个量,不叠加:叠加会让一口气拨到底时冲出去老远
     else phys.v = dir * Math.max(dir * phys.v, SPRING_W * Math.abs(to - from))
     phys.target = to
+    targetHist.push({ t: now, x: to })
+    if (targetHist.length > 16) targetHist.shift()
   } else {
     recent.push({ t: now, d })
     if (recent.length > 12) recent.shift()
@@ -462,6 +521,8 @@ function onWheel(e: WheelEvent) {
     // 触控板要跟手:位置直接跟过去一半,不全等弹簧。刚从一格一段切过来时目标还在老远,
     // 跟一半就是一帧瞬移:这一下交给弹簧
     if (wasContinuous) phys.x += (phys.target - phys.x) * 0.5
+    targetHist.push({ t: now, x: phys.target })
+    if (targetHist.length > 16) targetHist.shift()
   }
 }
 
