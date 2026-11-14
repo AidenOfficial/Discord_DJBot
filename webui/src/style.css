@@ -1,4 +1,6 @@
 @import "tailwindcss";
+/* dist 提交在仓库里:不排除的话 Tailwind 会扫描上一次的构建产物,同样的源码在 CI 里得出不同的 CSS */
+@source not "../dist";
 
 /* ==========================================================================
    Design tokens - the single source of truth for color, radius and shadow.
