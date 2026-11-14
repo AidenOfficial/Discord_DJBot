@@ -23,7 +23,10 @@
 enabled = True
 listening_addr = 127.0.0.1   ; 容器内用 0.0.0.0,由 compose 网络隔离
 listening_port = 8181
-is_web_proxified = True      ; 让 Flask 信任 X-Real-IP(经由 ReverseProxied)
+is_web_proxified = True      ; 采信反向代理带来的真实 IP / 协议头(经由 ReverseProxied)
+; 只有直接连进来的地址在这些网段里才采信上面那些头;默认值已包含 compose 网络里的 cloudflared
+;trusted_proxies = 127.0.0.0/8, ::1/128, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7
+;honor_script_name = False   ; 挂在子路径下(X-Script-Name)才打开
 ```
 
 ## docker compose(已内置,tunnel profile)
@@ -104,7 +107,8 @@ access_aud = <Access 应用 Overview 页的 Application Audience (AUD) Tag>
    Client Secret 放进 `.env` 的 `DISCORD_CLIENT_SECRET`(优先于 ini 里的
    `discord_client_secret`),**不要提交进仓库**。
 3. 路由:`/auth/discord/login` → Discord 授权 → `/auth/discord/callback`;
-   `/auth/logout` 退出(GET 显示页面,POST 返回 JSON)。
+   退出必须 `POST /auth/logout`(返回 JSON)。`GET /auth/logout` 只显示页面、**不会退出**,
+   这样别的网站没法用一张指向它的图片把人登出。
 
 - `auth_method = discord`:没登录的网页跳去登录,`/api/*` 返回 401 JSON;
   只放行和 bot 在同一个服务器里的账号,其他人 403。
@@ -112,36 +116,102 @@ access_aud = <Access 应用 Overview 页的 Application Audience (AUD) Tag>
 - 身份:用 `/bind` 绑定过的 Discord 账号登录后就是绑定的那个 Web 身份(歌单、收藏都在);
   没绑定过的身份是 `discord:<用户 ID>`,并自动记一条绑定,不需要再 `/bind`。
   用 Discord 登录后,身份优先于 Access 邮箱头(JWT 校验仍然照常要求)。
-- 会话 Cookie 由 `flask_secret` 签名;不配置时随机生成一次存进 settings 库,重启不掉登录。
+- 会话 Cookie 由 `flask_secret` 签名(不配置时随机生成一次存进 settings 库),
+  `Secure`、`HttpOnly`、`SameSite=Lax`。Cookie 里**不放 Discord 的 access / refresh
+  token**,它们只留在 bot 进程内存里,所以 **bot 重启后大家要重新用 Discord 登录一次**。
 
 ## 不用 Access 直接上公网(用 Discord 登录)
 
-整站不套 Cloudflare Access、让用户在应用里用 Discord 登录时,Tunnel 后面就是公网,下面这些要确认:
+整站不套 Cloudflare Access、让用户在应用里用 Discord 登录时,Tunnel 后面就是公网。
+上线前逐项确认(`https://music.example.com` 换成自己的域名):
 
-- `auth_method = discord`(见上一节)。`none` 等于谁都能控制 bot。
-- **不要信任 Access 的邮箱头**:没有 Access 时,请求头 `Cf-Access-Authenticated-User-Email` 是访问者
-  自己可以随便写的,令牌 / 密码登录时会被当成身份。把它关掉:
+**Cloudflare 侧**
 
-  ```ini
-  [webinterface]
-  access_email_header =
-  ```
+- [ ] 域名的 SSL/TLS → Edge Certificates 打开 **Always Use HTTPS** 和 **HSTS**
+      (先用较短的 max-age 试,确认没问题再加长)。会话 Cookie 带 `Secure`,走 http 登录不上。
+- [ ] Tunnel 的 Public hostname 回源 `http://botamusique:8181`;Access 只套 `/api/logs`、`/api/cache`
+      (`/api/logs/client` Bypass),见下一节。整站不套 Access。
 
-  (`auth_method = discord` 时 Discord 身份优先,这个头不起作用,但关掉更稳妥。)
-- 内置的防护(默认开着,一般不用改):
-  - **安全响应头**:CSP 只允许本站脚本;`frame-ancestors` 只允许本站和 Discord
-    (`[webinterface] frame_ancestors`,Activity 要嵌在 discord.com 里),别的网站嵌不进来(点击劫持);
-    `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
-  - **限流**(`[webinterface] rate_limit`):搜索、点歌入队、歌单导入、Discord 登录、令牌校验
-    按登录身份和选中的服务器计数,没有身份才按 IP。Activity 的请求都从 Discord 代理的 IP 来,
-    只按 IP 会把所有人一起限住。超限返回 429(带 `Retry-After`)。
-  - **输错令牌 / 密码**:同一 IP 超过 `max_attempts` 次后 `ban_minutes`(默认 15)分钟内不能再试;
-    已经登录的会话、用 Discord 登录的人不受影响。令牌现在是 22 个字符(以前 7 个)。
-  - **不让 bot 访问内网**:用户给的链接、跳转、DNS 重绑定都到不了局域网和 NAS 本身。
-    bot 进程里由 `[bot] block_private_network` 拦,容器里的 ffmpeg 等子进程由
-    `BAM_EGRESS_FILTER` 拦(见 `deploy/DOCKER.md`「禁止访问内网」)。
-  - Web 服务用 waitress(生产 WSGI 服务器),不再是 Flask 的开发服务器。
-- 管理接口(日志、缓存)想再加一层,看下一节。
+**NAS / compose**
+
+- [ ] **绝不发布 8181**:`docker-compose.yml` 里 `ports` 保持注释,路由器 / 防火墙也不转发 8181。
+      8181 能被直接访问的话,请求就绕过了 Cloudflare 的 HTTPS、Access 和 WAF。
+- [ ] `cloudflared` 用 compose 里固定的版本,和 bot 在同一个 compose 网络。
+
+**configuration.ini**
+
+```ini
+[webinterface]
+enabled = True
+listening_addr = 0.0.0.0
+auth_method = discord
+access_email_header =
+is_web_proxified = True
+public_url = https://music.example.com
+; trusted_proxies 保持默认(本机 + 私有网段,包含 cloudflared 的容器地址)
+; honor_script_name 保持 False(Tunnel 回源到根路径,不需要 X-Script-Name)
+; uploaders =           ; 留空 = 服务多个服务器时只有 bot 主人能上传
+
+[bot]
+max_download_mb = 300   ; 单个链接下载上限(MB),0 = 不限
+
+[discord]
+allowed_guilds = <你自己的服务器 ID>   ; bot 不打算给陌生人用时一定要填
+```
+
+- [ ] `auth_method = discord`。`none` 等于谁都能控制 bot。
+- [ ] `access_email_header =` 留空。没有 Access 时,请求头 `Cf-Access-Authenticated-User-Email` 是访问者
+      自己可以随便写的,令牌 / 密码登录时会被当成身份。(`auth_method = discord` 时 Discord 身份优先,
+      这个头不起作用,但关掉更稳妥。)
+- [ ] `is_web_proxified = True`,`trusted_proxies` 用默认值。bot 只采信 **直接连进来的地址** 在
+      `trusted_proxies` 里的请求带的 `Cf-Connecting-IP` / `X-Real-IP` / `X-Scheme`;8181 没发布时直接连进来的
+      只有 cloudflared。别的来源带这些头会被忽略,伪造 IP 绕不过限流和输错封禁。
+      cloudflared 不在默认网段里(比如跑在别的机器上)时,把它的地址加进 `trusted_proxies`。
+- [ ] `honor_script_name = False`。只有用 nginx 之类把 Web 界面挂在子路径(`/music`)下、并由代理设置
+      `X-Script-Name` 时才打开;打开后同样只认 `trusted_proxies` 里来的请求。
+- [ ] `[discord] allowed_guilds` 填上自己的服务器,`[bot] max_active_sessions` 设个上限(比如 3);
+      Developer Portal → Bot 关掉 **Public Bot**,别人就没法把 bot 邀请进他们的服务器。
+      `allowed_guilds` 之外的服务器,Discord 命令、网页和 Activity 都用不了。
+- [ ] `flask_secret` 不是默认值(或者不写,让 bot 自己生成并存进 settings 库)。
+- [ ] `uploaders`:上传的文件进本地曲库,所有服务器共用。服务多个服务器时只有 bot 主人和 `uploaders` 里的
+      Discord 用户 ID 能上传,其他人调上传接口返回 403。
+- [ ] `max_download_mb`:YouTube / B 站等链接的单个下载超过这个大小就不下载,防止有人点几十 GB 的视频
+      把磁盘写满。和上传上限 `max_upload_file_size` 是两回事。
+
+**应用会自动做的(默认开着,一般不用改)**
+
+- **CSRF**:靠会话 Cookie 登录的请求,除 GET 以外的 `/api/*` 调用必须是同源(`Origin` / `Sec-Fetch-Site`)
+  的 JSON(`Content-Type: application/json`),否则 403。网页版本来就是这样发的;自己写脚本调接口时
+  照着带上 `Origin: https://music.example.com` 和 JSON 请求体。Activity 用 `Authorization: Bearer`
+  令牌,不靠 Cookie,不受这条影响。
+- **会话 Cookie**:`Secure`、`HttpOnly`、`SameSite=Lax`,里面不存 Discord 的 token;bot 重启后要重新登录。
+- **退出登录**只认 `POST /auth/logout`,`GET` 不会退出。
+- **封禁**:`/userban` 封掉的人在网页和 Activity 里也一样被拒(以前只拦 Discord 命令)。
+- **安全响应头**:CSP 只允许本站脚本;`frame-ancestors` 只允许本站和 Discord
+  (`[webinterface] frame_ancestors`,Activity 要嵌在 discord.com 里),别的网站嵌不进来(点击劫持);
+  `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
+- **限流**(`[webinterface] rate_limit`):搜索、点歌入队、歌单导入、Discord 登录、令牌校验
+  按登录身份和选中的服务器计数,没有身份才按 IP。Activity 的请求都从 Discord 代理的 IP 来,
+  只按 IP 会把所有人一起限住。超限返回 429(带 `Retry-After`)。
+- **输错令牌 / 密码**:同一 IP 超过 `max_attempts` 次后 `ban_minutes`(默认 15)分钟内不能再试;
+  已经登录的会话、用 Discord 登录的人不受影响。令牌现在是 22 个字符(以前 7 个)。
+- **不让 bot 访问内网**:用户给的链接、跳转、DNS 重绑定都到不了局域网和 NAS 本身。
+  bot 进程里由 `[bot] block_private_network` 拦,容器里的 ffmpeg 等子进程由
+  `BAM_EGRESS_FILTER` 拦(见 `deploy/DOCKER.md`「禁止访问内网」)。
+- Web 服务用 waitress(生产 WSGI 服务器),不再是 Flask 的开发服务器。
+
+**上线后验证**
+
+- [ ] `curl -sI http://music.example.com/` 是 301 跳到 https;`curl -sI https://music.example.com/`
+      带 `Strict-Transport-Security`。
+- [ ] 从外网 `curl -m 5 http://<NAS 公网 IP>:8181/` 连不上。
+- [ ] 无痕窗口打开首页 → 跳 Discord 登录;登录后浏览器开发者工具里 session Cookie 是 `Secure` + `SameSite=Lax`。
+- [ ] 不在 `allowed_guilds` 服务器里的 Discord 账号登录后被拒(403)。
+- [ ] `curl -X POST https://music.example.com/api/controls -H 'Cookie: session=<自己的>' -d 'action=pause'`
+      (不是 JSON、不带 Origin)返回 403;网页上的暂停按钮照常能用。
+- [ ] 打开 `https://music.example.com/auth/logout` 不会退出,点页面上的退出按钮才退出。
+
+管理接口(日志、缓存)想再加一层,看下一节。
 
 ## 管理接口再套一层 Cloudflare Access(按路径)
 
@@ -183,7 +253,7 @@ Zero Trust 控制台 → Access → Applications:
 - [ ] 无痕窗口打开 `https://music.example.com/api/logs` → 跳到 Access 登录页。
 - [ ] 无痕窗口打开首页 → 是 Discord 登录,不是 Access。
 - [ ] `curl -X POST https://music.example.com/api/logs/client -d '{}' -H 'Content-Type: application/json'`
-      返回的是 bot 的 401 / 400 JSON,不是 Access 的跳转。
+      返回的是 bot 的 401 / 400 / 403 JSON,不是 Access 的跳转。
 
 **为什么不用单独的管理主机名**(比如 `admin.music.example.com` 整站套 Access):Discord 登录的回调地址
 只有一个(`public_url`),登录后会话 cookie 落在主域名上,管理主机名上没有登录状态,
@@ -215,6 +285,7 @@ Zero Trust 控制台 → Access → Applications:
    换新令牌(会再核对一次语音频道,人已经离开就不续);关闭时 `POST /api/activity/logout` 作废。
 5. 权限和用 Discord 登录网页版一样(`web_context` 的规则:bot 主人、管理服务器权限……),
    打开 Activity 的服务器是默认服务器。`auth_method` 是什么都不影响 Activity。
+   被 `/userban` 封掉的人、`[discord] allowed_guilds` 以外的服务器,Activity 一样打不开。
 6. 外部图片(搜索结果封面、头像)经 `/api/thumbnail/external` 转发(只代理 YouTube / Bilibili /
    Discord CDN 等图床),所以 **不需要** 给图床另外登记 URL Mapping,也用不着 `patchUrlMappings`。
 
@@ -251,7 +322,13 @@ public_url = https://<PUBLIC_HOST>
 ### 网络 / 安全响应头
 
 - `<PUBLIC_HOST>` 要能从公网直接访问:Discord 的代理在它自己的服务器上取页面,
-  **不能挡在 Cloudflare Access 的交互登录后面**(Tunnel 本身没问题)。
+  **不能挡在 Cloudflare Access 的交互登录后面**(Tunnel 本身没问题)。前面「不用 Access 直接上公网」的
+  清单同样适用(HTTPS / HSTS、不发布 8181、`trusted_proxies`、`allowed_guilds`……)。
+- Activity 的请求经 Discord 代理到达,带 `Authorization: Bearer <令牌>`,不用 Cookie,所以不受 CSRF 那条
+  (Cookie 登录的非 GET 请求必须同源 JSON)限制。
+- 登录限制:`POST /api/activity/token` 按 IP 限流(Discord 代理 IP 是大家共用的,上限放得比较宽,只防刷),
+  超了返回 429;只有此刻就在那个语音频道里、没被封禁、服务器在 `allowed_guilds` 里的人才拿得到令牌;
+  令牌有效期 `activity_token_ttl`(60 到 86400 秒),离开语音频道后不再续期。
 - 响应头(加固那边负责):CSP 的 `frame-ancestors` 要放行 `https://discord.com`、
   `https://*.discord.com`、`https://*.discordsays.com`;`img-src` 要允许 `blob:`(Activity 里的图片
   是带令牌取回来再用 blob URL 显示的);`connect-src 'self'` 就够。不能发 `X-Frame-Options: DENY`。
@@ -264,6 +341,9 @@ public_url = https://<PUBLIC_HOST>
 - [ ] 桌面客户端:进语音频道 → 火箭图标 → 打开 → 第一次弹授权 → 看到当前服务器的队列,能播放 / 暂停 / 跳过 / 搜索点歌,声音从 bot 出来。
 - [ ] 手机客户端(竖屏):布局不溢出,刘海和底部手势条不挡按钮;缩成画中画时只剩迷你播放条。
 - [ ] 不在语音频道的人打开(或从别的频道转发的邀请)被拒,提示"先进入语音频道"。
+- [ ] 被 `/userban` 的账号打开 Activity 被拒;解封后能打开。
+- [ ] bot 不打算让陌生人邀请:Portal → Bot 关掉 **Public Bot**,`[discord] allowed_guilds` 填了自己的服务器,
+      `[bot] max_active_sessions` 设了上限。
 - [ ] 离开语音频道后,最多一个 `activity_token_ttl` 内面板提示需要重新打开。
 - [ ] 搜索结果封面、队列封面在 Activity 里都显示(外部图片走代理)。
 - [ ] 浏览器开发者工具里没有 CSP / frame-ancestors 报错。
@@ -350,6 +430,8 @@ public_url = https://<PUBLIC_HOST>
 - **上传**(Library 页 Upload):分片上传(每片 32MB),不受 Cloudflare 单请求 100MB 限制,
   断网会自动续传;单文件上限 `max_upload_file_size`(默认 4G)。视频默认只保留音轨
   (`upload_extract_audio`),上传完直接进曲库,不用 rescan。
+  曲库是所有服务器共用的,服务多个服务器时只有 bot 主人和 `[webinterface] uploaders` 里的人能上传。
+- **链接下载上限**:`[bot] max_download_mb`(默认 300MB),单个视频 / 音频超过就不下载。
 
 ## 界面语言(i18n)
 
