@@ -12,7 +12,7 @@ import ActivityMini from './components/ActivityMini.vue'
 import { embedded } from './activity'
 import { useGuilds } from './composables/useGuilds'
 import { getItem, removeItem, setItem } from './storage'
-import { LOCALES, locale, t } from './i18n'
+import { LOCALES, locale, setLocale, t, type Locale } from './i18n'
 import type { Key } from './i18n/en'
 
 // 首页之外的视图按需加载,首屏只需要 NowPlaying + QueueList
@@ -39,9 +39,20 @@ function lazyView(name: LazyView): Component {
 }
 const pages = shallowReactive({} as Record<LazyView, Component>)
 for (const name of Object.keys(loaders) as LazyView[]) pages[name] = lazyView(name)
+const mainEl = ref<HTMLElement | null>(null)
 provide(RETRY_VIEW, () => {
   const v = view.value
-  if (v !== 'home') pages[v] = lazyView(v)
+  if (v === 'home') return
+  // 点的"重试"按钮马上会被换掉:焦点先放到 <main> 开头,别掉回 body;
+  // 加载成功或再次失败,Tab 都从这里进入新内容。tabindex 只临时加,
+  // 平时点 main 的空白处不会把焦点落到 main 上
+  const el = mainEl.value
+  if (el) {
+    el.tabIndex = -1
+    el.addEventListener('blur', () => el.removeAttribute('tabindex'), { once: true })
+    el.focus()
+  }
+  pages[v] = lazyView(v)
 })
 
 type Theme = 'light' | 'dark' | 'auto'
@@ -116,6 +127,15 @@ function onStorage(e: StorageEvent) {
   applyTheme(e.newValue === 'light' || e.newValue === 'dark' ? e.newValue : 'auto', false)
 }
 window.addEventListener('storage', onStorage)
+
+// 语言包按需加载:加载失败时界面还是原来的语言,下拉框也要跟着退回去,
+// 不然显示的选项和界面语言对不上(下次再选会重新请求)
+async function onLangChange(e: Event) {
+  const sel = e.target as HTMLSelectElement
+  const want = sel.value as Locale
+  const ok = await setLocale(want)
+  if (!ok && sel.value === want) sel.value = locale.value
+}
 
 // ---- 页面标题 + 导航 ----
 watch([view, locale], () => {
@@ -222,7 +242,8 @@ onBeforeUnmount(() => {
         <div class="flex items-center gap-2">
           <UserChip />
           <select
-            v-model="locale"
+            :value="locale"
+            @change="onLangChange"
             class="h-9 cursor-pointer rounded-full border-0 px-2.5 text-xs"
             :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
             :title="t('lang.title')"
@@ -244,7 +265,7 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <main class="flex-1">
+    <main ref="mainEl" class="flex-1">
       <h1 v-if="NEEDS_HEADING.includes(view)" class="sr-only">{{ t(VIEW_LABEL[view]) }}</h1>
       <div v-if="noAccess" class="mx-auto mt-6 w-full max-w-3xl px-4">
         <div class="rounded-2xl p-5" :style="{ background: 'var(--c-surface)', boxShadow: 'var(--shadow-1)' }">

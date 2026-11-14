@@ -12,6 +12,10 @@ import { t } from '../i18n'
 
 // Shown when a page's code chunk fails to load: offline, or the bot was redeployed
 // and the old chunk names are gone (then only a reload helps).
+// defineAsyncComponent passes the load error as a prop; declared so it does not fall
+// through as an `error="..."` attribute (with the chunk URL) on the root element
+defineProps<{ error?: unknown }>()
+
 const reload = () => location.reload()
 const retry = inject(RETRY_VIEW, reload)
 

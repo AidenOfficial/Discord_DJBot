@@ -34,7 +34,9 @@ window.addEventListener('unhandledrejection', (ev) => {
     r instanceof Error ? r.stack : undefined)
 })
 // 语言包按需加载(en 打包在里面):先等当前语言的包到了再挂载,首屏不会先闪一下英文
-void ready.then(() => {
+// 但最多等 2.5 秒:网络很慢时先用英文挂上,包到了 setLocale 会自己切过去,不会一直白屏
+const LANG_WAIT_MS = 2500
+void Promise.race([ready, new Promise<void>((r) => setTimeout(r, LANG_WAIT_MS))]).then(() => {
   app.mount('#app')
   // 首帧画完之后才打开 body 的配色过渡,首屏和恢复已存主题时不会从默认配色渐变过来
   requestAnimationFrame(() => requestAnimationFrame(() => document.documentElement.classList.add('theme-ready')))

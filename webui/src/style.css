@@ -202,6 +202,12 @@ html.embedded {
   outline-offset: 2px;
 }
 
+/* App.vue gives <main> a temporary tabindex="-1" to park focus while the control that had
+   it is replaced; main is not operable, so no ring around the page. */
+main[tabindex="-1"]:focus {
+  outline: none;
+}
+
 /* Minimum target size (WCAG 2.5.8): every control is at least 24x24 CSS px.
    In @layer base on purpose, unlike the rules around it: a Tailwind size utility
    on a control (min-w-0 on a truncating flex button, a fixed h-9 chip) still wins.
