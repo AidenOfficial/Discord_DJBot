@@ -81,8 +81,8 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # Cloudflare Tunnel:出站隧道把 Web 界面发布到公网,鉴权交给
-  # Cloudflare Access,8181 端口无需(也不应)暴露。
+  # Cloudflare Tunnel:出站隧道把 Web 界面发布到公网(鉴权方式见 deploy/WEBUI.md),
+  # 8181 端口无需(也不应)暴露。
   # 属于 "tunnel" profile —— 平时 `docker compose up -d` 不会启动它;
   # 在 .env 写入 CLOUDFLARE_TUNNEL_TOKEN=<token> 后用:
   #   docker compose --profile tunnel up -d

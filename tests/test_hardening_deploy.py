@@ -132,6 +132,25 @@ def test_webui_doc_covers_public_checklist():
     assert '重启不掉登录' not in doc
 
 
+def test_docs_put_x_scheme_behind_honor_script_name():
+    # ReverseProxied 只在 honor_script_name 打开时才认 X-Scheme;只靠 trusted_proxies 的话
+    # Tunnel 后面的访问者就能自己改协议
+    example = _read('configuration.example.ini')
+    trusted = example.split("# 'trusted_proxies':", 1)[1].split("# 'honor_script_name':", 1)[0]
+    honor = example.split("# 'honor_script_name':", 1)[1].split('#trusted_proxies', 1)[0]
+    assert 'X-Scheme' not in trusted
+    assert 'X-Scheme' in honor and 'X-Script-Name' in honor
+    doc = _read('deploy', 'WEBUI.md')
+    assert '`Cf-Connecting-IP` / `X-Real-IP` / `X-Scheme`' not in doc
+    assert re.search(r'honor_script_name = False`。它管 `X-Script-Name` 和 `X-Scheme`', doc)
+
+
+def test_webui_doc_cookie_secure_depends_on_https_public_url():
+    doc = _read('deploy', 'WEBUI.md')
+    assert '`public_url` 是 `https://` 时还带 `Secure`' in doc
+    assert '86400' not in doc
+
+
 def test_docker_doc_mentions_pin_and_limits():
     doc = _read('deploy', 'DOCKER.md')
     for needle in ('cloudflare/cloudflared:2026.10.0', 'no-new-privileges', 'mem_limit', 'pids_limit'):

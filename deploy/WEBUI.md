@@ -23,10 +23,10 @@
 enabled = True
 listening_addr = 127.0.0.1   ; 容器内用 0.0.0.0,由 compose 网络隔离
 listening_port = 8181
-is_web_proxified = True      ; 采信反向代理带来的真实 IP / 协议头(经由 ReverseProxied)
+is_web_proxified = True      ; 采信反向代理带来的访问者真实 IP(经由 ReverseProxied)
 ; 只有直接连进来的地址在这些网段里才采信上面那些头;默认值已包含 compose 网络里的 cloudflared
 ;trusted_proxies = 127.0.0.0/8, ::1/128, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7
-;honor_script_name = False   ; 挂在子路径下(X-Script-Name)才打开
+;honor_script_name = False   ; 挂在子路径下(X-Script-Name / X-Scheme)才打开
 ```
 
 ## docker compose(已内置,tunnel profile)
@@ -117,7 +117,7 @@ access_aud = <Access 应用 Overview 页的 Application Audience (AUD) Tag>
   没绑定过的身份是 `discord:<用户 ID>`,并自动记一条绑定,不需要再 `/bind`。
   用 Discord 登录后,身份优先于 Access 邮箱头(JWT 校验仍然照常要求)。
 - 会话 Cookie 由 `flask_secret` 签名(不配置时随机生成一次存进 settings 库),
-  `Secure`、`HttpOnly`、`SameSite=Lax`。Cookie 里**不放 Discord 的 access / refresh
+  `HttpOnly`、`SameSite=Lax`,`public_url` 是 `https://` 时还带 `Secure`。Cookie 里**不放 Discord 的 access / refresh
   token**,它们只留在 bot 进程内存里,所以 **bot 重启后大家要重新用 Discord 登录一次**。
 
 ## 不用 Access 直接上公网(用 Discord 登录)
@@ -164,11 +164,12 @@ allowed_guilds = <你自己的服务器 ID>   ; bot 不打算给陌生人用时�
       自己可以随便写的,令牌 / 密码登录时会被当成身份。(`auth_method = discord` 时 Discord 身份优先,
       这个头不起作用,但关掉更稳妥。)
 - [ ] `is_web_proxified = True`,`trusted_proxies` 用默认值。bot 只采信 **直接连进来的地址** 在
-      `trusted_proxies` 里的请求带的 `Cf-Connecting-IP` / `X-Real-IP` / `X-Scheme`;8181 没发布时直接连进来的
+      `trusted_proxies` 里的请求带的 `Cf-Connecting-IP` / `X-Real-IP`;8181 没发布时直接连进来的
       只有 cloudflared。别的来源带这些头会被忽略,伪造 IP 绕不过限流和输错封禁。
       cloudflared 不在默认网段里(比如跑在别的机器上)时,把它的地址加进 `trusted_proxies`。
-- [ ] `honor_script_name = False`。只有用 nginx 之类把 Web 界面挂在子路径(`/music`)下、并由代理设置
-      `X-Script-Name` 时才打开;打开后同样只认 `trusted_proxies` 里来的请求。
+- [ ] `honor_script_name = False`。它管 `X-Script-Name` 和 `X-Scheme` 两个头:Tunnel 后面访问者自己就能带,
+      关着时一律不认。只有用 nginx 之类把 Web 界面挂在子路径(`/music`)下、并由代理设置这两个头时才打开;
+      打开后同样只认 `trusted_proxies` 里来的请求。
 - [ ] `[discord] allowed_guilds` 填上自己的服务器,`[bot] max_active_sessions` 设个上限(比如 3);
       Developer Portal → Bot 关掉 **Public Bot**,别人就没法把 bot 邀请进他们的服务器。
       `allowed_guilds` 之外的服务器,Discord 命令、网页和 Activity 都用不了。
@@ -180,11 +181,13 @@ allowed_guilds = <你自己的服务器 ID>   ; bot 不打算给陌生人用时�
 
 **应用会自动做的(默认开着,一般不用改)**
 
-- **CSRF**:靠会话 Cookie 登录的请求,除 GET 以外的 `/api/*` 调用必须是同源(`Origin` / `Sec-Fetch-Site`)
-  的 JSON(`Content-Type: application/json`),否则 403。网页版本来就是这样发的;自己写脚本调接口时
-  照着带上 `Origin: https://music.example.com` 和 JSON 请求体。Activity 用 `Authorization: Bearer`
-  令牌,不靠 Cookie,不受这条影响。
-- **会话 Cookie**:`Secure`、`HttpOnly`、`SameSite=Lax`,里面不存 Discord 的 token;bot 重启后要重新登录。
+- **CSRF**:靠会话 Cookie 登录的请求,除 GET 以外的 `/api/*`、`/auth/*` 调用必须同源(`Origin` /
+  `Sec-Fetch-Site` 是本站或 Activity 的 `<app id>.discordsays.com`),请求体用 JSON
+  (`Content-Type: application/json`);表单、`multipart/form-data`、`text/plain` 一律 403。
+  网页版本来就是这样发的;自己写脚本调接口时照着带上 `Origin: https://music.example.com` 和 JSON 请求体。
+  Activity 用 `Authorization: Bearer` 令牌,不靠 Cookie,不受这条影响。
+- **会话 Cookie**:`HttpOnly`、`SameSite=Lax`,`public_url` 是 `https://` 时还带 `Secure`(所以 `public_url`
+  一定要写 https 地址);里面不存 Discord 的 token,bot 重启后要重新登录。
 - **退出登录**只认 `POST /auth/logout`,`GET` 不会退出。
 - **封禁**:`/userban` 封掉的人在网页和 Activity 里也一样被拒(以前只拦 Discord 命令)。
 - **安全响应头**:CSP 只允许本站脚本;`frame-ancestors` 只允许本站和 Discord
@@ -326,9 +329,10 @@ public_url = https://<PUBLIC_HOST>
   清单同样适用(HTTPS / HSTS、不发布 8181、`trusted_proxies`、`allowed_guilds`……)。
 - Activity 的请求经 Discord 代理到达,带 `Authorization: Bearer <令牌>`,不用 Cookie,所以不受 CSRF 那条
   (Cookie 登录的非 GET 请求必须同源 JSON)限制。
-- 登录限制:`POST /api/activity/token` 按 IP 限流(Discord 代理 IP 是大家共用的,上限放得比较宽,只防刷),
-  超了返回 429;只有此刻就在那个语音频道里、没被封禁、服务器在 `allowed_guilds` 里的人才拿得到令牌;
-  令牌有效期 `activity_token_ttl`(60 到 86400 秒),离开语音频道后不再续期。
+- 登录限制:`POST /api/activity/token` 的请求都从 Discord 代理的少数几个 IP 来,所以只有**换令牌失败**
+  (code 无效、不是成员、不在语音频道……)按 IP 计数,换成功的按 Discord 账号限流,超了都返回 429;
+  只有此刻就在那个语音频道里、没被封禁、服务器在 `allowed_guilds` 里的人才拿得到令牌;
+  令牌有效期 `activity_token_ttl`(默认 900 秒),续期和退出也限流,离开语音频道后不再续期。
 - 响应头(加固那边负责):CSP 的 `frame-ancestors` 要放行 `https://discord.com`、
   `https://*.discord.com`、`https://*.discordsays.com`;`img-src` 要允许 `blob:`(Activity 里的图片
   是带令牌取回来再用 blob URL 显示的);`connect-src 'self'` 就够。不能发 `X-Frame-Options: DENY`。
