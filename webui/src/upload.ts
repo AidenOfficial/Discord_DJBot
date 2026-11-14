@@ -38,6 +38,20 @@ export async function uploadFile(
   onProgress: (p: UploadProgress) => void,
   opts: { targetdir?: string; signal?: AbortSignal } = {},
 ): Promise<UploadResult> {
+  try {
+    return await upload(file, onProgress, opts)
+  } catch (e) {
+    // fetch rejects with a DOMException on abort; report it as a cancel, not a failure
+    if (opts.signal?.aborted && !(e instanceof UploadError)) throw new UploadError('aborted')
+    throw e
+  }
+}
+
+async function upload(
+  file: File,
+  onProgress: (p: UploadProgress) => void,
+  opts: { targetdir?: string; signal?: AbortSignal },
+): Promise<UploadResult> {
   const init = await apiFetch(`${BASE}/api/upload/init`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
