@@ -39,6 +39,16 @@ function nearBottom() {
   return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 40
 }
 
+function scrollToEnd() {
+  const el = scroller.value
+  if (!el) return
+  el.scrollTo({ top: el.scrollHeight })
+  // New rows are still off screen here, so content-visibility: auto lays them out at
+  // the one-line placeholder height. Wrapped rows grow once rendered in the next frame;
+  // scroll again then, or the 40px nearBottom() check stops following.
+  requestAnimationFrame(() => requestAnimationFrame(() => el.scrollTo({ top: el.scrollHeight })))
+}
+
 function setError(msg: string) {
   // Polling repeats every 2 s: announce only when the message changes
   if (msg !== error.value) announce(msg, { assertive: true })
@@ -66,7 +76,7 @@ async function poll() {
       entries.value = [...entries.value, ...rv.entries.map(withStamp)].slice(-MAX_ENTRIES)
       if (stick) {
         await nextTick()
-        scroller.value?.scrollTo({ top: scroller.value.scrollHeight })
+        scrollToEnd()
       }
     }
   } catch (e) {
@@ -196,7 +206,6 @@ async function downloadEmbedded() {
 }
 
 // Level picker: one tab stop, arrow keys move the selection (radio group pattern)
-const levelButtons = ref<HTMLButtonElement[]>([])
 function onLevelKey(e: KeyboardEvent) {
   const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1
     : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0
@@ -206,7 +215,8 @@ function onLevelKey(e: KeyboardEvent) {
   const cur = LEVELS.findIndex((l) => l.key === level.value)
   const next = edge >= 0 ? edge : (cur + step + LEVELS.length) % LEVELS.length
   level.value = LEVELS[next].key
-  levelButtons.value[next]?.focus()
+  // Template ref arrays from v-for are not guaranteed to follow source order; DOM order is
+  ;(e.currentTarget as HTMLElement).querySelectorAll<HTMLElement>('[role="radio"]')[next]?.focus()
 }
 </script>
 
@@ -243,7 +253,7 @@ function onLevelKey(e: KeyboardEvent) {
     <div class="mt-4 flex flex-wrap items-center gap-2">
       <div class="flex gap-1 rounded-full p-1" :style="{ background: 'var(--c-surface-2)' }" role="radiogroup" :aria-label="t('logs.level')"
            @keydown="onLevelKey">
-        <button v-for="l in LEVELS" :key="l.key" ref="levelButtons" type="button" role="radio" :aria-checked="level === l.key"
+        <button v-for="l in LEVELS" :key="l.key" type="button" role="radio" :aria-checked="level === l.key"
                 :tabindex="level === l.key ? 0 : -1"
                 class="cursor-pointer rounded-full border-0 px-3 py-1 text-xs font-medium whitespace-nowrap"
                 :style="level === l.key ? { background: 'var(--c-accent)', color: 'var(--c-on-accent)' } : { background: 'transparent', color: 'var(--c-text-muted)' }"
@@ -315,6 +325,8 @@ function onLevelKey(e: KeyboardEvent) {
    view. One line of text plus the row's 2px top and bottom padding. */
 .log-row {
   content-visibility: auto;
+  /* leading-relaxed (1.625) in em first, for engines without the lh unit */
+  contain-intrinsic-block-size: auto calc(1.625em + 4px);
   contain-intrinsic-block-size: auto calc(1lh + 4px);
 }
 </style>

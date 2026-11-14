@@ -42,7 +42,8 @@ const banDraft = ref<Record<BanKind, { value: string; note: string }>>({
 function applySettings(s: GuildSettings) {
   settings.value = s
   announceDraft.value = s.announce_channel ?? ''
-  volumeDraft.value = s.max_volume
+  // keep a slider value that is still waiting to be saved
+  if (!volumeTimer && !volumeSending) volumeDraft.value = s.max_volume
 }
 
 async function reload() {
@@ -62,6 +63,11 @@ async function reload() {
 
 onMounted(reload)
 watch(selectedGuild, () => {
+  // a queued max-volume save belongs to the previous server
+  clearTimeout(volumeTimer)
+  volumeTimer = undefined
+  volumeSeq++
+  volumeSending = 0
   settings.value = null
   bans.value = null
   reload()
@@ -95,6 +101,7 @@ async function saveAnnounce() {
 // The slider stays enabled throughout: disabling it would drop keyboard focus.
 let volumeTimer: ReturnType<typeof setTimeout> | undefined
 let volumeSeq = 0
+let volumeSending = 0 // seq of the request in flight, 0 when none
 function queueVolume() {
   clearTimeout(volumeTimer)
   volumeTimer = setTimeout(saveVolume, 400)
@@ -102,18 +109,23 @@ function queueVolume() {
 onBeforeUnmount(() => clearTimeout(volumeTimer))
 
 async function saveVolume() {
+  volumeTimer = undefined
   const n = Math.max(0, Math.min(100, Math.round(Number(volumeDraft.value) || 0)))
-  if (n === settings.value?.max_volume) return
   const mySeq = ++volumeSeq
+  volumeSending = mySeq
   try {
     const s = await saveGuildSettings({ max_volume: n })
-    if (mySeq !== volumeSeq) return
-    applySettings(s)
+    // a newer value is queued or on its way: let that response settle the slider
+    if (mySeq !== volumeSeq || volumeTimer) return
+    settings.value = s
+    volumeDraft.value = s.max_volume
     say(t('adm.maxVolumeSaved', { n }))
   } catch {
-    if (mySeq !== volumeSeq) return
+    if (mySeq !== volumeSeq || volumeTimer) return
     say(t('common.saveFailed'), false)
     if (settings.value) volumeDraft.value = settings.value.max_volume
+  } finally {
+    if (volumeSending === mySeq) volumeSending = 0
   }
 }
 

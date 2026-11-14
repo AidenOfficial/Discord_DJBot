@@ -39,6 +39,11 @@ const error = ref('')
 const busy = ref(false)
 const toast = ref('')
 const toastOk = ref(true)
+// Auto-saving controls stay enabled while a save is in flight (disabling the focused
+// control drops keyboard focus to <body>), so saves can overlap: only the latest
+// response is applied, and a poll that raced a save is dropped.
+let applySeq = 0
+const inFlight = new Set<number>()
 
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 /** Failures stay until the next message or until dismissed; successes fade after 3 s. */
@@ -56,9 +61,11 @@ function dismissToast() {
 
 async function reload() {
   const guild = selectedGuild.value
+  const seqAtStart = applySeq
   try {
     const fresh = await fetchChannels()
     if (guild !== selectedGuild.value) return  // 途中换了服务器
+    if (inFlight.size || seqAtStart !== applySeq) return
     data.value = fresh
     error.value = ''
   } catch {
@@ -70,6 +77,10 @@ async function reload() {
 }
 
 watch(selectedGuild, () => {
+  // saves still on their way belong to the previous server
+  applySeq++
+  inFlight.clear()
+  busy.value = false
   data.value = null
   error.value = ''
   reload()
@@ -107,24 +118,22 @@ const defaultName = computed(() => {
   return findPath(data.value?.tree ?? null, s.default_channel_id)
 })
 
-// Auto-saving controls stay enabled while a save is in flight (disabling the focused
-// control drops keyboard focus to <body>), so saves can overlap: only the latest
-// response is applied.
-let applySeq = 0
-let pending = 0
 async function apply(promise: Promise<ChannelOverview>, msg: string) {
   const mySeq = ++applySeq
-  pending++
+  inFlight.add(mySeq)
   busy.value = true
   try {
     const fresh = await promise
     if (mySeq === applySeq) data.value = fresh
+    else if (!inFlight.has(mySeq)) return // the server changed meanwhile
     say(msg)
   } catch {
+    if (!inFlight.has(mySeq)) return
     say(t('common.saveFailed'), false)
     if (mySeq === applySeq) reload() // put the controls back to what the server has
   } finally {
-    busy.value = --pending > 0
+    inFlight.delete(mySeq)
+    busy.value = inFlight.size > 0
   }
 }
 
