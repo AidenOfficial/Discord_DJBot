@@ -40,6 +40,27 @@ watch(() => props.view, (next, prev) => {
   enterX.value = props.views.indexOf(next) < props.views.indexOf(prev) ? '-2.5rem' : '2.5rem'
 }, { flush: 'sync' })
 
+// ---- 当前视图的下划线 ----
+// 画在 .ms-pivots::before 上(伪元素、用边框画,高对比度模式下也在),位置由这里写进 --ul-l / --ul-r。
+// 换视图时两条边分先后:往右切,右边先伸到新视图名的右端,左边稍后跟过去收拢;往左切反过来。
+// 动画是 CSS 里 inset 的过渡(只在允许动效时)。不用 anchor positioning:Discord 桌面版(Chromium)还不支持
+const ulDir = ref<'fwd' | 'back'>('fwd')
+const ulReady = ref(false)
+function placeUnderline() {
+  const strip = scroller.value
+  const btn = strip?.querySelector<HTMLElement>(`[data-view="${props.view}"]`)
+  if (!strip || !btn) return
+  // 绝对定位在滚动容器里:left / right 都相对容器的内边距框(随内容一起滚)
+  strip.style.setProperty('--ul-l', `${btn.offsetLeft}px`)
+  strip.style.setProperty('--ul-r', `${strip.clientWidth - btn.offsetLeft - btn.offsetWidth}px`)
+  strip.style.setProperty('--ul-t', `${btn.offsetTop + btn.offsetHeight}px`)
+}
+watch(() => props.view, (next, prev) => {
+  ulDir.value = props.views.indexOf(next) < props.views.indexOf(prev) ? 'back' : 'fwd'
+  void nextTick(placeUnderline)
+})
+let ulResize: ResizeObserver | null = null
+
 /** 内容里的磁贴切换了视图(原来的按钮随之消失):焦点交给新选中的视图名 */
 function focusCurrent() {
   void nextTick(() => currentButton()?.focus())
@@ -50,6 +71,17 @@ defineExpose({ main, focusCurrent })
 let edgeObserver: IntersectionObserver | null = null
 onMounted(() => {
   reveal()
+  placeUnderline()
+  // 第一次放好、让浏览器先算一遍样式,再开过渡:打开时不从 0 滑过来。
+  // 不用 requestAnimationFrame:Activity 在后台时不跑动画帧,过渡就一直开不了
+  void scroller.value?.offsetWidth
+  ulReady.value = true
+  // 视图名换语言、字号随框变化、窗口改大小:重新量,不动画也行(过渡会顺带平滑过去)
+  if (typeof ResizeObserver !== 'undefined' && scroller.value) {
+    ulResize = new ResizeObserver(() => placeUnderline())
+    ulResize.observe(scroller.value)
+    for (const b of scroller.value.children) ulResize.observe(b)
+  }
   const el = scroller.value
   if (!el || typeof IntersectionObserver === 'undefined') return
   if (typeof CSS !== 'undefined' && CSS.supports('animation-timeline', 'scroll()')) return
@@ -64,7 +96,10 @@ onMounted(() => {
   edgeObserver.observe(first)
   edgeObserver.observe(last)
 })
-onBeforeUnmount(() => edgeObserver?.disconnect())
+onBeforeUnmount(() => {
+  edgeObserver?.disconnect()
+  ulResize?.disconnect()
+})
 </script>
 
 <template>
@@ -85,12 +120,18 @@ onBeforeUnmount(() => edgeObserver?.disconnect())
         </div>
       </div>
       <nav class="ms-nav" :aria-label="t('nav.pages')">
-        <div ref="scroller" class="ms-pivots">
+        <div
+          ref="scroller"
+          class="ms-pivots"
+          :class="{ 'ms-pivots--ready': ulReady }"
+          :data-ul-dir="ulDir"
+        >
           <button
             v-for="v in props.views"
             :key="v"
             type="button"
             class="ms-pivot"
+            :data-view="v"
             :aria-current="props.view === v ? 'page' : undefined"
             @click="emit('select', v)"
           >{{ props.label(v) }}</button>
@@ -241,11 +282,31 @@ onBeforeUnmount(() => edgeObserver?.disconnect())
 .ms-pivot:hover { color: var(--c-text); }
 /* 当前视图:文字颜色 + 下划线(不只靠颜色区分);下划线是边框,高对比度模式下也在 */
 .ms-pivot[aria-current="page"] { color: var(--c-text); }
-.ms-pivot[aria-current="page"]::after {
+
+/* 当前视图的下划线:一条,在两个视图名之间先伸展再收拢(位置见脚本里的 placeUnderline) */
+.ms-pivots { position: relative; }
+.ms-pivots::before {
   content: "";
   position: absolute;
-  inset: auto 0 0;
+  inset-block-start: calc(var(--ul-t, 0px) - 3px);
+  inset-inline-start: var(--ul-l, 0px);
+  inset-inline-end: var(--ul-r, 100%);
+  /* 用边框画:高对比度模式会去掉背景色,边框留着 */
   border-block-end: 3px solid var(--c-accent);
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: no-preference) {
+  /* 领头的那条边先走、快;跟在后面的那条晚一点出发、慢一点收拢。都是非线性的 */
+  .ms-pivots--ready[data-ul-dir="fwd"]::before {
+    transition:
+      inset-inline-end 280ms cubic-bezier(0.3, 0, 0.1, 1),
+      inset-inline-start 340ms cubic-bezier(0.5, 0, 0.1, 1) 150ms;
+  }
+  .ms-pivots--ready[data-ul-dir="back"]::before {
+    transition:
+      inset-inline-start 280ms cubic-bezier(0.3, 0, 0.1, 1),
+      inset-inline-end 340ms cubic-bezier(0.5, 0, 0.1, 1) 150ms;
+  }
 }
 
 /* 很矮的 Activity 框(约 300–400px):顶部这两行收紧,把高度留给磁贴。
@@ -289,6 +350,6 @@ onBeforeUnmount(() => edgeObserver?.disconnect())
 }
 
 @media (forced-colors: active) {
-  .ms-pivot[aria-current="page"]::after { border-color: Highlight; }
+  .ms-pivots::before { border-color: Highlight; }
 }
 </style>
