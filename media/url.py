@@ -232,6 +232,9 @@ class URLItem(BaseItem):
         self._set_stage('fetching_info')
         ydl_opts = {
             'noplaylist': True,
+            # 播放列表/合集链接只读目录,不逐条解析(别人的 feed 可以塞上万条),下面直接拒绝
+            'extract_flat': 'in_playlist',
+            'playlist_items': '1',
             # 和下载用同一个格式:读到的信息里选好的就是要下载的音频流,下载时可以直接复用。
             # (用默认格式会选成"视频+音频",复用时把视频流/直链带进下载,实测 B 站返回 403)
             'format': 'bestaudio/best',
@@ -258,6 +261,10 @@ class URLItem(BaseItem):
                     continue
                 if not info:
                     continue
+                if info.get('_type') in ('playlist', 'multi_video'):
+                    self._set_stage('failed')
+                    self.log.info("url: %s is a playlist, refusing it as a single item", self.url)
+                    raise ValidationFailedError(tr('unable_download', item=self.format_title()))
                 # 直播/首映/部分 B 站条目没有时长或标题,yt-dlp 给 None;
                 # 以前直接拿 None 去和 max_duration 比较,TypeError 打死线程。
                 try:
@@ -314,6 +321,12 @@ class URLItem(BaseItem):
         except Exception:
             log.warning("url: cache size enforcement failed", exc_info=True)
 
+    @staticmethod
+    def _max_download_bytes():
+        """单个文件的下载上限(字节);max_download_mb <= 0 表示不限。"""
+        mb = var.config.getint('bot', 'max_download_mb', fallback=300)
+        return mb * 1024 * 1024 if mb > 0 else 0
+
     def _download(self):
         self._enforce_cache_limit()
 
@@ -322,6 +335,9 @@ class URLItem(BaseItem):
         self.speed = 0.0
         self.downloaded_bytes = self.total_bytes = 0
         self.download_eta = None
+        self._download_cap = self._max_download_bytes()
+        self._download_deadline = time.time() + max(3600, 3 * (self.duration or 0))
+        self._download_abort = None
         base_path = var.tmp_folder + self.id
         save_path = base_path
 
@@ -348,6 +364,7 @@ class URLItem(BaseItem):
             'format': 'bestaudio/best',
             'outtmpl': base_path,
             'noplaylist': True,
+            'playlist_items': '1',
             'updatetime': False,
             'verbose': var.config.getboolean('debug', 'youtube_dl'),
             'progress_hooks': [self._ydl_progress_hook],
@@ -358,6 +375,8 @@ class URLItem(BaseItem):
         }
         if streaming:
             ydl_opts['nopart'] = True
+        if self._download_cap:
+            ydl_opts['max_filesize'] = self._download_cap
 
         cookie = var.config.get('youtube_dl', 'cookie_file')
         if cookie:
@@ -390,11 +409,21 @@ class URLItem(BaseItem):
                         info = ydl.extract_info(self.url)  # 重试时重新读取,拿新的直链
                     artwork.ensure(self, info)
                     self._normalize_download_path(info, base_path)
+                    if not self._download_abort and not os.path.exists(base_path):
+                        # yt-dlp 遇到 Content-Length 超过 max_filesize 时不报错,只是不写文件;
+                        # 当成成功会让 is_ready() 判"文件丢失"后反复重下
+                        self._download_abort = 'no file written (larger than max_download_mb?)'
+                    if self._download_abort:  # 也防 yt-dlp 吞掉了进度钩子抛的异常
+                        raise youtube_dl.utils.DownloadError(self._download_abort)
                     download_succeed = True
                     break
                 except:
                     error_traceback = traceback.format_exc().split("During")[0]
                     error = error_traceback.rstrip().split("\n")[-1]
+                    if self._download_abort:
+                        # 超大小/超时重试也一样,直接放弃(下面会删掉已下载的部分)
+                        self.log.error("bot: download aborted: %s", self._download_abort)
+                        break
                     # 还有重试机会时只记 WARNING:YouTube 偶发 403 换备用客户端基本都能下来,
                     # 不该在日志里堆一串 ERROR;最后一次也失败才算错误
                     if i + 1 < attempts:
@@ -508,6 +537,14 @@ class URLItem(BaseItem):
                     self.progress = max(0.0, min(1.0, done / total))
                 except (TypeError, ZeroDivisionError):
                     pass
+            # max_filesize 只看 Content-Length;分块传输/分片下载没有它,得边下边数
+            cap = getattr(self, '_download_cap', 0)
+            if cap and max(done or 0, d.get('total_bytes') or 0) > cap:
+                self._download_abort = 'larger than max_download_mb (%d bytes)' % cap
+            elif time.time() > getattr(self, '_download_deadline', float('inf')):
+                self._download_abort = 'took longer than the download time limit'
+            if getattr(self, '_download_abort', None):
+                raise youtube_dl.utils.DownloadError(self._download_abort)
         elif status == 'finished':
             self.progress = 1.0
 
