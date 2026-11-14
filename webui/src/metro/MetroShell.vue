@@ -34,6 +34,12 @@ function reveal() {
 }
 watch(() => props.view, () => { void nextTick(reveal) })
 
+// 进场方向跟着导航走:去右边的视图,新内容从右边进来;回左边的,从左边进来
+const enterX = ref('2.5rem')
+watch(() => props.view, (next, prev) => {
+  enterX.value = props.views.indexOf(next) < props.views.indexOf(prev) ? '-2.5rem' : '2.5rem'
+}, { flush: 'sync' })
+
 /** 内容里的磁贴切换了视图(原来的按钮随之消失):焦点交给新选中的视图名 */
 function focusCurrent() {
   void nextTick(() => currentButton()?.focus())
@@ -92,7 +98,15 @@ onBeforeUnmount(() => edgeObserver?.disconnect())
       </nav>
     </header>
     <main ref="main" class="ms-main" :class="{ 'ms-main--fill': props.fill }">
-      <slot />
+      <!-- 按视图换 key:换视图时重新挂载,进场动画随之播放(动画本身在 CSS 里,只在允许动效时) -->
+      <div
+        :key="props.view"
+        class="ms-view"
+        :class="{ 'ms-view--fill': props.fill }"
+        :style="{ '--enter-x': enterX }"
+      >
+        <slot />
+      </div>
     </main>
   </div>
 </template>
@@ -253,6 +267,26 @@ onBeforeUnmount(() => edgeObserver?.disconnect())
   overscroll-behavior: contain;
 }
 .ms-main--fill { overflow: hidden; }
+/* 进场时内容往旁边偏一点,不该闪出横向滚动条 */
+.ms-main { overflow-x: hidden; }
+/* 正在播放页自己铺满(它里面是 position: absolute; inset: 0) */
+.ms-view--fill { position: absolute; inset: 0; }
+
+@media (prefers-reduced-motion: no-preference) {
+  /* 其它视图整页滑进来;正在播放页由自己的磁贴依次飞入(见 MetroNow) */
+  .ms-view:not(.ms-view--fill) {
+    animation-name: ms-enter;
+    animation-duration: 480ms;
+    animation-timing-function: cubic-bezier(0.1, 0.9, 0.2, 1);
+    animation-fill-mode: both;
+  }
+}
+@keyframes ms-enter {
+  from {
+    opacity: 0;
+    translate: var(--enter-x) 0;
+  }
+}
 
 @media (forced-colors: active) {
   .ms-pivot[aria-current="page"]::after { border-color: Highlight; }

@@ -207,21 +207,222 @@ async function act(body: QueueAction, pos: number, title: string) {
 // 桌面版 Discord 多数人用竖向滚轮;容器竖向已经到头、指针下面也没有能竖着滚的区域(歌词)时,
 // 把滚轮换成横向滚动。scrollBy 是"按方向"的滚动,吸附会往滚动方向找组,不会被拉回原组。
 
+// 滚轮 / 触控板驱动的全景滚动:一个带惯性的弹簧(临界阻尼,在范围内不来回晃)。
+// - 段落式:鼠标滚轮一格推进到下一列磁贴(至少约 1/5 个可视宽度),连续几格就跨几段;
+// - 惯性:快速连拨几格后停手、触控板松手,按当时的速度多滑出去一点,再落到最近的一列;
+// - 触底回弹:到头还往外推,内容像橡皮筋一样被拉出去一点(越拉越吃力),然后弹回。
+// 越界的那一段 scrollLeft 表达不了,用滚动层自己的 translate 画(平移内容会改变可滚动宽度,
+// 右端回弹时浏览器会把 scrollLeft 钳回去;平移滚动层本身不会)。滑动期间关掉 scroll-snap,
+// 否则每帧写入的位置都会被吸附拉走;触屏(原生滑动)不经过这里。减少动效:一格一段,直接跳。
 const scroller = ref<HTMLElement | null>(null)
+const reduceMotion = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null
+
+/** 弹簧刚度(1/s²)和阻尼:阻尼 = 2√k 是临界阻尼,最快回到目标又不过冲 */
+const SPRING_K = 150
+const SPRING_W = Math.sqrt(SPRING_K)
+const SPRING_C = 2 * SPRING_W
+/** 鼠标滚轮一格至少推进可视宽度的这个比例 */
+const STEP_MIN = 0.2
+/** 停手多久算"停下"(之后才算惯性、落位) */
+const IDLE_MS = 110
+/** 触控板松手后按速度多滑的时间(秒):位移 = 速度 × 这个数 */
+const FLING_S = 0.22
+/** 到头还拨滚轮时给的向外速度(px/s),弹簧把它拉回来就是回弹 */
+const BOUNCE_V = 2600
+/** 触控板推过头时的阻力:越界部分只跟手这个比例 */
+const EDGE_RESIST = 0.35
+
+let phys = { x: 0, v: 0, target: 0 }
+let physRaf = 0
+let physLast = 0
+let written = -1
+let rubber = 0
+let lastInputAt = 0
+let pendingIdle = false
+let continuous = false
+const notches: number[] = []
+const recent: { t: number, d: number }[] = []
+
+function maxScroll(el: HTMLElement) {
+  return Math.max(0, el.scrollWidth - el.clientWidth)
+}
+function clamp(n: number, lo: number, hi: number) {
+  return Math.min(hi, Math.max(lo, n))
+}
+/** 越界距离 → 画出来的位移:越拉越吃力,最多约四分之一个可视宽度(iOS 的橡皮筋公式) */
+function rubberBand(d: number, w: number) {
+  const dim = w * 0.25
+  return Math.sign(d) * (1 - 1 / (Math.abs(d) * 0.55 / dim + 1)) * dim
+}
+
+/** 落位点:每组的开头、每一列磁贴的开头、两头。扣掉 scroll-padding,和吸附对齐的位置一致 */
+function segments(el: HTMLElement) {
+  const max = maxScroll(el)
+  const box = el.getBoundingClientRect()
+  const pad = parseFloat(getComputedStyle(el).scrollPaddingInlineStart) || 0
+  const base = el.scrollLeft
+  const pts = [0, max]
+  for (const n of el.querySelectorAll<HTMLElement>('.g, .now-grid > *, .q-list > *, .q-more > *')) {
+    pts.push(clamp(Math.round(base + n.getBoundingClientRect().left - box.left - pad), 0, max))
+  }
+  pts.sort((a, b) => a - b)
+  return pts.filter((p, i) => i === 0 || p - pts[i - 1] > 12)
+}
+function nearestSegment(el: HTMLElement, at: number) {
+  let best = clamp(at, 0, maxScroll(el))
+  let dist = Infinity
+  for (const p of segments(el)) {
+    if (Math.abs(p - at) < dist) { dist = Math.abs(p - at); best = p }
+  }
+  return best
+}
+/** 从 from 往 dir 方向走 count 段,每段至少 STEP_MIN 个可视宽度 */
+function nextSegment(el: HTMLElement, from: number, dir: number, count: number) {
+  const pts = segments(el)
+  const min = el.clientWidth * STEP_MIN
+  let at = from
+  for (let i = 0; i < count; i++) {
+    const next = dir > 0 ? pts.find((p) => p - at >= min) : [...pts].reverse().find((p) => at - p >= min)
+    at = next ?? (dir > 0 ? pts[pts.length - 1] : 0)
+  }
+  return at
+}
+
+function render(el: HTMLElement) {
+  const max = maxScroll(el)
+  const inside = clamp(phys.x, 0, max)
+  if (Math.abs(el.scrollLeft - inside) >= 0.5) el.scrollTo({ left: inside, behavior: 'instant' as ScrollBehavior })
+  written = el.scrollLeft
+  const over = phys.x - inside
+  const shift = Math.abs(over) < 0.5 ? 0 : rubberBand(over, el.clientWidth)
+  if (shift !== rubber) {
+    rubber = shift
+    el.style.translate = shift ? `${-shift}px 0` : ''
+  }
+}
+
+function stopPhysics() {
+  if (physRaf) cancelAnimationFrame(physRaf)
+  physRaf = 0
+  written = -1
+  pendingIdle = false
+  if (scroller.value) scroller.value.style.translate = ''
+  rubber = 0
+}
+
+/** 停手了:算惯性,落到最近的一列;推过头的部分由弹簧拉回来(回弹) */
+function onIdle(el: HTMLElement) {
+  const max = maxScroll(el)
+  const now = performance.now()
+  let projected = phys.target
+  if (continuous) {
+    const span = recent.filter((r) => now - r.t < 120)
+    const vel = span.length > 1 ? span.reduce((s, r) => s + r.d, 0) / Math.max(16, now - span[0].t) * 1000 : 0
+    projected = clamp(phys.target, 0, max) + vel * FLING_S
+  } else {
+    const quick = notches.filter((t) => now - t < 320).length
+    if (quick >= 3) {
+      const dir = Math.sign(phys.target - phys.x) || Math.sign(phys.v)
+      if (dir) projected = nextSegment(el, phys.target, dir, Math.min(2, quick - 2))
+    }
+  }
+  phys.target = nearestSegment(el, clamp(projected, 0, max))
+  notches.length = 0
+  recent.length = 0
+}
+
+function tick(now: number) {
+  const el = scroller.value
+  if (!el) { stopPhysics(); return }
+  // 期间有人拖了滚动条、按了方向键、用触屏滑了:让给他们
+  if (written >= 0 && Math.abs(el.scrollLeft - written) > 2) { stopPhysics(); return }
+  const dt = Math.min(physLast ? (now - physLast) / 1000 : 1 / 60, 0.05)
+  physLast = now
+  if (pendingIdle && now - lastInputAt >= IDLE_MS) { pendingIdle = false; onIdle(el) }
+  // 半隐式欧拉,4ms 一小步,刚度再大也稳
+  const steps = Math.ceil(dt / 0.004)
+  const h = dt / steps
+  for (let i = 0; i < steps; i++) {
+    phys.v += (SPRING_K * (phys.target - phys.x) - SPRING_C * phys.v) * h
+    phys.x += phys.v * h
+  }
+  const resting = !pendingIdle && Math.abs(phys.target - phys.x) < 0.4 && Math.abs(phys.v) < 6
+  if (resting) phys.x = phys.target
+  render(el)
+  if (resting) { stopPhysics(); return }
+  physRaf = requestAnimationFrame(tick)
+}
+
+function startPhysics(el: HTMLElement) {
+  el.classList.add('mn-scroll--gliding')
+  if (physRaf) return
+  phys = { x: el.scrollLeft, v: 0, target: el.scrollLeft }
+  physLast = 0
+  written = -1
+  physRaf = requestAnimationFrame(tick)
+}
+
 function onWheel(e: WheelEvent) {
   const el = scroller.value
-  if (!el || e.ctrlKey || Math.abs(e.deltaX) >= Math.abs(e.deltaY)) return
-  if (el.scrollWidth - el.clientWidth < 2) return
-  const dy = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientWidth : 1)
-  for (let n = e.target instanceof Element ? e.target : null; n && n !== el.parentElement; n = n.parentElement) {
-    if (n.scrollHeight - n.clientHeight < 2) continue
-    const oy = getComputedStyle(n).overflowY
-    if (oy !== 'auto' && oy !== 'scroll') continue
-    if (dy < 0 ? n.scrollTop > 0 : n.scrollTop + n.clientHeight < n.scrollHeight - 1) return
+  if (!el || e.ctrlKey) return
+  const max = maxScroll(el)
+  if (max < 2) return
+  const horizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY)
+  const raw = horizontal ? e.deltaX : e.deltaY
+  const d = raw * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientWidth : 1)
+  if (!d) return
+  if (!horizontal) {
+    // 指针下面有能竖着滚的区域(歌词)且还没到头:让它自己滚
+    for (let n = e.target instanceof Element ? e.target : null; n && n !== el.parentElement; n = n.parentElement) {
+      if (n.scrollHeight - n.clientHeight < 2) continue
+      const oy = getComputedStyle(n).overflowY
+      if (oy !== 'auto' && oy !== 'scroll') continue
+      if (d < 0 ? n.scrollTop > 0 : n.scrollTop + n.clientHeight < n.scrollHeight - 1) return
+    }
   }
-  const before = el.scrollLeft
-  el.scrollBy({ left: dy, behavior: 'instant' as ScrollBehavior })
-  if (el.scrollLeft !== before) e.preventDefault()
+  const dir = Math.sign(d)
+  const now = performance.now()
+  // 鼠标滚轮:一格一段(行模式,或者一下就是 50px 以上的整数);触控板:连续的小增量
+  const notch = !horizontal && (e.deltaMode !== 0 || (Math.abs(raw) >= 50 && Number.isInteger(raw)))
+    && !(continuous && now - lastInputAt < 200)
+
+  if (reduceMotion?.matches) {
+    const from = el.scrollLeft
+    const to = notch ? nextSegment(el, from, dir, 1) : clamp(from + d, 0, max)
+    if (to === from) return
+    e.preventDefault()
+    el.scrollTo({ left: to, behavior: 'instant' as ScrollBehavior })
+    return
+  }
+
+  e.preventDefault()
+  startPhysics(el)
+  lastInputAt = now
+  pendingIdle = true
+  continuous = !notch
+  if (notch) {
+    notches.push(now)
+    const from = clamp(phys.target, 0, max)
+    const to = nextSegment(el, from, dir, 1)
+    if (to === from) phys.v += dir * BOUNCE_V
+    // 一拨就走:按这一段的距离给初速度 ω·Δ。临界阻尼弹簧从这个速度出发正好是指数式的 ease-out
+    // (起步最快、越靠近越慢),连拨几格速度叠加,越滚越快
+    else phys.v += SPRING_W * (to - from)
+    phys.target = to
+  } else {
+    recent.push({ t: now, d })
+    if (recent.length > 12) recent.shift()
+    const outside = phys.target < 0 || phys.target > max
+    phys.target += d * (outside ? EDGE_RESIST : 1)
+    // 触控板要跟手:位置直接跟过去一半,不全等弹簧
+    phys.x += (phys.target - phys.x) * 0.5
+  }
+}
+
+/** 触屏用户:交还给原生滑动和吸附 */
+function onTouchStart() {
+  stopPhysics()
+  scroller.value?.classList.remove('mn-scroll--gliding')
 }
 
 // ---- 位置指示条 ----
@@ -277,6 +478,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   resizeObs?.disconnect()
   cancelAnimationFrame(posRaf)
+  stopPhysics()
 })
 </script>
 
@@ -297,6 +499,7 @@ onBeforeUnmount(() => {
       :aria-label="t('nav.home')"
       tabindex="0"
       @wheel="onWheel"
+      @touchstart.passive="onTouchStart"
       @scroll.passive="syncPos"
     >
       <div class="mn-groups">
@@ -507,6 +710,8 @@ onBeforeUnmount(() => {
 .mn {
   position: absolute;
   inset: 0;
+  /* 触底回弹时滚动层整个平移出去一点:裁在这里,不撑出外面的滚动条 */
+  overflow: clip;
   display: flex;
   flex-direction: column;
   container: nowbox / size;
@@ -530,6 +735,8 @@ onBeforeUnmount(() => {
   flex: 1;
   min-block-size: 0;
   overflow: auto;
+  /* 竖向版面只竖着滚:进场动画里磁贴临时往右偏,不该闪出横向滚动条(全景里再打开) */
+  overflow-x: hidden;
   overscroll-behavior: contain;
   container: now / size;
   padding: 0.75rem var(--m-pad) 1.5rem;
@@ -963,6 +1170,7 @@ button.t-accent:disabled { background: var(--m-tile); color: var(--c-text-muted)
   .mn-scroll {
     padding-block: 0.5rem 1.25rem;
     padding-inline-end: 0;
+    overflow-x: auto;
     scroll-snap-type: x proximity;
     overscroll-behavior: contain;
   }
@@ -1172,5 +1380,54 @@ button.t-accent:disabled { background: var(--m-tile); color: var(--c-text-muted)
   .vol::-moz-range-track { background: GrayText; }
   .vol::-moz-range-progress { background: Highlight; }
   .vol::-moz-range-thumb { background: CanvasText; }
+}
+
+/* ======================================================================
+   动效(只在没有要求减少动效时启用;默认就是静态的最终状态)
+   ====================================================================== */
+
+/* 滚轮驱动的滑动期间不吸附,否则每帧写入的位置都会被拉回组的开头 */
+.mn-scroll.mn-scroll--gliding { scroll-snap-type: none; }
+
+@media (prefers-reduced-motion: no-preference) {
+  /* 方向键、Tab 把磁贴滚进来时也是顺滑的(滚轮滑动用的是 instant,不受影响) */
+  .mn-scroll { scroll-behavior: smooth; }
+
+  /* 进场:像 Windows 8 开始屏幕,磁贴从侧面依次飞进来。方向跟着导航走(外壳设 --enter-x),
+     每组晚一点,组里每块再错开一点。只动 translate 和 opacity,留在合成线程上 */
+  .g-head,
+  .now-grid > *,
+  .q-list > *,
+  .q-more > *,
+  .g-prep > :not(.g-head),
+  .g-lyrics > * {
+    animation-name: mn-enter;
+    animation-duration: 560ms;
+    animation-timing-function: cubic-bezier(0.1, 0.9, 0.2, 1);
+    animation-fill-mode: both;
+    /* 不认识 sibling-index() 的浏览器用下面 nth-child 给的 --sibling-index;认识的用后一行 */
+    animation-delay: calc(var(--g, 0) * 90ms + (var(--sibling-index, 1) - 1) * 28ms);
+    animation-delay: calc(var(--g, 0) * 90ms + min(sibling-index() - 1, 7) * 28ms);
+  }
+}
+.g-now { --g: 0; }
+.g-prep { --g: 1; }
+.g-queue { --g: 1; }
+.g-prep ~ .g-queue { --g: 2; }
+.g-lyrics { --g: 2; }
+.g-prep ~ .g-lyrics { --g: 3; }
+.now-grid > :nth-child(2), .q-list > :nth-child(2), .q-more > :nth-child(2) { --sibling-index: 2; }
+.now-grid > :nth-child(3), .q-list > :nth-child(3), .q-more > :nth-child(3) { --sibling-index: 3; }
+.now-grid > :nth-child(4), .q-list > :nth-child(4) { --sibling-index: 4; }
+.now-grid > :nth-child(5), .q-list > :nth-child(5) { --sibling-index: 5; }
+.now-grid > :nth-child(6), .q-list > :nth-child(6) { --sibling-index: 6; }
+.now-grid > :nth-child(7), .q-list > :nth-child(7) { --sibling-index: 7; }
+.now-grid > :nth-child(n + 8), .q-list > :nth-child(n + 8) { --sibling-index: 8; }
+
+@keyframes mn-enter {
+  from {
+    opacity: 0;
+    translate: var(--enter-x, 2.5rem) 0;
+  }
 }
 </style>
