@@ -34,6 +34,9 @@ export const ja: Record<Key, Msg> = {
   'theme.auto': '自動',
   'theme.light': 'ライト',
   'theme.dark': 'ダーク',
+  'theme.autoAs': '自動（{mode}）',
+  'theme.toDark': 'ダークテーマに切り替え',
+  'theme.toLight': 'ライトテーマに切り替え',
   'lang.title': '言語',
 
   'type.url': 'ストリーム',

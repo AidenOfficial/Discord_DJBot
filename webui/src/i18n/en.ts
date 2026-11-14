@@ -37,6 +37,9 @@ export const en = {
   'theme.auto': 'auto',
   'theme.light': 'light',
   'theme.dark': 'dark',
+  'theme.autoAs': 'auto ({mode})',
+  'theme.toDark': 'Switch to dark theme',
+  'theme.toLight': 'Switch to light theme',
   'lang.title': 'Language',
 
   // ---- 枚举 ----
