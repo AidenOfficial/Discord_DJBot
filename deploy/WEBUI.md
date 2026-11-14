@@ -281,7 +281,9 @@ Zero Trust 控制台 → Access → Applications:
    `POST /api/activity/token {code, guild_id, channel_id}`。
 3. 服务端用 Client Secret 换 Discord access token,读 `/users/@me` 和 `/users/@me/guilds`,然后
    **不信 SDK 给的上下文**,逐项核对:bot 在这个服务器;用户是成员(OAuth 服务器列表,或 bot 查成员);
-   按 bot 网关的语音状态,用户此刻就在这个语音频道里。都对了才签发我们自己的短期令牌
+   按 bot 网关的语音状态,用户此刻就在这个语音频道里。从文字频道启动的(聊天框的应用按钮、`/launch`)
+   要求用户此刻在这个服务器的某个语音频道里,令牌绑到那个语音频道;SDK 给的是另一个语音频道、
+   别的服务器的频道或查不到的频道,一律拒绝。都对了才签发我们自己的短期令牌
    (`activity_token_ttl` 秒,默认 15 分钟,用 `flask_secret` 签名,可撤销)。
 4. 前端调 SDK 的 `authenticate()`,之后所有 API 请求带 `Authorization: Bearer <令牌>`。
    令牌只在内存里,不写 localStorage,不用 Cookie。快到期时 `POST /api/activity/refresh`
@@ -344,7 +346,7 @@ public_url = https://<PUBLIC_HOST>
 - [ ] Client Secret 只在 `.env`,没进 git;`flask_secret` 不是默认值(令牌用它签名,换了就全部失效)。
 - [ ] 桌面客户端:进语音频道 → 火箭图标 → 打开 → 第一次弹授权 → 看到当前服务器的队列,能播放 / 暂停 / 跳过 / 搜索点歌,声音从 bot 出来。
 - [ ] 手机客户端(竖屏):布局不溢出,刘海和底部手势条不挡按钮;缩成画中画时只剩迷你播放条。
-- [ ] 不在语音频道的人打开(或从别的频道转发的邀请)被拒,提示"先进入语音频道"。
+- [ ] 不在语音频道的人打开(或从别的频道转发的邀请)被拒,提示"先进入语音频道";人在语音频道里时,从文字频道启动也能用。
 - [ ] 被 `/userban` 的账号打开 Activity 被拒;解封后能打开。
 - [ ] bot 不打算让陌生人邀请:Portal → Bot 关掉 **Public Bot**,`[discord] allowed_guilds` 填了自己的服务器,
       `[bot] max_active_sessions` 设了上限。

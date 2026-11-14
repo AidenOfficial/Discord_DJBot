@@ -284,7 +284,8 @@ def is_member(guild_id, user_id, oauth_guilds):
 
 
 def check_context(user_id, guild_id, channel_id, oauth_guilds):
-    """guild / channel 是 SDK 在客户端给的,一律按服务端知道的核对;不对就抛 Rejected。"""
+    """guild / channel 是 SDK 在客户端给的,一律按服务端知道的核对;不对就抛 Rejected。
+    返回令牌要绑的语音频道 id(这个人此刻所在的语音频道)。"""
     if guild_id not in web_auth_discord.bot_guild_ids():
         raise Rejected('guild_not_served')
     if not is_member(guild_id, user_id, oauth_guilds):
@@ -294,8 +295,35 @@ def check_context(user_id, guild_id, channel_id, oauth_guilds):
     mine = next((gd for gd in oauth_guilds if gd['id'] == guild_id), None)
     if web_context.user_banned(user_id, guild_id, manage=web_auth_discord.can_manage(mine)):
         raise Rejected('user_banned')
-    if voice_channel_of(guild_id, user_id) != channel_id:
+    current = voice_channel_of(guild_id, user_id)
+    if current is None:
         raise Rejected('not_in_voice_channel')
+    if current == channel_id:
+        return current
+    # 从文字频道启动(聊天框的应用按钮、/launch):人在这个服务器的某个语音频道里就行,令牌绑到那个语音频道。
+    # SDK 给的是另一个语音频道、别的服务器的频道或者查不到,都当成对不上。
+    if channel_kind(guild_id, channel_id) == 'text':
+        return current
+    raise Rejected('not_in_voice_channel')
+
+
+def channel_kind(guild_id, channel_id):
+    """'voice'(语音 / 舞台)、'text'(这个服务器里的其他频道)或 None(查不到 / 不属于这个服务器)。
+    只读 bot 网关的频道缓存,不发请求。"""
+    client = getattr(getattr(_hub(), 'client', None), 'client', None)
+    if client is None:
+        return None
+    try:
+        channel = client.get_channel(int(channel_id))
+    except (TypeError, ValueError):
+        return None
+    guild = getattr(channel, 'guild', None)
+    if channel is None or guild is None or str(guild.id) != str(guild_id):
+        return None
+    import discord
+    if isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+        return 'voice'
+    return 'text'
 
 
 def _for_log(value):
@@ -490,7 +518,7 @@ def create_blueprint(requires_auth):
                 return _error('discord_auth_failed', 401)
             return _error('discord_unavailable', 502)
         try:
-            check_context(user['id'], guild_id, channel_id, guilds)
+            voice_id = check_context(user['id'], guild_id, channel_id, guilds)
         except Rejected as e:
             # 不记进按 IP 的失败桶:换令牌已经成功、人是真的,只是不在语音频道等;
             # 大家共用 Discord 代理的 IP,记进去会把别人一起锁住(按人的 activity_login 已经限过了)
@@ -500,6 +528,8 @@ def create_blueprint(requires_auth):
 
         identity = web_auth_discord._link_on_login(user)
         web_auth_discord._store(user['id'], token=token, guilds=guilds)
+        # 从文字频道启动时,令牌绑的是这个人所在的语音频道(离开它,刷新就会被拒)
+        channel_id = voice_id
         ours, expires_at = issue(user, guild_id, channel_id)
         log.info("web: %s (discord:%s) opened the Activity in %s/%s as %s",
                  _for_log(web_auth_discord.display_name(user)), _for_log(user['id']),

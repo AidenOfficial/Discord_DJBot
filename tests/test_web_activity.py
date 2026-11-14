@@ -479,3 +479,50 @@ def test_search_registers_result_thumbnails(env, monkeypatch):
     env.client.get('/api/search?q=hello')
     assert env.mod.known_image('https://i.ytimg.com/vi/abc/mqdefault.jpg') is None
 
+
+
+# ---- 从文字频道启动(聊天框的应用按钮、/launch) -------------------------------------
+
+TEXT = '5050'
+
+
+def _channel(cls, guild_id):
+    import discord
+    ch = object.__new__(getattr(discord, cls))
+    ch.guild = types.SimpleNamespace(id=int(guild_id))
+    return ch
+
+
+@pytest.fixture
+def channels(env):
+    """bot 网关的频道缓存:VOICE / OTHER_VOICE 是语音频道,TEXT 是文字频道,都在 HOME。"""
+    cache = {int(VOICE): _channel('VoiceChannel', HOME), int(OTHER_VOICE): _channel('VoiceChannel', HOME),
+             int(TEXT): _channel('TextChannel', HOME), 9090: _channel('TextChannel', '999')}
+    env.hub.client = types.SimpleNamespace(client=types.SimpleNamespace(get_channel=cache.get))
+    # Hub 连上网关后,它说的成员关系就当真:USER 是 HOME 的成员
+    env.hub.members.setdefault(HOME, set()).add(USER)
+    return cache
+
+
+def test_text_channel_launch_binds_to_the_users_voice_channel(env, channels):
+    rv = exchange(env.client, channel=TEXT)
+    assert rv.status_code == 200, rv.get_data(as_text=True)
+    assert rv.get_json()['channel_id'] == VOICE          # 绑到人所在的语音频道,不是文字频道
+    token = rv.get_json()['token']
+    assert queue(env.client, token).status_code == 200
+    # 离开那个语音频道:续期被拒
+    env.hub.voice[(HOME, USER)] = OTHER_VOICE
+    rv = env.client.post('/api/activity/refresh', headers=bearer(token))
+    assert rv.status_code == 403 and rv.get_json()['error'] == 'not_in_voice_channel'
+
+
+def test_text_channel_launch_still_needs_voice(env, channels):
+    env.hub.voice.clear()
+    rv = exchange(env.client, channel=TEXT)
+    assert rv.status_code == 403 and rv.get_json()['error'] == 'not_in_voice_channel'
+
+
+def test_other_voice_or_foreign_channel_still_rejected(env, channels):
+    assert exchange(env.client, channel=OTHER_VOICE).get_json()['error'] == 'not_in_voice_channel'
+    assert exchange(env.client, channel='9090').get_json()['error'] == 'not_in_voice_channel'   # 别的服务器
+    assert exchange(env.client, channel='7070').get_json()['error'] == 'not_in_voice_channel'   # 查不到
