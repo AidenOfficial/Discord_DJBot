@@ -13,8 +13,18 @@ import { announce } from '../composables/useAnnounce'
 import { t } from '../i18n'
 
 const props = withDefaults(
-  defineProps<{ source: PlaylistSource; label?: string; /** 列表行里用:按钮名字带上歌名 */ itemTitle?: string }>(),
-  { label: '', itemTitle: '' },
+  defineProps<{
+    source: PlaylistSource
+    label?: string
+    /** 列表行里用:按钮名字带上歌名 */
+    itemTitle?: string
+    /**
+     * 面板放进顶层(popover):按钮在会裁切内容的滚动区里时用(Activity 的横向全景)。
+     * 不传就和原来一样,面板跟在按钮后面绝对定位
+     */
+    layer?: boolean
+  }>(),
+  { label: '', itemTitle: '', layer: false },
 )
 
 const { me, playlists, reloadPlaylists } = useMe()
@@ -30,6 +40,47 @@ const trigger = ref<HTMLButtonElement | null>(null)
 const panel = ref<HTMLElement | null>(null)
 const nameInput = ref<HTMLInputElement | null>(null)
 const panelId = useId()
+
+// ---- 顶层模式 ----
+// 不支持 popover 的老浏览器退回普通的绝对定位(固定定位也逃不出容器查询那层的包含块)。
+// 关闭仍由下面的点外面 / Esc / Tab 出去处理,所以用 manual,不用 auto 的轻触关闭。
+const layered = props.layer && typeof HTMLElement !== 'undefined'
+  && Object.prototype.hasOwnProperty.call(HTMLElement.prototype, 'popover')
+// 支持锚点定位时 CSS 自己翻转;不支持时由 placeFixed() 按按钮位置算
+const nativeAnchor = layered && typeof CSS !== 'undefined'
+  && CSS.supports('position-area', 'block-end') && CSS.supports('anchor-name', '--a')
+const anchorName = `--atp-${panelId.replace(/[^\w-]/g, '')}`
+const fixedPos = ref<{ top: number; left: number; maxBlock: number } | null>(null)
+let placeRaf = 0
+
+function placeFixed() {
+  const el = panel.value
+  const btn = trigger.value
+  if (!el || !btn) return
+  const a = btn.getBoundingClientRect()
+  const r = el.getBoundingClientRect()
+  const vw = document.documentElement.clientWidth
+  const vh = window.innerHeight
+  const below = vh - a.bottom - 12
+  const above = a.top - 12
+  const up = r.height > below && above > below
+  const room = Math.max(0, up ? above : below)
+  const h = Math.min(r.height, room)
+  fixedPos.value = {
+    // 和按钮右边对齐(同默认版面的 right-0),左右都留 8px
+    left: Math.max(8, Math.min(a.right - r.width, vw - 8 - r.width)),
+    top: up ? a.top - 4 - h : a.bottom + 4,
+    maxBlock: room,
+  }
+}
+function schedulePlace(e?: Event) {
+  if (e && panel.value?.contains(e.target as Node)) return // 面板里的列表自己滚动
+  if (placeRaf) return
+  placeRaf = requestAnimationFrame(() => {
+    placeRaf = 0
+    if (open.value) placeFixed()
+  })
+}
 // 默认在按钮右下方展开;放不下时向上翻 / 横向平移回视口内(见 place())
 const openUp = ref(false)
 const shiftX = ref(0)
@@ -60,10 +111,16 @@ function close(focusTrigger = false) {
 function place() {
   openUp.value = false
   shiftX.value = 0
+  fixedPos.value = null
   void nextTick(() => {
     const el = panel.value
     const anchor = root.value
     if (!el || !anchor) return
+    if (layered) {
+      if (!el.matches(':popover-open')) el.showPopover()
+      if (!nativeAnchor) placeFixed()
+      return
+    }
     const r = el.getBoundingClientRect()
     const a = anchor.getBoundingClientRect()
     const vw = document.documentElement.clientWidth
@@ -153,18 +210,31 @@ function onFocusOut(e: FocusEvent) {
 function onDocClick(e: MouseEvent) {
   if (open.value && root.value && !root.value.contains(e.target as Node)) close()
 }
+// 顶层面板按坐标放:按钮所在的区域滚动或窗口变大小时跟着挪
+const trackPosition = layered && !nativeAnchor
 watch(open, (isOpen) => {
   if (isOpen) {
     document.addEventListener('click', onDocClick, true)
     document.addEventListener('keydown', onKey)
+    if (trackPosition) {
+      document.addEventListener('scroll', schedulePlace, { capture: true, passive: true })
+      window.addEventListener('resize', schedulePlace, { passive: true })
+    }
   } else {
     document.removeEventListener('click', onDocClick, true)
     document.removeEventListener('keydown', onKey)
+    document.removeEventListener('scroll', schedulePlace, true)
+    window.removeEventListener('resize', schedulePlace)
+    cancelAnimationFrame(placeRaf)
+    placeRaf = 0
   }
 })
 onBeforeUnmount(() => {
   document.removeEventListener('click', onDocClick, true)
   document.removeEventListener('keydown', onKey)
+  document.removeEventListener('scroll', schedulePlace, true)
+  window.removeEventListener('resize', schedulePlace)
+  cancelAnimationFrame(placeRaf)
   clearTimeout(closeTimer)
   if (closeCurrent === closeMe) closeCurrent = null
 })
@@ -175,12 +245,14 @@ onBeforeUnmount(() => {
     v-if="me?.can_have_playlists"
     ref="root"
     class="relative inline-flex"
+    :style="layered ? { '--atp-anchor': anchorName } : undefined"
     @focusout="onFocusOut"
   >
     <button
       ref="trigger"
       type="button"
       class="inline-flex cursor-pointer items-center gap-1 rounded-md border-0 px-2 py-1 text-xs"
+      :class="{ 'atp-anchor': layered }"
       :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
       :title="t('atp.title')"
       :aria-label="ariaLabel"
@@ -193,11 +265,13 @@ onBeforeUnmount(() => {
       v-if="open"
       :id="panelId"
       ref="panel"
-      class="absolute right-0 z-30 w-56 max-w-[calc(100vw-2rem)] rounded-xl p-1.5 text-left text-sm"
-      :class="openUp ? 'bottom-full mb-1' : 'top-full mt-1'"
+      v-bind="layered ? { popover: 'manual' } : {}"
+      class="z-30 w-56 max-w-[calc(100vw-2rem)] rounded-xl p-1.5 text-left text-sm"
+      :class="layered ? 'atp-layer' : ['absolute right-0', openUp ? 'bottom-full mb-1' : 'top-full mt-1']"
       :style="{
         background: 'var(--c-surface)', boxShadow: 'var(--shadow-2)', border: '1px solid var(--c-border)',
-        transform: shiftX ? `translateX(${shiftX}px)` : undefined,
+        transform: !layered && shiftX ? `translateX(${shiftX}px)` : undefined,
+        ...(fixedPos ? { top: `${fixedPos.top}px`, left: `${fixedPos.left}px`, maxBlockSize: `${fixedPos.maxBlock}px` } : {}),
       }"
     >
       <p class="px-2 pt-1 pb-1.5 text-[11px] font-semibold uppercase tracking-wider" :style="{ color: 'var(--c-text-faint)' }">
@@ -248,3 +322,27 @@ onBeforeUnmount(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* 顶层模式(layer):popover 的默认样式是视口正中、Canvas 底色,这里接管位置和文字颜色 */
+.atp-layer {
+  position: fixed;
+  color: var(--c-text);
+  overflow: auto;
+}
+@supports (position-area: block-end) {
+  .atp-anchor { anchor-name: var(--atp-anchor); }
+  .atp-layer {
+    inset: auto;
+    margin: 0.25rem 0;
+    position-anchor: var(--atp-anchor);
+    /* 按钮下方、右边对齐往左展开;放不下就翻到上方 / 另一侧 */
+    position-area: block-end span-inline-start;
+    position-try-fallbacks: flip-block, flip-inline, flip-block flip-inline;
+  }
+}
+@supports not (position-area: block-end) {
+  /* top / left 由 placeFixed() 按按钮位置算 */
+  .atp-layer { inset: auto; margin: 0; }
+}
+</style>

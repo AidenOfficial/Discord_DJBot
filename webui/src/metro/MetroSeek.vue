@@ -3,6 +3,7 @@
 // 和 NowPlaying 的进度条同一套做法:外层 div 处理指针(iOS 上原生 range 只能按住滑块拖),
 // 盖在上面的透明原生 range 只给键盘和读屏用。
 import { computed, ref } from 'vue'
+import { formatBytes } from '../api'
 import { formatTime, useStatus } from '../composables/useStatus'
 import { t } from '../i18n'
 import { useSeek } from './seek'
@@ -128,9 +129,21 @@ const skipBlocks = computed(() => {
         @input="onInput"
       />
     </div>
-    <div class="ms-times" aria-hidden="true">
-      <span>{{ formatTime(shownPlayhead) }}</span>
-      <span>{{ current.duration ? formatTime(current.duration) : '--:--' }}</span>
+    <!-- 时间只给眼睛看(读屏从进度条的 aria-valuetext 读);中间是后台下载 / SponsorBlock 的说明,
+         和 NowPlaying 一样的文字,读屏也能读到(条纹的 title 提示在触屏和读屏上都够不着) -->
+    <div class="ms-times">
+      <span aria-hidden="true">{{ formatTime(shownPlayhead) }}</span>
+      <span v-if="current.download || skipBlocks.length" class="ms-notes">
+        <span v-if="current.download" class="ms-note">
+          <Icon icon="download" class="ms-note-icon" aria-hidden="true" />{{ t('np.bgDownload', { pct: Math.round(current.download.progress * 100) })
+          }}<template v-if="current.download.speed"> · {{ formatBytes(current.download.speed) }}/s</template><template
+            v-if="current.download.eta"> · {{ t('np.bgDone', { eta: formatTime(current.download.eta) }) }}</template>
+        </span>
+        <span v-if="skipBlocks.length" class="ms-note">
+          <Icon icon="forward-step" class="ms-note-icon" aria-hidden="true" />{{ t('np.skipping', { n: skipBlocks.length }) }}
+        </span>
+      </span>
+      <span aria-hidden="true">{{ current.duration ? formatTime(current.duration) : '--:--' }}</span>
     </div>
   </div>
 </template>
@@ -162,7 +175,8 @@ const skipBlocks = computed(() => {
   inset: 0;
   transform-origin: left center;
 }
-.ms-buffer { background: var(--m-track); transition: transform 800ms linear; }
+/* 叠在轨道上:比轨道深、比播放进度浅,三层都分得开 */
+.ms-buffer { background: color-mix(in oklab, var(--c-text) 30%, transparent); transition: transform 800ms linear; }
 .ms-fill { background: var(--c-text); }
 .ms-skip {
   position: absolute;
@@ -190,12 +204,26 @@ const skipBlocks = computed(() => {
 .ms-input:focus-visible { outline: 2px solid var(--c-accent); outline-offset: 0; }
 .ms-times {
   display: flex;
+  align-items: baseline;
   justify-content: space-between;
+  gap: 0.5rem;
   margin-block-start: 0.375rem;
   font-size: 0.8125rem;
   font-variant-numeric: tabular-nums;
   color: var(--c-text-muted);
 }
+.ms-notes {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0 0.75rem;
+  min-inline-size: 0;
+  font-size: 0.75rem;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.ms-note-icon { margin-inline-end: 0.25rem; }
 @media (forced-colors: active) {
   /* 背景色会被系统色替换:进度本身是信息,用系统色画出来 */
   .ms-track { border: 1px solid CanvasText; }

@@ -220,6 +220,10 @@ onBeforeUnmount(() => edgeObserver?.disconnect())
 @supports (font-size: 1cqb) {
   .ms-pivot { font-size: clamp(1.75rem, min(0.75rem + 5cqb, 6cqi), 2.5rem); }
 }
+/* 触屏 44px;下划线画在底边,长高后仍对齐 */
+@media (pointer: coarse) {
+  .ms-pivot { min-block-size: 2.75rem; }
+}
 .ms-pivot:hover { color: var(--c-text); }
 /* 当前视图:文字颜色 + 下划线(不只靠颜色区分);下划线是边框,高对比度模式下也在 */
 .ms-pivot[aria-current="page"] { color: var(--c-text); }
@@ -228,6 +232,17 @@ onBeforeUnmount(() => edgeObserver?.disconnect())
   position: absolute;
   inset: auto 0 0;
   border-block-end: 3px solid var(--c-accent);
+}
+
+/* 很矮的 Activity 框(约 300–400px):顶部这两行收紧,把高度留给磁贴。
+   字号下限仍是 rem,最大 / 最小 <= 2.5 倍;触屏上的 44px 下限不受影响(min-block-size 优先) */
+@container shell (height < 25rem) {
+  .ms-head { padding-block-start: 0.375rem; }
+  .ms-actions > :deep(div > button),
+  .ms-actions :slotted(select),
+  .ms-actions :slotted(button) { block-size: 1.75rem; }
+  .ms-actions :slotted(button) { inline-size: 1.75rem; }
+  .ms-pivot { font-size: clamp(1.375rem, min(0.25rem + 5cqb, 6cqi), 2.5rem); padding-block-end: 0.25rem; }
 }
 
 /* ---- 主区域 ---- */

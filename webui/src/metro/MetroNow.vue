@@ -244,13 +244,34 @@ function syncPos() {
     thumb.style.transform = `scaleX(${max > 0 ? el.scrollLeft / max : 0})`
   })
 }
+
+// ---- 手机版面:进度 + 收藏挪到信息磁贴下面单独一行 ----
+// 只挂一份进度条(两份都挂的话,隐藏的那份也每 0.25 秒重绘一次)。阈值和样式里的
+// @container nowbox (width < 30rem) 相同;只在跨过阈值时写一次,不是每帧
+const root = ref<HTMLElement | null>(null)
+const phone = ref(false)
+function measurePhone(width: number) {
+  const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
+  const next = width < 30 * rem
+  if (next !== phone.value) phone.value = next
+}
+
 let resizeObs: ResizeObserver | null = null
 onMounted(() => {
-  if (!jsPos) return
-  syncPos()
-  if (typeof ResizeObserver !== 'undefined' && scroller.value) {
-    resizeObs = new ResizeObserver(syncPos)
+  if (root.value) measurePhone(root.value.getBoundingClientRect().width)
+  if (jsPos) syncPos()
+  if (typeof ResizeObserver === 'undefined') return
+  resizeObs = new ResizeObserver((entries) => {
+    for (const e of entries) {
+      if (e.target === root.value) measurePhone(e.contentRect.width)
+      else syncPos()
+    }
+  })
+  if (root.value) resizeObs.observe(root.value)
+  // 滚动层自己的框不变时,内容变宽(队列载入、歌词组出现)也要重算位置条
+  if (jsPos && scroller.value) {
     resizeObs.observe(scroller.value)
+    if (scroller.value.firstElementChild) resizeObs.observe(scroller.value.firstElementChild)
   }
 })
 onBeforeUnmount(() => {
@@ -260,7 +281,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="mn" :class="{ 'mn--pos-js': jsPos }">
+  <div ref="root" class="mn" :class="{ 'mn--pos-js': jsPos }">
     <p v-if="notInVoice" class="mn-alert">
       <Icon icon="triangle-exclamation" class="mn-alert-icon" aria-hidden="true" />{{ t('np.notInVoice') }}
     </p>
@@ -295,7 +316,8 @@ onBeforeUnmount(() => {
               />
               <template v-else>
                 <Icon icon="music" class="t-icon" />
-                <span class="cover-word" :style="{ '--len-scale': titleScale }">{{ displayTitle || t('np.nothing') }}</span>
+                <!-- 标题还是链接时不排字(大写会改掉链接的意思),只留图标 -->
+                <span v-if="!titlePending" class="cover-word" :style="{ '--len-scale': titleScale }">{{ displayTitle || t('np.nothing') }}</span>
               </template>
             </div>
 
@@ -314,12 +336,12 @@ onBeforeUnmount(() => {
                 </h1>
                 <p v-if="artistLine" class="info-artist">{{ artistLine }}</p>
                 <p v-if="current.requester" class="info-req info-req--bottom">{{ t('queue.requestedBy', { name: current.requester }) }}</p>
-                <!-- 进度 + 收藏:宽、窄版面在信息磁贴里,手机版在下面单独一行 -->
-                <div class="info-foot">
+                <!-- 进度 + 收藏:宽、窄版面在信息磁贴里,手机版在下面单独一行(只挂一份) -->
+                <div v-if="!phone" class="info-foot">
                   <MetroSeek v-if="!showPrep" />
                   <div class="np-actions">
                     <FavButton :item-id="current.id" :source="{ source: 'library', item_id: current.id }" :label="t('np.save')" />
-                    <AddToPlaylist :source="{ source: 'current' }" :label="t('atp.header')" />
+                    <AddToPlaylist :source="{ source: 'current' }" :label="t('atp.header')" layer />
                   </div>
                 </div>
               </template>
@@ -329,11 +351,11 @@ onBeforeUnmount(() => {
               </template>
             </div>
 
-            <div v-if="current" class="now-foot">
+            <div v-if="current && phone" class="now-foot">
               <MetroSeek v-if="!showPrep" />
               <div class="np-actions">
                 <FavButton :item-id="current.id" :source="{ source: 'library', item_id: current.id }" :label="t('np.save')" />
-                <AddToPlaylist :source="{ source: 'current' }" :label="t('atp.header')" />
+                <AddToPlaylist :source="{ source: 'current' }" :label="t('atp.header')" layer />
               </div>
             </div>
 
@@ -381,12 +403,7 @@ onBeforeUnmount(() => {
           <PrepPanel :prep="status.prep" :synced-at="syncedAt" />
         </div>
 
-        <!-- ===== 歌词:LyricsPanel 自己的折叠按钮当组标题 ===== -->
-        <div v-if="current && hasLyrics" class="g g-lyrics">
-          <LyricsPanel :current="current" :preview-at="dragAt" :can-seek="canSeek" @seek="seek" />
-        </div>
-
-        <!-- ===== 接下来 ===== -->
+        <!-- ===== 接下来(紧跟"此刻":全景里露出一角的是它,手机上第一屏也能看到) ===== -->
         <div class="g g-queue">
           <h2 class="g-head">
             {{ t('metro.upNext') }}
@@ -467,6 +484,11 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </div>
+
+        <!-- ===== 歌词:LyricsPanel 自己的折叠按钮当组标题 ===== -->
+        <div v-if="current && hasLyrics" class="g g-lyrics">
+          <LyricsPanel :current="current" :preview-at="dragAt" :can-seek="canSeek" @seek="seek" />
+        </div>
       </div>
     </div>
 
@@ -478,6 +500,8 @@ onBeforeUnmount(() => {
 <style scoped>
 /* ======================================================================
    外层 .mn 决定版面(nowbox),滚动层 .mn-scroll 提供磁贴尺寸用的 cqi / cqb(now)。
+   --tile 写在 .mn-groups 上(滚动层里面),所以"框很矮"这几档可以直接查 now ——
+   也就是磁贴边长本身算的那个框,而不是外面多了内边距和提示条的 nowbox。
    默认(没有命中任何容器查询,或不支持容器查询)就是竖向的 4 列版面。
    ====================================================================== */
 .mn {
@@ -513,15 +537,18 @@ onBeforeUnmount(() => {
   scrollbar-color: var(--c-text-muted) transparent;
   /* 方向键滚动时,聚焦的磁贴不要贴着边 */
   scroll-padding-inline: var(--m-pad);
-  /* 竖向 4 列:边长由宽度算出(手机约 84px,640 宽约 140px),最大 10rem */
-  --tile: clamp(4.5rem, calc((100cqi - 3 * var(--m-gap)) / 4), 10rem);
-  --cols: 4;
-  --title-base: calc(var(--tile) * 0.22);
 }
 /* 焦点框画在里面:外面一圈会被裁掉 */
 .mn-scroll:focus-visible { outline-offset: -2px; }
 
 .mn-groups {
+  /* 竖向 4 列:边长由宽度算出(320 宽约 66px,640 宽约 140px),最大 10rem。
+     下限不超过 320px 宽时一列的实际宽度,否则会横向溢出(WCAG 1.4.10);56px 仍大于 44px 触控 */
+  --tile: clamp(3.5rem, calc((100cqi - 3 * var(--m-gap)) / 4), 10rem);
+  --cols: 4;
+  --title-base: calc(var(--tile) * 0.22);
+  /* 组标题占的高度(字号 x 行高 + 下边距),全景里从可用高度里减掉 */
+  --g-head: 2.5rem;
   display: flex;
   flex-direction: column;
   gap: 1.75rem;
@@ -587,9 +614,12 @@ button.t-accent:disabled { background: var(--m-tile); color: var(--c-text-muted)
 .t-accent .t-cap { color: inherit; }
 
 /* ---------------- 此刻 ---------------- */
+/* 竖向版面:第三行 上一首 / 播放 / 下一首 / 模式,音量是第四行的宽磁贴(矮一些)。
+   第二行可以长高:竖着滚动的版面里,长标题完整换行,不用截断 */
 .now-grid {
   display: grid;
   grid-template-columns: repeat(4, var(--tile));
+  grid-template-rows: var(--tile) minmax(var(--tile), auto) var(--tile) auto;
   grid-auto-rows: var(--tile);
   gap: var(--m-gap);
 }
@@ -612,6 +642,7 @@ button.t-accent:disabled { background: var(--m-tile); color: var(--c-text-muted)
 }
 /* 高清图还没准备好时服务器先给 100px 小图:模糊一点,别拉伸出马赛克 */
 .cover-img--pending { filter: blur(12px); scale: 1.1; }
+/* 装饰(标题在旁边的 h1 里),所以这里可以截 */
 .cover-word {
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -649,7 +680,9 @@ button.t-accent:disabled { background: var(--m-tile); color: var(--c-text-muted)
   color: var(--c-on-accent);
   letter-spacing: 0.06em;
 }
+/* 标题不参与收缩:磁贴放不下时让歌手 / 点歌人那几行让位,标题的行框始终完整 */
 .info-title {
+  flex: none;
   margin: 0.5rem 0 0;
   font-family: var(--m-font-display);
   font-size: clamp(1.1rem, calc(var(--title-base) * var(--len-scale, 1)), 2.75rem);
@@ -657,26 +690,18 @@ button.t-accent:disabled { background: var(--m-tile); color: var(--c-text-muted)
   line-height: 1.15;
   text-wrap: balance;
   overflow-wrap: anywhere;
-  /* 磁贴放不下时可以被挤矮,但至少留一行 */
-  min-block-size: 1.15em;
-  /* 不截成一行;极端长的标题最多 4 行,完整标题在 title 提示和读屏里 */
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 4;
-  line-clamp: 4;
-  overflow: hidden;
 }
 .info-title--muted { color: var(--c-text-muted); }
 .info-url, .info-hint, .info-artist, .info-req {
   margin: 0.25rem 0 0;
   overflow-wrap: anywhere;
 }
+.info-artist, .info-req--bottom { min-block-size: 0; overflow: clip; }
 .info-artist { font-size: 1rem; color: var(--c-text-muted); }
 .info-url { font-size: 0.75rem; color: var(--c-text-muted); }
 .info-hint { font-size: 0.875rem; color: var(--c-text-muted); text-wrap: pretty; }
 .info-req--bottom { display: none; margin-block-start: auto; font-size: 0.75rem; color: var(--c-text-muted); }
-.info-foot { margin-block-start: auto; padding-block-start: 0.75rem; }
-.now-foot { display: none; }
+.info-foot { flex: none; margin-block-start: auto; padding-block-start: 0.75rem; }
 
 .np-actions {
   display: flex;
@@ -699,10 +724,13 @@ button.t-accent:disabled { background: var(--m-tile); color: var(--c-text-muted)
 }
 
 .t-vol {
-  grid-column: span 2;
+  grid-column: 1 / -1;
+  grid-row: 4;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
+  gap: 0.5rem;
+  min-block-size: calc(var(--tile) * 0.6);
 }
 .vol-top { display: flex; align-items: center; justify-content: space-between; }
 .vol-num {
@@ -762,10 +790,6 @@ button.t-accent:disabled { background: var(--m-tile); color: var(--c-text-muted)
   background: var(--c-text);
 }
 
-/* 窄版面:第三行 上一首 / 播放 / 下一首 / 模式,音量是第四行的宽磁贴(矮一些) */
-.now-grid { grid-template-rows: repeat(3, var(--tile)) auto; }
-.t-vol { grid-column: 1 / -1; grid-row: 4; min-block-size: calc(var(--tile) * 0.6); gap: 0.5rem; }
-
 /* ---------------- 准备中 / 歌词 ---------------- */
 /* PrepPanel 自带圆角卡片和阴影:换成平铺磁贴(阴影是行内样式,只能 !important 覆盖) */
 .g-prep > :deep(div) {
@@ -785,7 +809,8 @@ button.t-accent:disabled { background: var(--m-tile); color: var(--c-text-muted)
 }
 .g-lyrics :deep(.lyr-wrap),
 .g-lyrics :deep(.lyr-box),
-.g-lyrics :deep(.lyr-btn) { border-radius: 0; }
+.g-lyrics :deep(.lyr-btn),
+.g-lyrics :deep(.lyr-toggle) { border-radius: 0; }
 
 /* ---------------- 接下来 ---------------- */
 .q-body { display: flex; flex-direction: column; gap: var(--m-gap); }
@@ -871,24 +896,23 @@ button.t-accent:disabled { background: var(--m-tile); color: var(--c-text-muted)
 }
 
 /* ======================================================================
-   手机宽度:图标磁贴,进度单独一行,"接下来"是大字列表
+   手机宽度:图标磁贴,进度单独一行,"接下来"是大字列表。
+   竖着滚动,所以信息磁贴和标题都按内容长高,不截断
    ====================================================================== */
 @container nowbox (width < 30rem) {
-  .mn-scroll { --title-base: calc(var(--tile) * 0.29); }
+  .mn-groups { --title-base: calc(var(--tile) * 0.29); }
   .t-info { padding: 0.75rem; }
   .info-meta { font-size: 0.6875rem; }
   .info-req--top { display: none; }
   .info-req--bottom { display: block; }
   .info-artist { font-size: 0.875rem; }
-  .info-foot { display: none; }
   .now-foot {
-    display: block;
     grid-column: 1 / -1;
     grid-row: 3;
     align-self: center;
     padding-block: 0.75rem 0;
   }
-  .now-grid { grid-template-rows: repeat(2, var(--tile)) auto var(--tile) auto; }
+  .now-grid { grid-template-rows: var(--tile) minmax(var(--tile), auto) auto var(--tile) auto; }
   /* 图标磁贴:文字留给读屏 */
   .now-grid .t-ctl { align-items: center; justify-content: center; }
   .now-grid .t-ctl .t-text {
@@ -916,25 +940,35 @@ button.t-accent:disabled { background: var(--m-tile); color: var(--c-text-muted)
     background: transparent;
   }
   .q-idx { align-self: baseline; padding-block-start: 0.25rem; }
-  .q-title { font-family: var(--m-font-display); font-size: 1.25rem; font-weight: 300; }
+  /* 列表竖着长,不需要截成两行 */
+  .q-title {
+    display: block;
+    -webkit-line-clamp: unset;
+    line-clamp: none;
+    overflow: visible;
+    font-family: var(--m-font-display);
+    font-size: 1.25rem;
+    font-weight: 300;
+  }
   .q-sub { margin-block-start: 0; }
   .q-acts { margin: 0; }
   .q-more { grid-auto-rows: var(--tile); }
 }
 
 /* ======================================================================
-   宽而矮:横向全景。磁贴边长 = (可用高度 - 组标题 - 两道间隙) / 3
+   宽而矮:横向全景。磁贴边长 = (可用高度 - 组标题 - 两道间隙) / 3。
+   高度固定,所以这里的文字才需要按行数截(完整标题在 title 提示和读屏里)
    ====================================================================== */
 @container nowbox (aspect-ratio >= 5 / 4) and (width >= 37.5rem) {
   .mn-scroll {
-    --tile: clamp(4.5rem, calc((100cqb - 2.5rem - 2 * var(--m-gap)) / 3), 11rem);
-    --title-base: calc(var(--tile) * 0.3);
     padding-block: 0.5rem 1.25rem;
     padding-inline-end: 0;
     scroll-snap-type: x proximity;
     overscroll-behavior: contain;
   }
   .mn-groups {
+    --tile: clamp(4.5rem, calc((100cqb - var(--g-head) - 2 * var(--m-gap)) / 3), 11rem);
+    --title-base: calc(var(--tile) * 0.3);
     flex-direction: row;
     align-items: flex-start;
     gap: 3rem;
@@ -948,31 +982,57 @@ button.t-accent:disabled { background: var(--m-tile); color: var(--c-text-muted)
     grid-template-columns: repeat(6, var(--tile));
     grid-template-rows: repeat(3, var(--tile));
   }
-  .t-vol { min-block-size: 0; gap: 0.25rem; }
+  .t-vol { min-block-size: 0; gap: 0.25rem; grid-column: span 2; grid-row: auto; }
   .t-info { grid-column: 3 / span 4; padding: 1.25rem 1.375rem; }
   .info-meta { font-size: 0.8125rem; }
+  /* 信息磁贴有 4 块宽:长标题也保持大字(约 26–30px),最多 3 行 */
+  .info-title {
+    font-size: clamp(1.375rem, calc(var(--title-base) * max(var(--len-scale, 1), 0.66)), 2.75rem);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    overflow: hidden;
+  }
   .info-artist { font-size: 1.125rem; }
-  .t-vol { grid-column: span 2; grid-row: auto; }
   .t-icon { font-size: 1.75rem; }
 
   .g-prep, .g-lyrics { inline-size: calc(3 * var(--tile) + 2 * var(--m-gap)); }
-  .g-lyrics :deep(.lyr-box) { block-size: calc(3 * var(--tile) + 2 * var(--m-gap) - 0.25rem); }
+  /* 整组和"此刻"一样高:标题行(折叠按钮、偏移按钮)多高都行,剩下的给歌词框 */
+  .g-lyrics :deep(section) {
+    display: flex;
+    flex-direction: column;
+    block-size: calc(3 * var(--tile) + 2 * var(--m-gap) + var(--g-head));
+  }
+  .g-lyrics :deep(section > *) { flex: none; }
+  .g-lyrics :deep(.lyr-wrap) { display: flex; flex: 1 1 0; flex-direction: column; min-block-size: 0; }
+  .g-lyrics :deep(.lyr-box) { flex: 1 1 0; block-size: auto; min-block-size: 0; }
 
   .q-body { flex-direction: row; align-items: flex-start; }
+  /* 行高至少一块磁贴,内容多时长高(宁可多出一点,也不叠到下一块上)。
+     磁贴高度固定在一块边长,所以序号、标题、操作按钮排成一行,省下单独一行按钮的高度;
+     按钮在标题右边后两块磁贴宽(矮框里约 2 x 6rem)放不下标题:列宽至少 17rem */
   .q-list {
     grid-auto-flow: column;
     grid-template-columns: none;
-    grid-template-rows: repeat(3, var(--tile));
-    grid-auto-columns: calc(2 * var(--tile) + var(--m-gap));
+    grid-template-rows: repeat(3, minmax(var(--tile), auto));
+    grid-auto-columns: max(calc(2 * var(--tile) + var(--m-gap)), 17rem);
     grid-auto-rows: auto;
   }
   .q-more {
     grid-auto-flow: column;
     grid-template-columns: none;
     grid-template-rows: repeat(3, var(--tile));
-    grid-auto-columns: calc(2 * var(--tile) + var(--m-gap));
+    grid-auto-columns: max(calc(2 * var(--tile) + var(--m-gap)), 17rem);
     grid-auto-rows: auto;
   }
+  .q-item {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: auto;
+    grid-template-areas: "idx main acts";
+    align-items: start;
+  }
+  .q-idx { align-self: start; padding-block-start: 0.125rem; }
   .q-note { grid-column: auto; }
 
   .mn-pos {
@@ -985,37 +1045,90 @@ button.t-accent:disabled { background: var(--m-tile); color: var(--c-text-muted)
   .mn--pos-js .mn-pos { display: block; }
   .mn--pos-js .mn-scroll { scrollbar-width: none; }
   .mn--pos-js .mn-scroll::-webkit-scrollbar { display: none; }
+
+  /* ---- 矮全景:磁贴约 6–8rem。查的是 now(磁贴边长算的那个框) ----
+     收藏 / 加入歌单缩成图标,和进度条并排在信息磁贴底部;
+     "接下来"改成两行更高的磁贴 */
+  @container now (height < 28rem) {
+    .t-info { padding: 0.75rem 1rem; }
+    .info-title {
+      margin-block-start: 0.25rem;
+      font-size: clamp(1rem, calc(var(--tile) * 0.22 * max(var(--len-scale, 1), 0.78)), 1.75rem);
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+    }
+    .info-artist { font-size: 0.9375rem; }
+    .info-foot { display: flex; align-items: center; gap: 0.75rem; padding-block-start: 0.5rem; }
+    .info-foot > :deep(.ms) { flex: 1; min-inline-size: 0; }
+    .np-actions { flex: none; flex-wrap: nowrap; margin: 0; gap: 0.25rem; }
+    .np-actions > :deep(button),
+    .np-actions > :deep(div > button) { min-block-size: 2rem; min-inline-size: 2rem; padding-inline: 0.5rem; justify-content: center; }
+    .np-actions > :deep(button > span),
+    .np-actions > :deep(div > button > span),
+    .now-grid .t-cap {
+      position: absolute;
+      inline-size: 1px;
+      block-size: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+    .q-list,
+    .q-more { grid-template-rows: repeat(2, minmax(calc((3 * var(--tile) + var(--m-gap)) / 2), auto)); }
+  }
+  /* 触屏上图标按钮仍是 44px(要放在上面那条规则后面,同样的选择器才能覆盖) */
+  @media (pointer: coarse) {
+    @container now (height < 28rem) {
+      .np-actions > :deep(button),
+      .np-actions > :deep(div > button) { min-block-size: 2.75rem; min-inline-size: 2.75rem; }
+    }
+  }
+
+  /* ---- 很矮的全景(Activity 框约 300–420px 高):磁贴可以小到 44px,
+     组标题变小,控制磁贴只留图标,音量变成一行 ---- */
+  @container now (height < 21.5rem) {
+    .mn-groups {
+      --g-head: 1.5rem;
+      --tile: clamp(2.75rem, calc((100cqb - var(--g-head) - 2 * var(--m-gap)) / 3), 11rem);
+    }
+    .g-head { margin-block-end: 0.25rem; font-size: 1rem; }
+    .g-count { font-size: 0.75rem; }
+    .g-lyrics :deep(.lyr-toggle) { font-size: 1rem; }
+    .t { padding: 0.5rem; }
+    .t-info { padding: 0.5rem 0.75rem; }
+    .info-meta { font-size: 0.6875rem; line-height: 1.2; }
+    .badge { padding-block: 0.0625rem; }
+    .info-title {
+      margin-block-start: 0.125rem;
+      font-size: clamp(0.9375rem, calc(var(--tile) * 0.24 * max(var(--len-scale, 1), 0.78)), 1.5rem);
+    }
+    .info-artist { margin-block-start: 0.125rem; font-size: 0.8125rem; }
+    .info-foot { padding-block-start: 0.25rem; }
+    .now-grid .t-ctl { align-items: center; justify-content: center; }
+    .now-grid .t-ctl .t-text,
+    .vol-label {
+      position: absolute;
+      inline-size: 1px;
+      block-size: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+    .t-icon { font-size: 1.25rem; }
+    .t-vol { flex-direction: row; align-items: center; gap: 0.5rem; }
+    .vol { flex: 1; min-inline-size: 0; }
+    .vol-top { flex: none; gap: 0.5rem; }
+    .vol-num { font-size: 1.125rem; }
+    .q-item { padding: 0.375rem 0.625rem; }
+    .q-sub { font-size: 0.75rem; }
+  }
 }
 
-/* 全景,但框很矮(磁贴不到 ~6rem):收藏 / 加入歌单缩成图标放到信息磁贴右上角,
-   "接下来"改成两行更高的磁贴,标题和歌手都放得下 */
-@container nowbox (aspect-ratio >= 5 / 4) and (width >= 37.5rem) and (height < 25rem) {
-  .t-info { padding: 0.75rem 1rem; }
-  .info-meta { padding-inline-end: 5.5rem; }
-  .info-title { margin-block-start: 0.25rem; -webkit-line-clamp: 2; line-clamp: 2; }
-  .info-artist { font-size: 0.9375rem; }
-  .info-foot { padding-block-start: 0.5rem; }
-  .np-actions {
-    position: absolute;
-    inset-block-start: 0.5rem;
-    inset-inline-end: 0.625rem;
-    margin: 0;
-    gap: 0.25rem;
-  }
-  .np-actions > :deep(button),
-  .np-actions > :deep(div > button) { min-block-size: 2rem; min-inline-size: 2rem; padding-inline: 0.5rem; }
-  /* 按钮的可见文字只藏起来,仍是它的名字 */
-  .np-actions > :deep(button > span),
-  .np-actions > :deep(div > button > span) {
-    position: absolute;
-    inline-size: 1px;
-    block-size: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-  }
-  .q-list,
-  .q-more { grid-template-rows: repeat(2, calc((3 * var(--tile) + var(--m-gap)) / 2)); }
+/* 全景,框也很矮:滚动层的内边距和提示条收紧(这几条改的是 now 外面的东西,所以查 nowbox) */
+@container nowbox (aspect-ratio >= 5 / 4) and (width >= 37.5rem) and (height < 23rem) {
+  .mn-scroll { padding-block: 0.25rem 0.75rem; }
+  .mn-pos { inset-block-end: 0.25rem; }
+  .mn-alert { margin-block-end: 0.25rem; padding-block: 0.25rem; font-size: 0.8125rem; }
 }
 
 /* 滚动驱动的位置指示:只在允许动态效果、支持滚动时间线时;否则留原生细滚动条 */
@@ -1049,5 +1162,15 @@ button.t-accent:disabled { background: var(--m-tile); color: var(--c-text-muted)
   .badge { border: 1px solid CanvasText; }
   .mn-pos { border-block-start: 1px solid CanvasText; }
   .mn-pos-thumb { forced-color-adjust: none; background: CanvasText; }
+  /* 音量:渐变底会被去掉、背景色换成 Canvas,轨道和滑块就都看不见了。
+     音量值本身是信息,用系统色画;两种引擎的伪元素分开写 */
+  .vol { forced-color-adjust: none; }
+  .vol::-webkit-slider-runnable-track {
+    background: linear-gradient(to right, Highlight var(--slider-progress), GrayText var(--slider-progress));
+  }
+  .vol::-webkit-slider-thumb { background: CanvasText; }
+  .vol::-moz-range-track { background: GrayText; }
+  .vol::-moz-range-progress { background: Highlight; }
+  .vol::-moz-range-thumb { background: CanvasText; }
 }
 </style>

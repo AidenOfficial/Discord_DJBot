@@ -9,7 +9,12 @@ import AuthImg from './AuthImg.vue'
 
 const { status, control, progress } = useStatus()
 const current = computed(() => status.value?.current ?? null)
-const title = computed(() => current.value?.track || current.value?.title || t('np.nothing'))
+// 还在读取标题时 title 是原始链接:显示"正在读取标题…",不把链接排成大字
+const titlePending = computed(() => !!status.value?.prep && /^https?:\/\//.test(current.value?.title ?? ''))
+const title = computed(() =>
+  titlePending.value
+    ? t('np.loadingTitle')
+    : (current.value?.track || current.value?.title || t('np.nothing')))
 const artist = computed(() => {
   const a = current.value?.artist
   return a && a !== '??' ? a : ''
@@ -30,7 +35,7 @@ function togglePlay() {
         alt=""
         class="mini-img"
       />
-      <span v-else class="mini-word">{{ title }}</span>
+      <span v-else-if="!titlePending" class="mini-word">{{ title }}</span>
     </div>
     <div class="mini-body">
       <p class="mini-title" :title="current?.title">{{ title }}</p>
@@ -152,13 +157,15 @@ function togglePlay() {
   block-size: 2.75rem;
   border: 0;
   border-radius: 0;
-  background: rgb(0 0 0 / 0.25);
+  /* 往 --c-text 那边混:浅色主题变深(白色图标更清楚),深色主题变浅(深色图标更清楚)。
+     压黑一层只适合白色图标,深色主题下图标对比会掉到 3:1 以下 */
+  background: color-mix(in oklab, var(--c-accent) 78%, var(--c-text));
   color: inherit;
   font-size: 1.25rem;
   cursor: pointer;
   transition: background-color 120ms ease-out;
 }
-.mini-btn:hover { background: rgb(0 0 0 / 0.35); }
+.mini-btn:hover { background: color-mix(in oklab, var(--c-accent) 66%, var(--c-text)); }
 /* 强调色底上,默认的强调色焦点框看不见:换成前景色 */
 .mini-btn:focus-visible { outline-color: var(--c-on-accent); }
 @media (prefers-reduced-motion: no-preference) {
@@ -169,7 +176,7 @@ function togglePlay() {
   position: absolute;
   inset: auto 0 0;
   block-size: 3px;
-  background: rgb(0 0 0 / 0.35);
+  background: color-mix(in oklab, var(--c-accent) 66%, var(--c-text));
 }
 .mini-fill {
   block-size: 100%;

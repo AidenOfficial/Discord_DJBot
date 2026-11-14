@@ -196,7 +196,9 @@ html.embedded {
   /* 平铺磁贴的底色:和背景拉开一点距离。text-muted 在上面两种配色都 >= 4.5:1(text-faint 不够,磁贴上不用) */
   --m-tile: color-mix(in oklab, var(--c-text) 8%, var(--c-bg));
   --m-tile-hover: color-mix(in oklab, var(--c-text) 13%, var(--c-bg));
-  --m-track: color-mix(in oklab, var(--c-text) 22%, transparent);
+  /* 进度 / 音量的轨道:进度条没有滑块,轨道就是控件的边界,和磁贴、背景都要 >= 3:1(WCAG 1.4.11);
+     播放进度(--c-text)和轨道之间也仍 >= 3:1 */
+  --m-track: color-mix(in oklab, var(--c-text) 50%, transparent);
   --m-gap: 0.5rem;
   /* 左右边距:手机 16px,窄 ~26px,宽 40px(iframe 里视口就是 Activity 的框) */
   --m-pad: clamp(1rem, 4vw, 2.5rem);
