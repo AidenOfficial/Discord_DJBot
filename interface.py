@@ -5,6 +5,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import time
 from functools import wraps
 from urllib.parse import urlparse
@@ -338,6 +339,42 @@ def _csrf_rejected():
     return jsonify({'error': 'csrf'}), 403
 
 
+# 路径里的编码斜杠 / 反斜杠:Cloudflare Access 按原样比较路径(/api%2flogs 不算 /api/logs),
+# 到了这里却被解码成 /api/logs —— 等于绕过边缘的门。正常客户端不会这样发,直接拒绝。
+_ENCODED_SEPARATORS = ('%2f', '%5c')
+
+
+def _raw_path():
+    raw = request.environ.get('REQUEST_URI') or request.environ.get('RAW_URI') or ''
+    return raw.split('?', 1)[0].lower()
+
+
+@web.before_request
+def _reject_encoded_separators():
+    if any(sep in _raw_path() for sep in _ENCODED_SEPARATORS):
+        return _api_error(400, 'bad_path') if request.path.startswith('/api/') else ('Bad Request', 400)
+    return None
+
+
+def _api_error(status, error):
+    return jsonify({'error': error}), status
+
+
+@web.errorhandler(404)
+@web.errorhandler(405)
+@web.errorhandler(413)
+def _http_error(e):
+    # /api/ 下的客户端(前端、Activity)都按 JSON 解析错误;页面路径保持 Werkzeug 默认页
+    if request.path.startswith('/api/'):
+        names = {404: 'not_found', 405: 'method_not_allowed', 413: 'too_large'}
+        resp = jsonify({'error': names.get(e.code, 'error')})
+        resp.status_code = e.code
+        if e.code == 405 and getattr(e, 'valid_methods', None):
+            resp.headers['Allow'] = ', '.join(e.valid_methods)
+        return resp
+    return e
+
+
 @web.before_request
 def _csrf_protect():
     """会话 Cookie / Basic Auth 是浏览器自动带的:改状态的请求必须来自本站。
@@ -407,7 +444,14 @@ def index():
 @web.route("/assets/<path:path>", methods=['GET'])
 @requires_auth_or_activity_shell
 def webui_assets(path):
-    return send_from_directory(os.path.join(webui_dist, "assets"), path)
+    resp = send_from_directory(os.path.join(webui_dist, "assets"), path)
+    # Vite 打包的文件名带内容哈希,可以长期缓存;不带哈希的(theme-init.js)每次都要回源确认
+    if not _HASHED_ASSET.search(path):
+        resp.headers['Cache-Control'] = 'no-cache'
+    return resp
+
+
+_HASHED_ASSET = re.compile(r'-[A-Za-z0-9_-]{8}\.(?:js|css)$')
 
 
 @web.route("/favicon.svg", methods=['GET'])

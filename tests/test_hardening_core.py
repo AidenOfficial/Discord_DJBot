@@ -319,3 +319,41 @@ def test_no_warning_for_safe_config(config, caplog):
 def test_error_for_unknown_auth_method(config, caplog):
     records = warnings_for(config, caplog, auth_method='discrod')
     assert any(r.levelno == logging.ERROR and 'discrod' in r.getMessage() for r in records)
+
+
+# =====================================================================
+#  上线后外部探测发现的:编码斜杠绕过 Access、/api 错误要 JSON、未带哈希的资源不缓存
+# =====================================================================
+
+@pytest.mark.parametrize('raw', ['/api%2flogs', '/api/logs%2Fdownload', '/api%2fcache', '/api/logs%5cdebug'])
+def test_encoded_path_separators_rejected(interface, config, raw):
+    # Access 按原始路径比较,/api%2flogs 不在它的保护范围里;解码后却会路由到 /api/logs
+    client = interface.web.test_client()
+    rv = client.get(raw, environ_overrides={'REQUEST_URI': raw})
+    assert rv.status_code == 400
+    assert rv.get_json() == {'error': 'bad_path'}
+
+
+def test_plain_paths_and_encoded_query_still_work(interface, config):
+    client = interface.web.test_client()
+    rv = client.get('/api/activity/config?next=%2Fqueue',
+                    environ_overrides={'REQUEST_URI': '/api/activity/config?next=%2Fqueue'})
+    assert rv.status_code == 200
+
+
+def test_api_errors_are_json(interface, config):
+    client = interface.web.test_client()
+    rv = client.get('/api/no-such-thing')
+    assert rv.status_code == 404 and rv.get_json() == {'error': 'not_found'}
+    rv = client.put('/api/activity/config')
+    assert rv.status_code == 405 and rv.get_json() == {'error': 'method_not_allowed'}
+    assert 'GET' in rv.headers['Allow']
+    rv = client.get('/no-such-page')
+    assert rv.status_code == 404 and rv.get_json(silent=True) is None
+
+
+def test_unhashed_assets_are_revalidated(interface):
+    assert interface._HASHED_ASSET.search('index-C6vpD2Eh.js')
+    assert interface._HASHED_ASSET.search('LibraryPage-DFSKy9t_.js')
+    assert interface._HASHED_ASSET.search('index-CiqVPKEr.css')
+    assert not interface._HASHED_ASSET.search('theme-init.js')
