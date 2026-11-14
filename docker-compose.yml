@@ -23,6 +23,12 @@ services:
     # entrypoint 装好规则后会去掉这个能力再启动 bot。见 deploy/DOCKER.md「禁止访问内网」
     cap_add:
       - NET_ADMIN
+    # 不 cap_drop ALL:entrypoint 要用默认能力装 iptables 规则、再用 setpriv 降权。
+    security_opt:
+      - no-new-privileges:true
+    # 资源上限:ffmpeg / yt-dlp 失控(或有人刷大量下载)时只影响这个容器,不拖垮 NAS。
+    mem_limit: 1536m
+    pids_limit: 512
     environment:
       # 不让容器里的任何进程(bot / ffmpeg / yt-dlp)连内网和宿主机:
       # 10/8、172.16/12、192.168/16、169.254/16、100.64/10 等;Discord 和外网不受影响。
@@ -63,9 +69,10 @@ services:
     #
     # Web 界面两种发布方式(configuration.ini 里 [webinterface] enabled=True,
     # listening_addr=0.0.0.0):
-    #  1) 仅局域网直连:取消下面 ports 的注释。
-    #  2) 公网走 Cloudflare Tunnel + Access(推荐):**不要**开 ports,
-    #     用下面的 cloudflared 服务(见 deploy/WEBUI.md):
+    #  1) 只在局域网用、不上公网:可以取消下面 ports 的注释。
+    #  2) 公网(Cloudflare Tunnel,见 deploy/WEBUI.md):**绝对不要**开 ports。
+    #     8181 一旦能被直接访问,就能绕过 Cloudflare(HTTPS、Access、WAF)直接打到 bot。
+    #     cloudflared 在同一 compose 网络里用 http://botamusique:8181 回源,不需要端口映射:
     #       docker compose --profile tunnel up -d
     # ports: ["8181:8181"]
     logging:
@@ -74,17 +81,21 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # Cloudflare Tunnel:出站隧道把 Web 界面发布到公网,鉴权交给
-  # Cloudflare Access,8181 端口无需(也不应)暴露。
+  # Cloudflare Tunnel:出站隧道把 Web 界面发布到公网(鉴权方式见 deploy/WEBUI.md),
+  # 8181 端口无需(也不应)暴露。
   # 属于 "tunnel" profile —— 平时 `docker compose up -d` 不会启动它;
   # 在 .env 写入 CLOUDFLARE_TUNNEL_TOKEN=<token> 后用:
   #   docker compose --profile tunnel up -d
   # Cloudflare 控制台里 Public hostname 的回源地址填 http://botamusique:8181
   # (compose 服务名,同一默认网络内可直接解析)。
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    # 固定版本(和 NAS 上其他隧道一致);升级时改这里,不要用 :latest 让它悄悄变。
+    image: cloudflare/cloudflared:2026.10.0
     container_name: discord-music-tunnel
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
     profiles: ["tunnel"]
     command: tunnel --no-autoupdate run
     environment:

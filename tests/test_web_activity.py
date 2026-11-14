@@ -16,7 +16,7 @@ import variables as var  # noqa: E402
 import web_users  # noqa: E402
 from bot.store import GuildStore  # noqa: E402
 from database import DatabaseMigration, MusicDatabase, SettingsDatabase  # noqa: E402
-from tests.test_web_auth_discord import FakeDiscord  # noqa: E402
+from tests.test_web_auth_discord import BAD_ACTIVITY_CODE, GOOD_ACTIVITY_CODE, FakeDiscord  # noqa: E402
 from tests.test_web_guilds import HOME, OWNER, SECOND, THIRD, FakeHub  # noqa: E402
 
 USER = '42'          # FakeDiscord 的用户:在 111(管理服务器权限)、222、333
@@ -77,7 +77,7 @@ def env(monkeypatch, tmp_path):
     web_auth_discord._cache.clear()
 
 
-def exchange(client, code='good', guild=HOME, channel=VOICE):
+def exchange(client, code=GOOD_ACTIVITY_CODE, guild=HOME, channel=VOICE):
     return client.post('/api/activity/token', json={'code': code, 'guild_id': guild, 'channel_id': channel})
 
 
@@ -129,7 +129,7 @@ def test_exchange_issues_our_token(env):
     # 换令牌:SDK 授权没有 redirect_uri,这里也不能带
     post = next(c for c in env.discord.calls if c[0] == 'post')
     assert post[2]['grant_type'] == 'authorization_code'
-    assert post[2]['code'] == 'good'
+    assert post[2]['code'] == GOOD_ACTIVITY_CODE
     assert post[2]['client_secret'] == 'test-client-secret'
     assert 'redirect_uri' not in post[2]
     assert env.discord.count('/users/@me') == 1 and env.discord.count('/users/@me/guilds') == 1
@@ -233,10 +233,10 @@ def test_owner_still_needs_the_voice_channel(env):
 
 @pytest.mark.parametrize('body', [
     {'guild_id': HOME, 'channel_id': VOICE},                      # 没有 code
-    {'code': 'good', 'channel_id': VOICE},                        # 私信里打开:没有服务器
-    {'code': 'good', 'guild_id': HOME},
-    {'code': 'good', 'guild_id': '1; drop', 'channel_id': VOICE},
-    {'code': ['good'], 'guild_id': HOME, 'channel_id': VOICE},
+    {'code': GOOD_ACTIVITY_CODE, 'channel_id': VOICE},                        # 私信里打开:没有服务器
+    {'code': GOOD_ACTIVITY_CODE, 'guild_id': HOME},
+    {'code': GOOD_ACTIVITY_CODE, 'guild_id': '1; drop', 'channel_id': VOICE},
+    {'code': [GOOD_ACTIVITY_CODE], 'guild_id': HOME, 'channel_id': VOICE},
 ])
 def test_bad_requests(env, body):
     rv = env.client.post('/api/activity/token', json=body)
@@ -245,7 +245,7 @@ def test_bad_requests(env, body):
 
 
 def test_bad_code_and_discord_down(env):
-    rv = exchange(env.client, code='bad')
+    rv = exchange(env.client, code=BAD_ACTIVITY_CODE)
     assert rv.status_code == 401
     assert rv.get_json()['error'] == 'discord_auth_failed'
     env.discord.guilds_status = 500
@@ -479,3 +479,50 @@ def test_search_registers_result_thumbnails(env, monkeypatch):
     env.client.get('/api/search?q=hello')
     assert env.mod.known_image('https://i.ytimg.com/vi/abc/mqdefault.jpg') is None
 
+
+
+# ---- 从文字频道启动(聊天框的应用按钮、/launch) -------------------------------------
+
+TEXT = '5050'
+
+
+def _channel(cls, guild_id):
+    import discord
+    ch = object.__new__(getattr(discord, cls))
+    ch.guild = types.SimpleNamespace(id=int(guild_id))
+    return ch
+
+
+@pytest.fixture
+def channels(env):
+    """bot 网关的频道缓存:VOICE / OTHER_VOICE 是语音频道,TEXT 是文字频道,都在 HOME。"""
+    cache = {int(VOICE): _channel('VoiceChannel', HOME), int(OTHER_VOICE): _channel('VoiceChannel', HOME),
+             int(TEXT): _channel('TextChannel', HOME), 9090: _channel('TextChannel', '999')}
+    env.hub.client = types.SimpleNamespace(client=types.SimpleNamespace(get_channel=cache.get))
+    # Hub 连上网关后,它说的成员关系就当真:USER 是 HOME 的成员
+    env.hub.members.setdefault(HOME, set()).add(USER)
+    return cache
+
+
+def test_text_channel_launch_binds_to_the_users_voice_channel(env, channels):
+    rv = exchange(env.client, channel=TEXT)
+    assert rv.status_code == 200, rv.get_data(as_text=True)
+    assert rv.get_json()['channel_id'] == VOICE          # 绑到人所在的语音频道,不是文字频道
+    token = rv.get_json()['token']
+    assert queue(env.client, token).status_code == 200
+    # 离开那个语音频道:续期被拒
+    env.hub.voice[(HOME, USER)] = OTHER_VOICE
+    rv = env.client.post('/api/activity/refresh', headers=bearer(token))
+    assert rv.status_code == 403 and rv.get_json()['error'] == 'not_in_voice_channel'
+
+
+def test_text_channel_launch_still_needs_voice(env, channels):
+    env.hub.voice.clear()
+    rv = exchange(env.client, channel=TEXT)
+    assert rv.status_code == 403 and rv.get_json()['error'] == 'not_in_voice_channel'
+
+
+def test_other_voice_or_foreign_channel_still_rejected(env, channels):
+    assert exchange(env.client, channel=OTHER_VOICE).get_json()['error'] == 'not_in_voice_channel'
+    assert exchange(env.client, channel='9090').get_json()['error'] == 'not_in_voice_channel'   # 别的服务器
+    assert exchange(env.client, channel='7070').get_json()['error'] == 'not_in_voice_channel'   # 查不到

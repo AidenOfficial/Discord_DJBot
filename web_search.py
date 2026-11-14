@@ -6,10 +6,14 @@ breaking the whole search.
 """
 
 import concurrent.futures
+import json
 import logging
 import re
+import threading
+import time
 
 import requests
+from werkzeug.exceptions import ServiceUnavailable
 
 import util
 import variables as var
@@ -17,7 +21,24 @@ import variables as var
 log = logging.getLogger("bot")
 
 SEARCH_TIMEOUT = 8       # seconds per source
+HARD_TIMEOUT = SEARCH_TIMEOUT + 2  # total wall time a request waits for both sources
 DEFAULT_LIMIT = 6        # results per source
+MAX_CONCURRENT = 3       # searches in flight across all users
+
+# Module-level so a slow source never makes the request wait for it: a
+# `with ThreadPoolExecutor()` block joins its workers on exit, which turned
+# the per-source timeout into "however long yt-dlp takes".
+_pool = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT * 2,
+                                              thread_name_prefix='web-search')
+_slots = threading.BoundedSemaphore(MAX_CONCURRENT)
+
+
+class SearchBusy(ServiceUnavailable):
+    """All search slots are taken; rendered as 503 {"error": "busy"}."""
+
+    def get_response(self, environ=None, scope=None):
+        from flask import Response
+        return Response(json.dumps({'error': 'busy'}), status=503, mimetype='application/json')
 
 _TAG_RE = re.compile(r'<[^>]+>')
 
@@ -146,20 +167,46 @@ def search_bilibili(query, limit=DEFAULT_LIMIT):
 
 def unified_search(query, limit=DEFAULT_LIMIT):
     """Query both sources in parallel. Returns (results, failed_sources):
-    results are interleaved youtube/bilibili to mix the sources fairly."""
+    results are interleaved youtube/bilibili to mix the sources fairly.
+    Raises SearchBusy when MAX_CONCURRENT searches are already running."""
+    if not _slots.acquire(blocking=False):
+        raise SearchBusy()
     sources = {'youtube': search_youtube, 'bilibili': search_bilibili}
+    # The slot is held until the workers really finish, not until we stop
+    # waiting for them, so timed-out searches still count against the limit.
+    pending = [len(sources)]
+    pending_lock = threading.Lock()
+
+    def _done(_future):
+        with pending_lock:
+            pending[0] -= 1
+            last = pending[0] == 0
+        if last:
+            _slots.release()
+
+    futures = {}
+    try:
+        for name, fn in sources.items():
+            futures[name] = _pool.submit(fn, query, limit)
+    except RuntimeError:  # interpreter shutting down
+        for future in futures.values():
+            future.cancel()
+        _slots.release()
+        raise SearchBusy()
+    for future in futures.values():
+        future.add_done_callback(_done)
+
     per_source = {}
     failed = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(sources)) as pool:
-        futures = {name: pool.submit(fn, query, limit)
-                   for name, fn in sources.items()}
-        for name, future in futures.items():
-            try:
-                per_source[name] = future.result(timeout=SEARCH_TIMEOUT + 2)
-            except Exception as e:
-                log.warning('web: %s search failed for %r (%s)', name, query, e)
-                per_source[name] = []
-                failed.append(name)
+    deadline = time.monotonic() + HARD_TIMEOUT
+    for name, future in futures.items():
+        try:
+            per_source[name] = future.result(timeout=max(0.0, deadline - time.monotonic()))
+        except Exception as e:
+            log.warning('web: %s search failed for %r (%s)', name,
+                        str(query).replace('\r', ' ').replace('\n', ' '), e or type(e).__name__)
+            per_source[name] = []
+            failed.append(name)
 
     interleaved = []
     lists = [per_source.get('youtube') or [], per_source.get('bilibili') or []]

@@ -6,6 +6,7 @@ import AddToPlaylist from './AddToPlaylist.vue'
 import FavButton from './FavButton.vue'
 import AuthImg from './AuthImg.vue'
 import { t } from '../i18n'
+import { announce } from '../composables/useAnnounce'
 
 interface SearchResult {
   source: 'youtube' | 'bilibili'
@@ -36,6 +37,11 @@ function onInput() {
   debounce = setTimeout(search, 400)
 }
 
+function submit() {
+  clearTimeout(debounce)
+  search()
+}
+
 async function search() {
   const q = query.value.trim()
   if (q.length < 2) {
@@ -53,11 +59,13 @@ async function search() {
     results.value = data.results
     failed.value = data.failed
     searched.value = true
+    announce(results.value.length ? t('search.count', { n: results.value.length }) : t('search.none', { q }))
   } catch {
     if (mySeq === seq) {
       results.value = []
       failed.value = ['youtube', 'bilibili']
       searched.value = true
+      announce(t('search.failed'), { assertive: true })
     }
   } finally {
     if (mySeq === seq) loading.value = false
@@ -76,10 +84,18 @@ async function add(r: SearchResult) {
     if (!rv.ok) throw new Error(String(rv.status))
     applyStatus(await rv.json())
     added.value[key] = 'done'
+    announce(t('search.queuedTitle', { title: r.title }))
   } catch {
     added.value[key] = 'error'
+    announce(t('search.queueFailed', { title: r.title }), { assertive: true })
     setTimeout(() => delete added.value[key], 2500)
   }
+}
+
+/** The word the Queue button shows for this result (its accessible name starts with it) */
+function queueWord(r: SearchResult) {
+  const state = added.value[`${r.source}:${r.id}`]
+  return t(state === 'done' ? 'common.queued' : state === 'error' ? 'common.failed' : 'common.queue')
 }
 
 const SOURCE_STYLE: Record<string, { label: string; bg: string; fg: string }> = {
@@ -90,31 +106,38 @@ const SOURCE_STYLE: Record<string, { label: string; bg: string; fg: string }> = 
 
 <template>
   <section class="mx-auto w-full max-w-3xl px-4 py-8">
-    <!-- search box -->
-    <div class="relative">
-      <Icon icon="magnifying-glass" class="pointer-events-none absolute top-1/2 left-4 -translate-y-1/2" :style="{ color: 'var(--c-text-faint)' }" />
+    <!-- search box: a real form, so Enter submits natively and IME confirmation does not -->
+    <form role="search" class="relative" @submit.prevent="submit">
+      <Icon icon="magnifying-glass" class="pointer-events-none absolute top-1/2 left-4 -translate-y-1/2" :style="{ color: 'var(--c-text-faint)' }" aria-hidden="true" />
       <input
         v-model="query"
         type="search"
+        name="q"
         :placeholder="t('search.placeholder')"
-        class="w-full rounded-full border py-3 pr-4 pl-12 text-sm outline-none"
+        :aria-label="t('search.label')"
+        autocomplete="off"
+        autocorrect="off"
+        autocapitalize="none"
+        spellcheck="false"
+        enterkeyhint="search"
+        class="w-full rounded-full border py-3 pr-4 pl-12 text-sm"
         :style="{ background: 'var(--c-surface)', borderColor: 'var(--c-border)', color: 'var(--c-text)', boxShadow: 'var(--shadow-1)' }"
         @input="onInput"
-        @keydown.enter="search"
       />
       <div
         v-if="loading"
         class="absolute top-1/2 right-4 h-4 w-4 -translate-y-1/2 animate-spin rounded-full border-2 border-t-transparent"
         :style="{ borderColor: 'var(--c-accent)', borderTopColor: 'transparent' }"
+        aria-hidden="true"
       />
-    </div>
+    </form>
 
     <p v-if="failed.length && searched" class="mt-3 text-xs" :style="{ color: 'var(--c-text-muted)' }">
       {{ t('search.partial', { sources: failed.map((s) => SOURCE_STYLE[s]?.label ?? s).join(t('search.sourceJoin')) }) }}
     </p>
 
     <!-- results -->
-    <ul v-if="results.length" class="mt-5 flex flex-col gap-2">
+    <ul v-if="results.length" role="list" class="@container mt-5 flex flex-col gap-2">
       <li
         v-for="r in results"
         :key="`${r.source}:${r.id}`"
@@ -137,25 +160,32 @@ const SOURCE_STYLE: Record<string, { label: string; bg: string; fg: string }> = 
         </div>
         <FavButton
           :item-id="r.item_id ?? ''"
+          :item-title="r.title"
           :source="{ source: 'url', url: r.url, title: r.title, duration: r.duration, provider: r.source, id: r.id }"
         />
         <AddToPlaylist
+          :item-title="r.title"
           :source="{ source: 'url', url: r.url, title: r.title, duration: r.duration, provider: r.source, id: r.id }"
         />
+        <!-- The name starts with the visible word (label in name) and adds the title, so a
+             list of "Queue" buttons is distinguishable. On a narrow list the word is hidden
+             visually and only the icon shows, leaving room for the title. -->
         <button
-          class="shrink-0 cursor-pointer rounded-full border-0 px-3.5 py-2 text-xs font-semibold"
+          type="button"
+          class="shrink-0 cursor-pointer rounded-full border-0 px-3.5 py-2 text-xs font-semibold @max-[30rem]:px-3"
           :style="added[`${r.source}:${r.id}`] === 'done'
             ? { background: 'var(--c-accent-soft)', color: 'var(--c-accent)' }
             : added[`${r.source}:${r.id}`] === 'error'
               ? { background: 'var(--c-accent-soft)', color: 'var(--c-danger)' }
               : { background: 'var(--c-accent)', color: 'var(--c-on-accent)' }"
+          :aria-label="t('common.itemAction', { action: queueWord(r), title: r.title })"
           :disabled="added[`${r.source}:${r.id}`] === 'pending' || added[`${r.source}:${r.id}`] === 'done'"
           @click="add(r)"
         >
-          <span v-if="added[`${r.source}:${r.id}`] === 'done'"><Icon icon="check" class="mr-1" />{{ t('common.queued') }}</span>
+          <span v-if="added[`${r.source}:${r.id}`] === 'done'"><Icon icon="check" class="mr-1 @max-[30rem]:mr-0" aria-hidden="true" /><span class="@max-[30rem]:sr-only">{{ t('common.queued') }}</span></span>
           <span v-else-if="added[`${r.source}:${r.id}`] === 'pending'">...</span>
-          <span v-else-if="added[`${r.source}:${r.id}`] === 'error'">{{ t('common.failed') }}</span>
-          <span v-else><Icon icon="plus" class="mr-1" />{{ t('common.queue') }}</span>
+          <span v-else-if="added[`${r.source}:${r.id}`] === 'error'"><Icon icon="triangle-exclamation" class="mr-1 @max-[30rem]:mr-0" aria-hidden="true" /><span class="@max-[30rem]:sr-only">{{ t('common.failed') }}</span></span>
+          <span v-else><Icon icon="plus" class="mr-1 @max-[30rem]:mr-0" aria-hidden="true" /><span class="@max-[30rem]:sr-only">{{ t('common.queue') }}</span></span>
         </button>
       </li>
     </ul>

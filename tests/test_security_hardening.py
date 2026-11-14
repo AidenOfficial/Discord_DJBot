@@ -541,7 +541,7 @@ def test_web_interface_uses_waitress(config, monkeypatch):
     try:
         startup.start_web_interface('0.0.0.0', 8181)
         assert served['host'] == '0.0.0.0' and served['port'] == 8181
-        assert served['max_request_body_size'] >= 4 * 1024 ** 3
+        assert served['max_request_body_size'] == 33 * 1024 * 1024  # 分片上传每片 32 MiB
         assert served['trusted_proxy'] is None
         # is_web_proxified 照旧装上 ReverseProxied
         assert isinstance(interface.web.wsgi_app, interface.ReverseProxied)
@@ -594,9 +594,10 @@ def test_default_config_lists_new_options(config):
 
 
 def test_activity_endpoints_are_rate_limited():
-    # 合并加固和 Activity 后:换令牌(登录前,按 IP 且放宽)和外部图片代理(按身份)都有限流
+    # 换令牌只按 IP 数失败的(大家共用 Discord 代理的 IP),外部图片代理按身份
     import web_security
-    assert web_security.RULES['activity_token'] == (('ip', 120, 60),)
+    assert 'activity_token' not in web_security.RULES
+    assert web_security.RULES['activity_token_fail'] == (('ip', 10, 60),)
     assert web_security.RULES['image_proxy'][0][0] == 'client'
     import web_activity
     from interface import web
