@@ -1,17 +1,47 @@
 #!/usr/bin/python3
 import hmac
 import html
+import ipaddress
 import json
 import logging
 import os
 import time
 from functools import wraps
+from urllib.parse import urlparse
 
-from flask import Flask, render_template, request, redirect, send_from_directory, Response, abort, session, g
+from flask import Flask, render_template, request, redirect, send_from_directory, Response, abort, session, g, \
+    jsonify
 
 import util
 import variables as var
 from constants import tr_web
+
+
+# 默认信任回环和私有网段:cloudflared / nginx 一般在同一个 docker 网络里,地址不固定
+DEFAULT_TRUSTED_PROXIES = "127.0.0.0/8, ::1/128, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7"
+
+
+def parse_networks(value):
+    networks = []
+    for part in (value or '').split(','):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            logging.getLogger("bot").warning("web: ignoring invalid [webinterface] trusted_proxies entry %r", part)
+    return networks
+
+
+def _parse_ip(value):
+    try:
+        addr = ipaddress.ip_address((value or '').strip())
+    except ValueError:
+        return None
+    if addr.version == 6 and addr.ipv4_mapped:
+        return addr.ipv4_mapped
+    return addr
 
 
 class ReverseProxied(object):
@@ -24,33 +54,55 @@ class ReverseProxied(object):
     location /myprefix {
         proxy_pass http://192.168.0.1:5001;
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Scheme $scheme;
         proxy_set_header X-Script-Name /myprefix;
         }
 
+    The headers are only believed when the socket peer is in [webinterface] trusted_proxies.
+    X-Script-Name / X-Scheme additionally need [webinterface] honor_script_name = True: behind
+    Cloudflare any visitor could send them, poison the cache, or reach /api/logs as /zz/api/logs
+    past a path-based Access policy.
+
     :param app: the WSGI application
     """
 
-    def __init__(self, app):
+    def __init__(self, app, trusted_proxies=None, honor_script_name=None):
         self.app = app
+        conf = var.config
+        if trusted_proxies is None:
+            trusted_proxies = conf.get('webinterface', 'trusted_proxies', fallback='') if conf is not None else ''
+        if honor_script_name is None:
+            honor_script_name = conf.getboolean('webinterface', 'honor_script_name', fallback=False) \
+                if conf is not None else False
+        # 留空等于默认;一个代理都不信就把 is_web_proxified 关掉
+        self.trusted = parse_networks((trusted_proxies or '').strip() or DEFAULT_TRUSTED_PROXIES)
+        self.honor_script_name = honor_script_name
+
+    def is_trusted(self, remote_addr):
+        addr = _parse_ip(remote_addr)
+        return addr is not None and any(addr in net for net in self.trusted)
 
     def __call__(self, environ, start_response):
-        script_name = environ.get('HTTP_X_SCRIPT_NAME', '')
-        if script_name:
-            environ['SCRIPT_NAME'] = script_name
-            path_info = environ['PATH_INFO']
-            if path_info.startswith(script_name):
-                environ['PATH_INFO'] = path_info[len(script_name):]
+        if not self.is_trusted(environ.get('REMOTE_ADDR')):
+            return self.app(environ, start_response)
 
-        scheme = environ.get('HTTP_X_SCHEME', '')
-        if scheme:
-            environ['wsgi.url_scheme'] = scheme
+        if self.honor_script_name:
+            script_name = environ.get('HTTP_X_SCRIPT_NAME', '')
+            if script_name:
+                environ['SCRIPT_NAME'] = script_name
+                path_info = environ.get('PATH_INFO', '')
+                if path_info.startswith(script_name):
+                    environ['PATH_INFO'] = path_info[len(script_name):]
+
+            scheme = environ.get('HTTP_X_SCHEME', '').lower()
+            if scheme in ('http', 'https'):
+                environ['wsgi.url_scheme'] = scheme
         # 访问者的真实 IP:Cloudflare Tunnel(cloudflared)放在 Cf-Connecting-IP,nginx 一般用 X-Real-IP。
         # 不认的话所有人都是 cloudflared 容器的地址,输错令牌的 IP 封禁会把所有人一起封掉
-        real_ip = environ.get('HTTP_CF_CONNECTING_IP', '') or environ.get('HTTP_X_REAL_IP', '')
-        if real_ip:
-            environ['REMOTE_ADDR'] = real_ip.strip()
+        real_ip = _parse_ip(environ.get('HTTP_CF_CONNECTING_IP', '') or environ.get('HTTP_X_REAL_IP', ''))
+        if real_ip is not None:
+            environ['REMOTE_ADDR'] = str(real_ip)
         return self.app(environ, start_response)
 
 
@@ -68,6 +120,8 @@ import web_users
 
 root_dir = os.path.dirname(__file__)
 web = Flask(__name__, template_folder=os.path.join(root_dir, "templates"))
+# API 的请求体都是小 JSON;上传分片的路由自己放宽这个上限
+web.config['MAX_CONTENT_LENGTH'] = 1024 * 1024
 log = logging.getLogger("bot")
 
 
@@ -152,6 +206,22 @@ def _with_identity(f, auth_user, args, kwargs):
     return f(*args, **kwargs)
 
 
+AUTH_METHODS = ('none', 'password', 'token', 'discord')
+_bad_auth_methods_logged = set()
+
+
+def configured_auth_method():
+    """规范化后的 auth_method。不认识的值(包括留空)不在 AUTH_METHODS 里:requires_auth 一律拒绝,不当成 none。"""
+    return (var.config.get("webinterface", "auth_method", fallback='') or '').strip().lower()
+
+
+def _log_bad_auth_method(value):
+    if value not in _bad_auth_methods_logged:
+        _bad_auth_methods_logged.add(value)
+        log.error("web: unknown [webinterface] auth_method %r (expected one of %s), refusing web requests",
+                  _log_safe(value), ', '.join(AUTH_METHODS))
+
+
 def requires_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -164,7 +234,10 @@ def requires_auth(f):
         if bearer is not None:
             return bearer
 
-        auth_method = var.config.get("webinterface", "auth_method")
+        auth_method = configured_auth_method()
+        if auth_method not in AUTH_METHODS:
+            _log_bad_auth_method(auth_method)
+            return jsonify({'error': 'auth_misconfigured'}), 503
 
         if auth_method == 'discord':
             if web_auth_discord.session_user() is None:
@@ -236,6 +309,52 @@ def requires_auth(f):
 @web.after_request
 def _security_headers(response):
     return web_security.apply_security_headers(response)
+
+
+# 跨站表单 / no-cors fetch 不经过 CORS 预检就能发的 Content-Type
+CSRF_SIMPLE_CONTENT_TYPES = ('application/x-www-form-urlencoded', 'multipart/form-data', 'text/plain')
+CSRF_SAFE_METHODS = ('GET', 'HEAD', 'OPTIONS')
+
+
+def _origin_of(url):
+    parts = urlparse(url)
+    if not parts.scheme or not parts.netloc:
+        return None
+    return f"{parts.scheme}://{parts.netloc}".lower()
+
+
+def allowed_origins():
+    public_url = (var.config.get('webinterface', 'public_url', fallback='') or '').strip()
+    origins = {_origin_of(public_url) or _origin_of(request.host_url)}
+    if web_activity.enabled():
+        # Activity 的 iframe 由 Discord 代理成 https://<app id>.discordsays.com,请求从那里同源发出
+        origins.add(f"https://{web_auth_discord.client_id()}.discordsays.com".lower())
+    return origins
+
+
+def _csrf_rejected():
+    return jsonify({'error': 'csrf'}), 403
+
+
+@web.before_request
+def _csrf_protect():
+    """会话 Cookie / Basic Auth 是浏览器自动带的:改状态的请求必须来自本站。
+    带 Bearer 的(Activity)不靠 Cookie,不用查。"""
+    if request.method in CSRF_SAFE_METHODS:
+        return None
+    if not (request.path.startswith('/api/') or request.path.startswith('/auth/')):
+        return None
+    if request.headers.get('Authorization', '').lower().startswith('bearer '):
+        return None
+    fetch_site = request.headers.get('Sec-Fetch-Site')
+    if fetch_site is not None and fetch_site.lower() not in ('same-origin', 'none'):
+        return _csrf_rejected()
+    origin = request.headers.get('Origin')
+    if origin is not None and origin.lower().rstrip('/') not in allowed_origins():
+        return _csrf_rejected()
+    if request.mimetype in CSRF_SIMPLE_CONTENT_TYPES:
+        return _csrf_rejected()
+    return None
 
 
 def requires_auth_or_activity_shell(f):
