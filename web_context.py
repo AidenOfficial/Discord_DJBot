@@ -6,12 +6,14 @@ Web 代码不直接用 var.bot / var.playlist,统一从这里取。
   允许的服务器里的第一个(主服务器优先)。选了不允许的服务器 → 403 JSON。
 - 能碰哪些服务器(access()):
     * bot 主人([bot] admin 里的 Discord id,按身份关联的 Discord 账号认)→ 全部,都能管理;
-    * 用 Discord 登录 → 自己所在的服务器 ∩ bot 所在的服务器;有 管理员 / 管理服务器 权限的能管理;
+    * 用 Discord 登录 → 自己所在的服务器 ∩ bot 所在的服务器(Hub 能查成员时再和它对一遍,被踢了
+      立刻生效);有 管理员 / 管理服务器 权限的能管理;
     * 其他登录方式(令牌 / 密码 / Cloudflare)但 /bind 过 Discord → 自己是成员的服务器,不能管理;
     * 令牌用户 → 发 /web 的那个服务器(web_token_guild 里记着;之前发的令牌算主服务器);
-    * Discord Activity 的 Bearer 令牌 → 和 Discord 登录一样,另外打开 Activity 的服务器一定在内,
-      也是默认服务器;
+    * Discord Activity 的 Bearer 令牌 → 和 Discord 登录一样,另外打开 Activity 的服务器只要还是
+      成员就在内,也是默认服务器;
     * 都不是 → 没有。
+- 封禁:选好服务器后,关联的 Discord 账号被 user_ban 封了(全局或本服务器,规则同斜杠命令)→ 403 user_banned。
 - 没有 Hub(var.hub 为 None,旧的单服务器部署 / 测试)时只有 var.bot 一个会话,
   所有通过了登录门禁的人照旧都能操作它,请求头里的服务器不看。
 
@@ -21,6 +23,7 @@ home_guild_id、is_member(guild_id, user_id)。
 
 import json
 import logging
+import types
 
 from flask import abort, g, has_request_context, jsonify, make_response, request
 from flask import session as flask_session
@@ -89,6 +92,43 @@ def token_guild_id():
     return None
 
 
+def member_state(guild_id, user_id):
+    """按 bot 这边(Hub 的成员查询,有缓存)看 user 是不是这个服务器的成员:True / False;
+    回答不了(没有 Hub、Hub 还没连上 Discord、没有 user id)→ None。
+
+    Hub.is_member 查不了时也返回 False,所以只有连上了(有 client)的 Hub 说 False 才当真。"""
+    h = hub()
+    if h is None or not user_id:
+        return None
+    try:
+        status = getattr(h, 'member_status', None)
+        if callable(status):
+            return status(str(guild_id), str(user_id))
+        if h.is_member(str(guild_id), str(user_id)):
+            return True
+    except Exception:
+        log.debug("web: is_member(%s, %s) failed", guild_id, user_id, exc_info=True)
+        return None
+    return False if getattr(h, 'client', None) is not None else None
+
+
+def user_banned(discord_id, guild_id, manage=False):
+    """这个 Discord 账号在这个服务器被封禁了没有(user_ban 规则)。规则和斜杠命令完全一样
+    (bot.core.DJBot.banned):全局规则管除 bot 主人以外的所有人,本服务器的规则管不到能管理的人。"""
+    if not discord_id:
+        return False
+    from bot.core import DJBot
+
+    owner = str(discord_id) in owner_ids()
+    # 不需要真的会话(可能在休眠):banned() 只用到 store 和 guild_id
+    probe = types.SimpleNamespace(store=getattr(var, 'store', None), guild_id=str(guild_id or ''))
+    try:
+        return DJBot.banned(probe, 'user_ban', str(discord_id), admin=owner or manage, owner=owner)
+    except Exception:
+        log.warning("web: ban lookup for %s in %s failed", discord_id, guild_id, exc_info=True)
+        return False
+
+
 class Access:
     """当前用户能操作的服务器 {guild_id: 能否管理},顺序 = 显示顺序。"""
 
@@ -125,7 +165,8 @@ def _compute_access():
     if getattr(ident, 'discord_user', None):
         mine = {gd['id']: gd for gd in web_auth_discord.discord_guilds()}
         for gid in bot_ids:
-            if gid in mine:
+            # OAuth 的列表最多缓存 GUILDS_TTL:被踢了以 bot 这边看到的为准,立刻生效
+            if gid in mine and member_state(gid, discord_id) is not False:
                 guilds[gid] = web_auth_discord.can_manage(mine[gid])
                 names[gid] = mine[gid]
     elif discord_id:
@@ -139,9 +180,11 @@ def _compute_access():
     if token_gid and token_gid in bot_ids:
         guilds.setdefault(token_gid, False)
     # Activity 令牌:签发时核对过这个服务器(成员 + 在语音频道里)
+    # 之后被踢了就不再算(用 bot 这边的成员查询;OAuth 列表里有的上面已经算过)
     activity_gid = web_activity.current_guild_id()
-    if activity_gid and activity_gid in bot_ids:
-        guilds.setdefault(activity_gid, False)
+    if activity_gid and activity_gid in bot_ids and activity_gid not in guilds \
+            and member_state(activity_gid, discord_id):
+        guilds[activity_gid] = False
     # 按 Hub 给的顺序
     return Access({gid: guilds[gid] for gid in bot_ids if gid in guilds}, names=names)
 
@@ -210,8 +253,17 @@ def guild_id():
             selected = default_guild_id(acc)
             if selected is None:
                 _deny(403, 'no_guild_access')
+    _refuse_banned(acc, selected)
     g.web_guild_id = selected
     return selected
+
+
+def _refuse_banned(acc, selected):
+    from web_users import current_identity
+
+    discord_id = linked_discord_id(current_identity())
+    if discord_id and user_banned(discord_id, selected, manage=acc.can_manage(selected)):
+        _deny(403, 'user_banned')
 
 
 def can_manage():

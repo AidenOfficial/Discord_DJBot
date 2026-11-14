@@ -20,6 +20,7 @@ Activity 只是个遥控器:声音照旧由 bot 推进语音频道,iframe 里显
 
 import hashlib
 import logging
+import re
 import secrets
 import threading
 import time
@@ -32,6 +33,7 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 import variables as var
 import web_auth_discord
+import web_security
 from web_security import rate_limited
 
 log = logging.getLogger("bot")
@@ -40,7 +42,7 @@ TOKEN_SALT = 'djbot-activity-token'
 TOKEN_VERSION = 1
 DEFAULT_TTL = 900
 MIN_TTL = 60
-MAX_TTL = 86400
+MAX_TTL = 3600
 REVOKED_SECTION = 'activity_revoked'            # jti -> 过期时间
 REVOKED_USER_SECTION = 'activity_revoked_user'  # Discord user id -> 撤销时间(之前签发的都不认)
 ACTIVITY_SCOPES = ('identify', 'guilds')
@@ -80,7 +82,9 @@ def _serializer():
 # =====================================================================
 
 _revoked_lock = threading.Lock()
-_revoked = {'db': None, 'jti': {}, 'user': {}}
+_revoked = {'db': None, 'jti': {}, 'user': {}, 'pruned_at': 0.0}
+# 过期撤销记录最多这么久清一次(每次登出 / 续期都扫一遍表、删库太费)
+PRUNE_INTERVAL = 300
 
 
 def _revocations():
@@ -94,23 +98,34 @@ def _revocations():
                 user = {k: float(v) for k, v in db.items(REVOKED_USER_SECTION)}
             except Exception:
                 log.warning("web: could not load revoked Activity tokens", exc_info=True)
-        _revoked.update(db=db, jti=jti, user=user)
+        _revoked.update(db=db, jti=jti, user=user, pruned_at=0.0)
     return _revoked
 
 
 def revoke(jti, expires_at):
-    """作废一个令牌(到它本来的过期时间为止)。"""
+    """作废一个令牌(到它本来的过期时间为止)。写库在锁外面做:别让每个 Bearer 请求的校验排队等磁盘。"""
     now = time.time()
+    expires_at = float(expires_at)
+    expired = []
     with _revoked_lock:
         table = _revocations()
-        table['jti'][jti] = float(expires_at)
         db = table['db']
-        if db is not None:
-            db.set(REVOKED_SECTION, jti, str(float(expires_at)))
-        for old in [k for k, exp in table['jti'].items() if exp < now]:
-            table['jti'].pop(old, None)
-            if db is not None:
-                db.remove_option(REVOKED_SECTION, old)
+        if expires_at >= now:
+            table['jti'][jti] = expires_at
+        if now - table['pruned_at'] >= PRUNE_INTERVAL:
+            table['pruned_at'] = now
+            expired = [k for k, exp in table['jti'].items() if exp < now]
+            for old in expired:
+                table['jti'].pop(old, None)
+    if db is None:
+        return
+    try:
+        if expires_at >= now:
+            db.set(REVOKED_SECTION, jti, str(expires_at))
+        for old in expired:
+            db.remove_option(REVOKED_SECTION, old)
+    except Exception:
+        log.warning("web: could not persist revoked Activity token", exc_info=True)
 
 
 def revoke_user(discord_id):
@@ -119,8 +134,9 @@ def revoke_user(discord_id):
     with _revoked_lock:
         table = _revocations()
         table['user'][str(discord_id)] = now
-        if table['db'] is not None:
-            table['db'].set(REVOKED_USER_SECTION, str(discord_id), str(now))
+        db = table['db']
+    if db is not None:
+        db.set(REVOKED_USER_SECTION, str(discord_id), str(now))
 
 
 def _is_revoked(claims):
@@ -273,6 +289,11 @@ def check_context(user_id, guild_id, channel_id, oauth_guilds):
         raise Rejected('guild_not_served')
     if not is_member(guild_id, user_id, oauth_guilds):
         raise Rejected('not_a_member')
+    import web_context
+
+    mine = next((gd for gd in oauth_guilds if gd['id'] == guild_id), None)
+    if web_context.user_banned(user_id, guild_id, manage=web_auth_discord.can_manage(mine)):
+        raise Rejected('user_banned')
     if voice_channel_of(guild_id, user_id) != channel_id:
         raise Rejected('not_in_voice_channel')
 
@@ -283,8 +304,15 @@ def _for_log(value):
 
 
 def _snowflake(value):
-    value = str(value or '').strip()
-    return value if value.isdigit() and len(value) <= 20 else None
+    if not isinstance(value, (str, int)) or isinstance(value, bool):
+        return None
+    value = str(value).strip()
+    return value if SNOWFLAKE_RE.fullmatch(value) else None
+
+
+# Discord 的 OAuth code 是 30 位左右的字母数字;不像的不拿去换(换一次就是一次出站请求)
+CODE_RE = re.compile(r'[A-Za-z0-9]{16,64}')
+SNOWFLAKE_RE = re.compile(r'[1-9][0-9]{0,19}')
 
 
 # =====================================================================
@@ -425,32 +453,46 @@ def create_blueprint(requires_auth):
         return jsonify({'enabled': True, 'client_id': web_auth_discord.client_id(),
                         'scopes': list(ACTIVITY_SCOPES), 'token_ttl': token_ttl()})
 
+    def _failed():
+        # 只数失败的换令牌:大家共用 Discord 代理的 IP,成功的不该把别人挤出去
+        web_security.check('activity_token_fail')
+
     @api.route('/activity/token', methods=['POST'])
-    @rate_limited('activity_token')
+    @rate_limited('activity_token_fail', record=False)
     def activity_token():
         if not enabled():
             abort(404)
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            body = {}
         code = body.get('code')
         guild_id = _snowflake(body.get('guild_id'))
         channel_id = _snowflake(body.get('channel_id'))
-        if not isinstance(code, str) or not code or len(code) > 512:
+        if not isinstance(code, str) or not CODE_RE.fullmatch(code):
             return _error('code_required', 400)
         if guild_id is None or channel_id is None:
             # 私信 / 群组里打开的 Activity 没有服务器,bot 没法在那里放歌
             return _error('guild_required', 400)
+        if guild_id not in web_auth_discord.bot_guild_ids():
+            _failed()
+            return _error('guild_not_served', 403)
         try:
             token = web_auth_discord.exchange_activity_code(code)
             user = web_auth_discord.fetch_user(token['access_token'])
+            wait = web_security.check('activity_login', key=web_auth_discord.discord_key(user['id']))
+            if wait:
+                return web_security.too_many(wait)
             guilds = web_auth_discord.fetch_guilds(token['access_token'])
         except web_auth_discord.DiscordError as e:
             log.warning("web: Activity login failed: %s", e)
             if e.status in (400, 401):
+                _failed()
                 return _error('discord_auth_failed', 401)
             return _error('discord_unavailable', 502)
         try:
             check_context(user['id'], guild_id, channel_id, guilds)
         except Rejected as e:
+            _failed()
             log.info("web: Activity login of discord:%s for %s/%s refused: %s",
                      _for_log(user['id']), _for_log(guild_id), _for_log(channel_id), e.error)
             return _error(e.error, e.status)
@@ -474,6 +516,7 @@ def create_blueprint(requires_auth):
 
     @api.route('/activity/refresh', methods=['POST'])
     @requires_auth
+    @rate_limited('activity_refresh')
     def activity_refresh():
         """换一个新令牌(旧的作废)。重新核对语音频道:人已经离开了就不续。"""
         claims = current_claims()
@@ -494,6 +537,7 @@ def create_blueprint(requires_auth):
 
     @api.route('/activity/logout', methods=['POST'])
     @requires_auth
+    @rate_limited('activity_refresh')
     def activity_logout():
         claims = current_claims()
         if claims is None:
