@@ -26,7 +26,10 @@ import time
 import unicodedata
 from io import BytesIO
 
+from PIL import Image
+
 import variables as var
+from bot.executor import KeyedExecutor
 
 log = logging.getLogger("bot")
 
@@ -40,6 +43,10 @@ MAX_CALLS_PER_ITEM = 10    # 每首歌最多查几次曲库
 URL_TYPES = ('url', 'url_from_playlist')
 
 _ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
+
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+# 封面链接是别人网页里填的:小文件也能解压成几十亿像素(解压炸弹),超过 2 倍时 PIL 直接报错
+Image.MAX_IMAGE_PIXELS = 40_000_000
 
 
 # ---- 存储 -----------------------------------------------------------------------
@@ -77,7 +84,6 @@ def small_b64(im):
 
 def save(item_id, im):
     """存高清图(原子替换),返回 100px 的 base64 缩略图。"""
-    from PIL import Image
     path = path_for(item_id)
     small = small_b64(im)
     if not path:
@@ -603,7 +609,6 @@ def _with_image(match):
 
 def _fetch_image(url):
     import requests
-    from PIL import Image
 
     import util
     # 封面链接来自视频页的元数据(yt-dlp 的 thumbnail / og:image),别人的网页可以随便填
@@ -612,9 +617,17 @@ def _fetch_image(url):
     headers = dict(_HEADERS)
     if 'hdslb.com' in url or 'bilibili' in url:
         headers['Referer'] = 'https://www.bilibili.com/'
-    r = requests.get(url, headers=headers, timeout=10)
-    r.raise_for_status()
-    im = Image.open(BytesIO(r.content))
+    with requests.get(url, headers=headers, timeout=10, stream=True) as r:
+        r.raise_for_status()
+        data = bytearray()
+        for chunk in r.iter_content(64 * 1024):
+            data += chunk
+            if len(data) > MAX_IMAGE_BYTES:
+                raise ValueError(f"artwork larger than {MAX_IMAGE_BYTES} bytes: {url[:200]}")
+    im = Image.open(BytesIO(bytes(data)))
+    # PIL 只在超过 2 倍 MAX_IMAGE_PIXELS 时报错,之间只是警告;解码前按头部尺寸自己拦
+    if im.width * im.height > Image.MAX_IMAGE_PIXELS:
+        raise ValueError(f"artwork too large ({im.width}x{im.height}): {url[:200]}")
     im.load()
     return im
 
@@ -660,6 +673,9 @@ _infos = {}
 _lock = threading.Lock()
 _apply_lock = threading.Lock()
 _worker = None
+# 视频封面:每首歌一个线程的话,一次加整张歌单会同时开几百个连接。
+# 不用 ThreadPoolExecutor:它的线程不是 daemon,解释器退出前会把排队的几百个任务全跑完才退
+_thumb_pool = KeyedExecutor(max_workers=2, name='Thumb')
 
 
 def lookup_enabled():
@@ -709,8 +725,10 @@ def ensure(item, info=None, urgent=False):
             _infos[item.id] = {k: info.get(k) for k in _INFO_KEYS if info.get(k) is not None}
         if not hd and item.type in URL_TYPES and (info or urgent) and item.id not in _quick:
             _quick.add(item.id)
-            threading.Thread(target=_quick_video, args=(item, _infos.get(item.id)),
-                             name='Thumb-' + item.id[:7], daemon=True).start()
+            try:
+                _thumb_pool.submit(item.id, _quick_video, item, _infos.get(item.id))
+            except RuntimeError:  # 开不了新线程
+                _quick.discard(item.id)
         if item.id in _active:
             return
         if item.id in _queued and (not urgent or item.id in _urgent):
@@ -801,7 +819,6 @@ def _apply(item, im, state, match=None):
 
 def _video_step(item, info):
     """下载视频封面;成功返回 True。"""
-    from PIL import Image
     tmp_cover = os.path.join(var.tmp_folder or '', item.id + '.jpg')
     if not info and os.path.isfile(tmp_cover):  # 上一版下载时存的原图
         try:
