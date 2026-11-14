@@ -16,7 +16,7 @@ import variables as var  # noqa: E402
 import web_users  # noqa: E402
 from bot.store import GuildStore  # noqa: E402
 from database import DatabaseMigration, MusicDatabase, SettingsDatabase  # noqa: E402
-from tests.test_web_auth_discord import FakeDiscord  # noqa: E402
+from tests.test_web_auth_discord import BAD_ACTIVITY_CODE, GOOD_ACTIVITY_CODE, FakeDiscord  # noqa: E402
 from tests.test_web_guilds import HOME, OWNER, SECOND, THIRD, FakeHub  # noqa: E402
 
 USER = '42'          # FakeDiscord 的用户:在 111(管理服务器权限)、222、333
@@ -77,7 +77,7 @@ def env(monkeypatch, tmp_path):
     web_auth_discord._cache.clear()
 
 
-def exchange(client, code='good', guild=HOME, channel=VOICE):
+def exchange(client, code=GOOD_ACTIVITY_CODE, guild=HOME, channel=VOICE):
     return client.post('/api/activity/token', json={'code': code, 'guild_id': guild, 'channel_id': channel})
 
 
@@ -129,7 +129,7 @@ def test_exchange_issues_our_token(env):
     # 换令牌:SDK 授权没有 redirect_uri,这里也不能带
     post = next(c for c in env.discord.calls if c[0] == 'post')
     assert post[2]['grant_type'] == 'authorization_code'
-    assert post[2]['code'] == 'good'
+    assert post[2]['code'] == GOOD_ACTIVITY_CODE
     assert post[2]['client_secret'] == 'test-client-secret'
     assert 'redirect_uri' not in post[2]
     assert env.discord.count('/users/@me') == 1 and env.discord.count('/users/@me/guilds') == 1
@@ -233,10 +233,10 @@ def test_owner_still_needs_the_voice_channel(env):
 
 @pytest.mark.parametrize('body', [
     {'guild_id': HOME, 'channel_id': VOICE},                      # 没有 code
-    {'code': 'good', 'channel_id': VOICE},                        # 私信里打开:没有服务器
-    {'code': 'good', 'guild_id': HOME},
-    {'code': 'good', 'guild_id': '1; drop', 'channel_id': VOICE},
-    {'code': ['good'], 'guild_id': HOME, 'channel_id': VOICE},
+    {'code': GOOD_ACTIVITY_CODE, 'channel_id': VOICE},                        # 私信里打开:没有服务器
+    {'code': GOOD_ACTIVITY_CODE, 'guild_id': HOME},
+    {'code': GOOD_ACTIVITY_CODE, 'guild_id': '1; drop', 'channel_id': VOICE},
+    {'code': [GOOD_ACTIVITY_CODE], 'guild_id': HOME, 'channel_id': VOICE},
 ])
 def test_bad_requests(env, body):
     rv = env.client.post('/api/activity/token', json=body)
@@ -245,7 +245,7 @@ def test_bad_requests(env, body):
 
 
 def test_bad_code_and_discord_down(env):
-    rv = exchange(env.client, code='bad')
+    rv = exchange(env.client, code=BAD_ACTIVITY_CODE)
     assert rv.status_code == 401
     assert rv.get_json()['error'] == 'discord_auth_failed'
     env.discord.guilds_status = 500
