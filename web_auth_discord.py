@@ -3,10 +3,13 @@
 流程:/auth/discord/login 跳到 Discord 授权页 → Discord 带 code 回调 /auth/discord/callback
 → 换 token、读 /users/@me 和 /users/@me/guilds → 写进会话 → 回到 Web 首页。
 
-- 会话 Cookie 里只放 Discord 用户的基本信息和 token(Flask 会话是签名的,HttpOnly);
-  服务器列表放在本进程的内存缓存里,按 Discord user id 索引,超过 GUILDS_TTL 才在
-  下次用到时重新拉取(遇到 429 按 retry_after 退避)。重启后缓存为空,从会话里的
-  token 恢复。
+- 会话 Cookie 里只放 Discord 用户的基本信息(Flask 会话只签名不加密,token 不能放进去);
+  token 和服务器列表放在本进程的内存缓存里,按 Discord user id 索引,超过 GUILDS_TTL 才在
+  下次用到时重新拉取(遇到 429 按 retry_after 退避)。Discord 说 token 无效(400/401/403,
+  比如用户取消了授权)就清空服务器列表;拉取一直失败、列表旧过 2*GUILDS_TTL 也不再认。
+  重启后缓存为空,会话随之失效,要重新登录(prompt=none,授权过的人不用再点确认)。
+- 换 token 的请求有熔断:Discord 回 429 后到 retry_after 为止不再请求;另外整个进程
+  有个总预算(TOKEN_BUDGET),超了直接报 503,不去打 Discord。
 - 身份:discord_link 里已经有 discord:<id>(用过 /bind)就用绑定的那个 Web 身份,
   个人歌单 / 收藏跟着走;否则身份就是 discord:<id>,并写一条 discord_link,
   这样不需要再 /bind。
@@ -28,6 +31,7 @@ from urllib.parse import urlencode
 import requests
 from flask import Blueprint, has_request_context, jsonify, redirect, render_template, request, session
 from flask import g as request_globals
+from markupsafe import Markup, escape
 
 import variables as var
 
@@ -43,12 +47,18 @@ GUILDS_TTL = 600
 # 拉取失败(网络 / 5xx / token 失效)后多久再试,避免每个请求都打一次 Discord
 FAILURE_BACKOFF = 60
 CACHE_MAX_USERS = 5000
+# Discord 明确说 token 不能用了
+_TOKEN_DEAD = (400, 401, 403)
+# 进程内所有换 token 请求(登录、Activity、续期)的总预算:(次数, 秒)
+TOKEN_BUDGET = (30, 60)
+MIN_BACKOFF = 5
 
 PERM_ADMINISTRATOR = 0x8
 PERM_MANAGE_GUILD = 0x20
 
 SESSION_USER = 'discord_user'
-SESSION_TOKEN = 'discord_token'
+# 旧版本把 token 放在会话 Cookie 里;读到就删掉
+LEGACY_SESSION_TOKEN = 'discord_token'
 SESSION_STATE = 'discord_oauth_state'
 SESSION_NEXT = 'discord_oauth_next'
 # prompt=none 时 Discord 可能要求用户确认,回调带这些 error
@@ -141,14 +151,41 @@ def _check(resp, what):
         raise DiscordError(f"{what}: invalid JSON", resp.status_code)
 
 
+_breaker_lock = threading.Lock()
+_token_backoff_until = 0.0  # time.monotonic():Discord 回 429 后到这个时间为止不再换 token
+
+
+def _token_gate():
+    """换 token 之前:还在 429 退避期 → DiscordError(429);超出进程预算 → DiscordError(503)。"""
+    from web_security import limiter
+
+    wait = _token_backoff_until - time.monotonic()
+    if wait > 0:
+        raise DiscordError('token: backing off after Discord rate limit', 429, wait)
+    limit, window = TOKEN_BUDGET
+    over = limiter.hit('oauth_token|process', limit, window)
+    if over:
+        raise DiscordError('token: exchange budget exhausted', 503, over)
+
+
 def _token_request(data):
+    global _token_backoff_until
+
+    _token_gate()
     data = dict(data, client_id=client_id(), client_secret=client_secret())
     try:
         resp = requests.post(TOKEN_URL, data=data, timeout=HTTP_TIMEOUT,
                              headers={'Content-Type': 'application/x-www-form-urlencoded'})
     except requests.RequestException as e:
         raise DiscordError(f"token: {e}")
-    payload = _check(resp, 'token')
+    try:
+        payload = _check(resp, 'token')
+    except DiscordError as e:
+        if e.status == 429:
+            with _breaker_lock:
+                _token_backoff_until = max(_token_backoff_until,
+                                           time.monotonic() + max(MIN_BACKOFF, e.retry_after or 0))
+        raise
     if not payload.get('access_token'):
         raise DiscordError('token: no access_token in response')
     return {
@@ -237,18 +274,7 @@ def _store(user_id, token=None, guilds=None):
 
 
 def _entry(user_id):
-    entry = _cache.get(user_id)
-    if entry is None and has_request_context():
-        # 重启后内存缓存是空的:从会话里的 token 恢复,下一步就会重新拉取
-        token = session.get(SESSION_TOKEN)
-        if token and (session.get(SESSION_USER) or {}).get('id') == user_id:
-            entry = _store(user_id, token=dict(token))
-    return entry
-
-
-def _save_session_token(user_id, token):
-    if has_request_context() and (session.get(SESSION_USER) or {}).get('id') == user_id:
-        session[SESSION_TOKEN] = token
+    return _cache.get(user_id)
 
 
 def _refresh(user_id, entry):
@@ -256,18 +282,23 @@ def _refresh(user_id, entry):
     now = time.time()
     try:
         if not token:
-            raise DiscordError('no token')
+            raise DiscordError('no token', 401)
         if token.get('expires_at', 0) - 60 < now:
             if not token.get('refresh_token'):
-                raise DiscordError('access token expired')
+                raise DiscordError('access token expired', 401)
             token = refresh_access_token(token['refresh_token'])
             entry['token'] = token
-            _save_session_token(user_id, token)
         guilds = fetch_guilds(token['access_token'])
     except DiscordError as e:
-        entry['retry_at'] = now + (e.retry_after if e.retry_after else
-                                   GUILDS_TTL if e.status in (401, 403) else FAILURE_BACKOFF)
         log.warning("web: could not refresh Discord guilds for %s: %s", user_id, e)
+        if e.status in _TOKEN_DEAD:
+            # 用户取消了授权 / refresh token 失效(invalid_grant):不能再按旧列表给权限
+            entry['guilds'] = []
+            entry['token'] = None
+            entry['fetched_at'] = now
+            entry['retry_at'] = now + GUILDS_TTL
+            return
+        entry['retry_at'] = now + (e.retry_after if e.retry_after else FAILURE_BACKOFF)
         return
     entry['guilds'] = guilds
     entry['fetched_at'] = time.time()
@@ -287,8 +318,8 @@ def discord_user_id(identity=None):
 
 def discord_guilds(identity=None, refresh=False):
     """这个 Discord 用户所在的服务器:[{id, name, icon, owner, permissions}],id 是字符串,
-    permissions 是整数位域。超过 GUILDS_TTL 或 refresh=True 时先同步拉一次(失败就用旧的)。
-    不是 Discord 登录 / 没有 token 时返回 []。"""
+    permissions 是整数位域。超过 GUILDS_TTL 或 refresh=True 时先同步拉一次(暂时失败就用旧的,
+    但旧过 2*GUILDS_TTL 就不认了)。不是 Discord 登录 / 没有 token 时返回 []。"""
     user_id = discord_user_id(identity)
     if not user_id:
         return []
@@ -303,6 +334,8 @@ def discord_guilds(identity=None, refresh=False):
             _refresh(user_id, entry)
         finally:
             entry['lock'].release()
+    if time.time() - entry['fetched_at'] > 2 * GUILDS_TTL:
+        return []
     return [dict(g) for g in entry['guilds']]
 
 
@@ -360,15 +393,23 @@ def forget(user_id):
 
 def session_user():
     """当前请求里登录的 Discord 用户 {id, username, global_name, avatar};没有返回 None。
-    关掉 Discord 登录(删了 client id/secret)后旧会话一律不认。"""
+    关掉 Discord 登录(删了 client id/secret)后旧会话一律不认;服务端没有这个人的 token
+    (重启过 / 被挤出缓存)的会话也不认,重新登录一次。"""
     if not has_request_context() or not configured():
         return None
     # Activity 的 Bearer 令牌(web_activity.check_bearer 校验过才会有)
     bearer_user = getattr(request_globals, 'activity_user', None)
     if bearer_user:
         return bearer_user
+    if LEGACY_SESSION_TOKEN in session:
+        session.pop(LEGACY_SESSION_TOKEN, None)
     user = session.get(SESSION_USER)
     if not user or not user.get('id'):
+        return None
+    entry = _entry(str(user['id']))
+    # token 被 Discord 判死(_refresh 收回了权限):当成没登录,prompt=none 重新登录一次就能拿到新 token,
+    # 取消了授权的人会看到 Discord 的确认页,而不是一直卡在"不是成员"
+    if entry is None or entry['token'] is None:
         return None
     return user
 
@@ -418,6 +459,22 @@ def _link_on_login(user):
 
 def _wants_json():
     return request.path.startswith('/api/')
+
+
+def _preferred_type():
+    return request.accept_mimetypes.best_match(['application/json', 'text/html'])
+
+
+def _prefers_json():
+    return _preferred_type() == 'application/json'
+
+
+def _prefers_html():
+    return _preferred_type() == 'text/html'
+
+
+# 会话里有这些就算还登录着(Discord 登录、令牌登录)
+_LOGIN_KEYS = (SESSION_USER, 'user', 'token')
 
 
 def _page(title, message, status=200, show_login=False, show_logout=False):
@@ -518,18 +575,27 @@ def create_blueprint():
         session.clear()
         session.permanent = True
         session[SESSION_USER] = user
-        session[SESSION_TOKEN] = token
         log.info("web: %s (discord:%s) logged in with Discord as %s from %s",
                  display_name(user), user['id'], identity, request.remote_addr)
         return redirect(_safe_next(next_path) or request.script_root + '/', code=302)
 
     @bp.route('/auth/logout', methods=['GET', 'POST'])
     def logout():
+        """只有 POST 退出(GET 能被别的网站用 <img> / 链接触发)。GET:还登录着就给一个退出按钮,
+        已经退出了(前端先 POST 再跳过来)就是"已退出"页面。"""
         from constants import tr_web
 
-        session.clear()
         if request.method == 'POST':
-            return jsonify({'ok': True})
+            session.clear()
+            if not _prefers_html():
+                return jsonify({'ok': True})
+        elif _prefers_json():
+            return jsonify({'error': 'method_not_allowed'}), 405, {'Allow': 'POST'}
+        elif any(key in session for key in _LOGIN_KEYS):
+            action = escape(request.script_root + '/auth/logout')
+            form = Markup(f'<form method="post" action="{action}">'
+                          f'<button type="submit">{escape(tr_web("logout"))}</button></form>')
+            return _page(tr_web('logout'), form)
         if configured():
             # 不直接回首页:门禁会立刻跳去 Discord,prompt=none 又把人登录回来
             return _page(tr_web('logged_out'), tr_web('logged_out_message'), show_login=True)
