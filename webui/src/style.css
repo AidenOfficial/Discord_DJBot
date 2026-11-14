@@ -163,6 +163,12 @@ body {
   color: var(--c-text);
   font-family: system-ui, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Animate theme toggles only. main.ts adds .theme-ready a frame after mount, so
+   the first paint (and Vue's first render of the stored theme) never fades from
+   the default scheme. */
+html.theme-ready body {
   transition: background-color 160ms ease, color 160ms ease;
 }
 
@@ -194,6 +200,25 @@ html.embedded {
   [role="tab"], [role="switch"], [role="option"], [tabindex], [contenteditable]):focus-visible {
   outline: 2px solid var(--c-accent);
   outline-offset: 2px;
+}
+
+/* Minimum target size (WCAG 2.5.8): every control is at least 24x24 CSS px.
+   In @layer base on purpose, unlike the rules around it: a Tailwind size utility
+   on a control (min-w-0 on a truncating flex button, a fixed h-9 chip) still wins.
+   The 44px touch size (2.5.5) is opted into per control with pointer-coarse:
+   utilities or hit-area pseudo-elements (seek bar, mode buttons, lyrics), not
+   globally: dense row toolbars (queue, playlists) would overflow a 320px screen
+   with seven 44px buttons. */
+@layer base {
+  :where(button, select, textarea, [role="button"],
+    input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="hidden"])) {
+    min-block-size: 24px;
+    min-inline-size: 24px;
+  }
+
+  :where(label:has(> input[type="checkbox"], > input[type="radio"])) {
+    min-block-size: 24px;
+  }
 }
 
 /* iOS Safari / WKWebView zooms the page when a focused field is under 16px. Only

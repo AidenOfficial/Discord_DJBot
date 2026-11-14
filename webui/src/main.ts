@@ -5,6 +5,7 @@ import ConfirmDialog from './components/ConfirmDialog.vue'
 import { mountAnnouncer } from './composables/useAnnounce'
 import { embedded } from './activity'
 import { Icon } from './icons'
+import { ready } from './i18n'
 
 import { reportClientError } from './api'
 
@@ -32,4 +33,9 @@ window.addEventListener('unhandledrejection', (ev) => {
   reportClientError(`Unhandled rejection: ${r instanceof Error ? `${r.name}: ${r.message}` : String(r)}`,
     r instanceof Error ? r.stack : undefined)
 })
-app.mount('#app')
+// 语言包按需加载(en 打包在里面):先等当前语言的包到了再挂载,首屏不会先闪一下英文
+void ready.then(() => {
+  app.mount('#app')
+  // 首帧画完之后才打开 body 的配色过渡,首屏和恢复已存主题时不会从默认配色渐变过来
+  requestAnimationFrame(() => requestAnimationFrame(() => document.documentElement.classList.add('theme-ready')))
+})

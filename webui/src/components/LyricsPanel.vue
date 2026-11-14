@@ -1,3 +1,10 @@
+<script lang="ts">
+import type { Lyrics as CachedLyrics } from '../api'
+
+// 模块级:切到别的页面再回来时,当前这首的歌词直接显示,不用再等一次请求
+let lastLyrics: { id: string; data: CachedLyrics } | null = null
+</script>
+
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { fetchLyrics, postLyricsOffset, type CurrentItem, type Lyrics } from '../api'
@@ -29,11 +36,17 @@ watch(
       loadedFor.value = ''
     }
     if ((state !== 'found' && state !== 'instrumental') || loadedFor.value === id) return
+    // 先显示缓存的,同时照样去取一次(别人可能调过偏移)
+    if (lastLyrics?.id === id) {
+      lyrics.value = lastLyrics.data
+      loadedFor.value = id
+    }
     try {
       const data = await fetchLyrics(id)
       if (props.current.id !== id) return
       lyrics.value = data
       loadedFor.value = id
+      lastLyrics = { id, data }
     } catch {
       // 下一次轮询再试
     }
@@ -127,6 +140,7 @@ function scheduleSave() {
   saveTimer = setTimeout(async () => {
     try {
       const data = await postLyricsOffset(id, value)
+      lastLyrics = { id, data }
       if (props.current.id === id) lyrics.value = data
     } catch { /* 保存失败只影响别人,自己这边已经生效 */ }
   }, 600)
@@ -166,8 +180,11 @@ const state = computed(() => props.current.lyrics ?? 'off')
       </span>
       <div v-if="!hidden && lines.length" class="ml-auto flex items-center gap-1 pointer-coarse:gap-2">
         <span v-if="offset !== 0" class="tabular-nums" :style="{ color: 'var(--c-text-faint)' }">{{ offsetLabel }}</span>
-        <button type="button" class="lyr-btn" :title="t('lyrics.earlier')" :aria-label="t('lyrics.earlier')" @click="nudge(-0.5)">−0.5s</button>
-        <button type="button" class="lyr-btn" :title="t('lyrics.later')" :aria-label="t('lyrics.later')" @click="nudge(0.5)">+0.5s</button>
+        <!-- name starts with the visible text (label in name, for voice control) and explains it -->
+        <button type="button" class="lyr-btn" :title="t('lyrics.earlier')"
+                :aria-label="t('common.itemAction', { action: '−0.5s', title: t('lyrics.earlier') })" @click="nudge(-0.5)">−0.5s</button>
+        <button type="button" class="lyr-btn" :title="t('lyrics.later')"
+                :aria-label="t('common.itemAction', { action: '+0.5s', title: t('lyrics.later') })" @click="nudge(0.5)">+0.5s</button>
         <button v-if="offset !== 0" type="button" class="lyr-btn" @click="resetOffset">{{ t('lyrics.reset') }}</button>
       </div>
     </div>

@@ -72,7 +72,19 @@ const etaText = computed(() => {
     <!-- 阶段 -->
     <ol class="mt-3 grid grid-cols-4 gap-1.5" role="list">
       <li v-for="(step, i) in STEPS" :key="step.key" class="min-w-0" :aria-current="i === stepIndex ? 'step' : undefined">
-        <div class="h-1.5 overflow-hidden rounded-full" :style="{ background: 'var(--c-surface-2)' }">
+        <!-- The buffer step's bar is a real progress bar while buffering (value read on demand,
+             not announced); the other bars are only the stepper's decoration. -->
+        <div
+          class="h-1.5 overflow-hidden rounded-full"
+          :style="{ background: 'var(--c-surface-2)' }"
+          v-bind="i === 2 && stepIndex === 2 ? {
+            role: 'progressbar',
+            'aria-label': t('prep.buffer'),
+            'aria-valuemin': 0,
+            'aria-valuemax': 100,
+            'aria-valuenow': Math.round(bufferPct),
+          } : { 'aria-hidden': 'true' }"
+        >
           <div
             class="h-full rounded-full"
             :class="i === stepIndex && i < 3 ? 'motion-safe:animate-pulse' : ''"

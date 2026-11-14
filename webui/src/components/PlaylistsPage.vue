@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import {
   addToPlaylist, copyPlaylist, createPlaylist, deletePlaylist, fetchPlaylist, fetchPublicPlaylists,
   movePlaylistItem, playPlaylist, removeFromPlaylist, renamePlaylist, setPlaylistPublic, startImport,
@@ -11,6 +11,7 @@ import { useMe } from '../composables/useMe'
 import { useFavorites } from '../composables/useFavorites'
 import { formatTime, useStatus } from '../composables/useStatus'
 import { announce } from '../composables/useAnnounce'
+import { usePolling } from '../composables/usePolling'
 import { useConfirm } from '../composables/useConfirm'
 import { t, tParts, typeLabel } from '../i18n'
 import type { Key } from '../i18n/en'
@@ -70,17 +71,14 @@ const plName = (pl: { name: string; favorites?: boolean }) => (pl.favorites ? t(
 
 // 别人公开的歌单(访客也能看、能播放)
 const shared = ref<PlaylistSummary[]>([])
-async function loadShared() {
+async function loadShared(background = false) {
   try {
-    shared.value = await fetchPublicPlaylists()
+    shared.value = await fetchPublicPlaylists({ background })
   } catch { /* 状态轮询那边会提示连接错误 */ }
 }
-let sharedTimer: ReturnType<typeof setInterval> | undefined
-onMounted(() => {
-  loadShared()
-  sharedTimer = setInterval(loadShared, 60000)
-})
-onBeforeUnmount(() => clearInterval(sharedTimer))
+// 每分钟在后台刷新一次(低优先级);页面隐藏时暂停,切回来马上刷新
+loadShared()
+usePolling(() => loadShared(true), 60000).start()
 
 // 默认选中:自己的第一个,没有就选大家的第一个
 watch([sortedPlaylists, shared], ([mine, others]) => {
@@ -355,15 +353,70 @@ async function onDrop(i: number) {
   const from = dragFrom.value
   dragFrom.value = null
   dragOver.value = null
-  if (!detail.value || from === null || from === i) return
-  const moved = detail.value.items.splice(from, 1)[0]!
-  detail.value.items.splice(i, 0, moved)
+  if (from === null || from === i) return
+  await moveEntry(from, i)
+}
+
+const entryTitle = (e: { title: string; ref: string }) => e.title || e.ref || t('common.untitled')
+// 每行按钮的名字带上歌名,读屏在一串"下一首播放"里能分清是哪一首(和队列一样)
+const named = (action: string, e: { title: string; ref: string }) =>
+  t('common.itemAction', { action, title: entryTitle(e) })
+
+const moving = ref(false)
+
+/** 拖拽和"上移 / 下移"按钮共用。成功后播报新位置。 */
+async function moveEntry(from: number, to: number): Promise<boolean> {
+  const pl = detail.value
+  if (!pl?.mine || moving.value || to < 0 || to >= pl.items.length || from === to) return false
+  clearError()
+  const title = entryTitle(pl.items[from]!)
+  // 移出了只显示前 100 首的范围:全部显示,免得这一行(和焦点)消失
+  if (to >= ITEM_PAGE) showAllItems.value = true
+  // optimistic reorder so the row lands immediately
+  const moved = pl.items.splice(from, 1)[0]!
+  pl.items.splice(to, 0, moved)
+  moving.value = true
   try {
-    detail.value = await movePlaylistItem(detail.value.id, from, i)
+    detail.value = await movePlaylistItem(pl.id, from, to)
+    announce(t('queue.moved', { title, n: to + 1 }))
+    return true
   } catch {
-    select(detail.value.id)
+    sayError(t('common.saveFailed'))
+    await select(pl.id)
+    return false
+  } finally {
+    moving.value = false
   }
 }
+
+/**
+ * 键盘 / 读屏用的上移、下移。行按条目 id 找回(Vue 移动节点时焦点会丢),
+ * 移到头 / 尾按钮变成禁用时,改聚焦另一个方向的按钮。
+ */
+async function onMove(index: number, dir: 'up' | 'down') {
+  const pl = detail.value
+  const entry = pl?.items[index]
+  if (!pl || !entry) return
+  const refocus = async (onlyIfLost: boolean) => {
+    await nextTick()
+    const active = document.activeElement
+    // 等服务器返回期间用户可能已经去了别处,那时不抢焦点
+    if (onlyIfLost && active && active !== document.body) return
+    const row = itemList.value?.querySelector<HTMLElement>(`[data-entry="${entry.id}"]`)
+    const btn = row?.querySelector<HTMLButtonElement>(`[data-move="${dir}"]:not(:disabled)`)
+      ?? row?.querySelector<HTMLButtonElement>('[data-move]:not(:disabled)')
+    if (!row || !btn) return
+    row.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    if (active !== btn) btn.focus({ preventScroll: true })
+  }
+  const pending = moveEntry(index, dir === 'up' ? index - 1 : index + 1)
+  await refocus(false)
+  await pending
+  await refocus(true)
+}
+
+// 收藏说明和歌单详情各有可见的 <h1>;其余状态(访客、没有歌单、加载中、改名中)补一个只给读屏的
+const hasVisibleH1 = computed(() => (favHint.value && !detail.value) || (!!detail.value && !renaming.value))
 
 const totalDuration = computed(() =>
   (detail.value?.items ?? []).reduce((sum, e) => sum + (e.duration || 0), 0))
@@ -372,6 +425,7 @@ const totalDuration = computed(() =>
 
 <template>
   <section class="mx-auto w-full max-w-5xl px-4 py-8">
+    <h1 v-if="!hasVisibleH1" class="sr-only">{{ t('nav.lists') }}</h1>
     <!-- 访客、也没有任何公开歌单:只解释为什么空 -->
     <div v-if="me && !signedIn && !shared.length" class="mx-auto max-w-md rounded-2xl p-6 text-center"
          :style="{ background: 'var(--c-surface)', boxShadow: 'var(--shadow-1)' }">
@@ -637,11 +691,12 @@ const totalDuration = computed(() =>
              : { background: 'var(--c-accent-soft)', color: 'var(--c-accent)' }"
         ><Icon v-if="toastErr" icon="triangle-exclamation" class="mr-1.5" />{{ toast }}</p>
 
-        <ul v-if="detail.items.length" ref="itemList" role="list" class="mt-4 flex flex-col gap-1.5">
+        <ul v-if="detail.items.length" ref="itemList" role="list" class="@container mt-4 flex flex-col gap-1.5">
           <li
             v-for="(e, i) in visibleItems"
             :key="e.id"
-            class="group flex items-center gap-3 rounded-xl px-3 py-2"
+            :data-entry="e.id"
+            class="group flex items-center gap-3 rounded-xl px-3 py-2 @max-[36rem]:flex-wrap"
             :class="detail.mine ? 'cursor-grab active:cursor-grabbing' : ''"
             :style="{
               background: 'var(--c-surface)', boxShadow: 'var(--shadow-1)',
@@ -661,22 +716,39 @@ const totalDuration = computed(() =>
                 {{ [typeLabel(e.type), e.duration ? formatTime(e.duration) : ''].filter(Boolean).join(' · ') }}
               </p>
             </div>
-            <div class="flex shrink-0 items-center gap-1 opacity-60 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
-              <button class="cursor-pointer rounded-md border-0 px-2 py-1 text-xs"
+            <!-- actions: faded at rest only where hover exists (80% keeps icons >= 3:1); full
+                 opacity while focused or while the add-to-playlist panel inside is open. On a
+                 narrow row they wrap onto their own line instead of squeezing the title. -->
+            <div class="flex shrink-0 items-center gap-1 transition-opacity [@media(hover:hover)]:opacity-80 group-hover:opacity-100 group-focus-within:opacity-100 has-[[aria-expanded=true]]:opacity-100 @max-[36rem]:basis-full @max-[36rem]:justify-end">
+              <template v-if="detail.mine">
+                <button type="button" data-move="up"
+                        class="cursor-pointer rounded-md border-0 px-2 py-1 text-xs disabled:cursor-default"
+                        :style="{ background: 'var(--c-surface-2)', color: i === 0 ? 'var(--c-decor)' : 'var(--c-text)' }"
+                        :title="t('queue.moveUp')" :aria-label="named(t('queue.moveUp'), e)"
+                        :disabled="i === 0"
+                        @click="onMove(i, 'up')"><Icon icon="angle-left" rotation="90" aria-hidden="true" /></button>
+                <button type="button" data-move="down"
+                        class="cursor-pointer rounded-md border-0 px-2 py-1 text-xs disabled:cursor-default"
+                        :style="{ background: 'var(--c-surface-2)', color: i === detail.items.length - 1 ? 'var(--c-decor)' : 'var(--c-text)' }"
+                        :title="t('queue.moveDown')" :aria-label="named(t('queue.moveDown'), e)"
+                        :disabled="i === detail.items.length - 1"
+                        @click="onMove(i, 'down')"><Icon icon="angle-right" rotation="90" aria-hidden="true" /></button>
+              </template>
+              <button type="button" class="cursor-pointer rounded-md border-0 px-2 py-1 text-xs"
                       :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
-                      :title="t('common.playNext')" :aria-label="t('common.playNext')"
-                      @click="play('next', { item: e.id })"><Icon icon="arrow-turn-up" /></button>
-              <button class="cursor-pointer rounded-md border-0 px-2 py-1 text-xs"
+                      :title="t('common.playNext')" :aria-label="named(t('common.playNext'), e)"
+                      @click="play('next', { item: e.id })"><Icon icon="arrow-turn-up" aria-hidden="true" /></button>
+              <button type="button" class="cursor-pointer rounded-md border-0 px-2 py-1 text-xs"
                       :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
-                      :title="t('common.addToQueue')" :aria-label="t('common.addToQueue')"
-                      @click="play('append', { item: e.id })"><Icon icon="plus" /></button>
-              <FavButton v-if="signedIn && !detail.favorites" :item-id="e.item_id"
+                      :title="t('common.addToQueue')" :aria-label="named(t('common.addToQueue'), e)"
+                      @click="play('append', { item: e.id })"><Icon icon="plus" aria-hidden="true" /></button>
+              <FavButton v-if="signedIn && !detail.favorites" :item-id="e.item_id" :item-title="entryTitle(e)"
                          :source="{ source: 'playlist_entry', playlist_id: detail.id, entry: e.id }" />
-              <button v-if="detail.mine" class="cursor-pointer rounded-md border-0 px-2 py-1 text-xs"
+              <button v-if="detail.mine" type="button" class="cursor-pointer rounded-md border-0 px-2 py-1 text-xs"
                       :style="{ background: 'var(--c-surface-2)', color: 'var(--c-danger)' }"
-                      :title="t('pl.removeItem')" :aria-label="t('pl.removeItem')" data-remove
-                      @click="dropItem(e.id, i)"><Icon icon="xmark" /></button>
-              <AddToPlaylist v-else :source="{ source: 'playlist_entry', playlist_id: detail.id, entry: e.id }" />
+                      :title="t('pl.removeItem')" :aria-label="named(t('pl.removeItem'), e)" data-remove
+                      @click="dropItem(e.id, i)"><Icon icon="xmark" aria-hidden="true" /></button>
+              <AddToPlaylist v-else :source="{ source: 'playlist_entry', playlist_id: detail.id, entry: e.id }" :item-title="entryTitle(e)" />
             </div>
           </li>
         </ul>

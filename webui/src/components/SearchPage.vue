@@ -92,6 +92,12 @@ async function add(r: SearchResult) {
   }
 }
 
+/** The word the Queue button shows for this result (its accessible name starts with it) */
+function queueWord(r: SearchResult) {
+  const state = added.value[`${r.source}:${r.id}`]
+  return t(state === 'done' ? 'common.queued' : state === 'error' ? 'common.failed' : 'common.queue')
+}
+
 const SOURCE_STYLE: Record<string, { label: string; bg: string; fg: string }> = {
   youtube: { label: 'YouTube', bg: 'rgba(255,0,0,0.12)', fg: '#e53935' },
   bilibili: { label: 'Bilibili', bg: 'rgba(0,161,214,0.12)', fg: '#00a1d6' },
@@ -131,7 +137,7 @@ const SOURCE_STYLE: Record<string, { label: string; bg: string; fg: string }> = 
     </p>
 
     <!-- results -->
-    <ul v-if="results.length" role="list" class="mt-5 flex flex-col gap-2">
+    <ul v-if="results.length" role="list" class="@container mt-5 flex flex-col gap-2">
       <li
         v-for="r in results"
         :key="`${r.source}:${r.id}`"
@@ -154,25 +160,32 @@ const SOURCE_STYLE: Record<string, { label: string; bg: string; fg: string }> = 
         </div>
         <FavButton
           :item-id="r.item_id ?? ''"
+          :item-title="r.title"
           :source="{ source: 'url', url: r.url, title: r.title, duration: r.duration, provider: r.source, id: r.id }"
         />
         <AddToPlaylist
+          :item-title="r.title"
           :source="{ source: 'url', url: r.url, title: r.title, duration: r.duration, provider: r.source, id: r.id }"
         />
+        <!-- The name starts with the visible word (label in name) and adds the title, so a
+             list of "Queue" buttons is distinguishable. On a narrow list the word is hidden
+             visually and only the icon shows, leaving room for the title. -->
         <button
-          class="shrink-0 cursor-pointer rounded-full border-0 px-3.5 py-2 text-xs font-semibold"
+          type="button"
+          class="shrink-0 cursor-pointer rounded-full border-0 px-3.5 py-2 text-xs font-semibold @max-[30rem]:px-3"
           :style="added[`${r.source}:${r.id}`] === 'done'
             ? { background: 'var(--c-accent-soft)', color: 'var(--c-accent)' }
             : added[`${r.source}:${r.id}`] === 'error'
               ? { background: 'var(--c-accent-soft)', color: 'var(--c-danger)' }
               : { background: 'var(--c-accent)', color: 'var(--c-on-accent)' }"
+          :aria-label="t('common.itemAction', { action: queueWord(r), title: r.title })"
           :disabled="added[`${r.source}:${r.id}`] === 'pending' || added[`${r.source}:${r.id}`] === 'done'"
           @click="add(r)"
         >
-          <span v-if="added[`${r.source}:${r.id}`] === 'done'"><Icon icon="check" class="mr-1" />{{ t('common.queued') }}</span>
+          <span v-if="added[`${r.source}:${r.id}`] === 'done'"><Icon icon="check" class="mr-1 @max-[30rem]:mr-0" aria-hidden="true" /><span class="@max-[30rem]:sr-only">{{ t('common.queued') }}</span></span>
           <span v-else-if="added[`${r.source}:${r.id}`] === 'pending'">...</span>
-          <span v-else-if="added[`${r.source}:${r.id}`] === 'error'">{{ t('common.failed') }}</span>
-          <span v-else><Icon icon="plus" class="mr-1" />{{ t('common.queue') }}</span>
+          <span v-else-if="added[`${r.source}:${r.id}`] === 'error'"><Icon icon="triangle-exclamation" class="mr-1 @max-[30rem]:mr-0" aria-hidden="true" /><span class="@max-[30rem]:sr-only">{{ t('common.failed') }}</span></span>
+          <span v-else><Icon icon="plus" class="mr-1 @max-[30rem]:mr-0" aria-hidden="true" /><span class="@max-[30rem]:sr-only">{{ t('common.queue') }}</span></span>
         </button>
       </li>
     </ul>

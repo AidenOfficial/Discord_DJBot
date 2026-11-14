@@ -5,6 +5,7 @@ import { useAnnounce } from '../composables/useAnnounce'
 import { useConfirm } from '../composables/useConfirm'
 import { useGuilds } from '../composables/useGuilds'
 import { useMe } from '../composables/useMe'
+import { usePolling } from '../composables/usePolling'
 import { embedded } from '../activity'
 import { t, tParts } from '../i18n'
 import type { Key } from '../i18n/en'
@@ -131,13 +132,35 @@ const bind = ref<{ code: string; command: string; expires_at: number } | null>(n
 const bindMsg = ref('')
 const bindOk = ref(false)
 const copied = ref(false)
-let bindPoll: ReturnType<typeof setInterval> | undefined
-
 function setBindMsg(text: string, ok: boolean, assertive = false) {
   bindMsg.value = text
   bindOk.value = ok
   announce(text, { assertive })
 }
+
+// 等用户在 Discord 里发 /bind:切去 Discord 时页面多半是隐藏的,那时不轮询,
+// 切回来立刻查一次,马上显示"已绑定"
+async function checkBind() {
+  if (!bind.value || Date.now() / 1000 > bind.value.expires_at) {
+    bindPoller.stop()
+    if (bind.value) setBindMsg(t('me.codeExpired'), false)
+    bind.value = null
+    keepFocus(() => linkBtn.value)
+    return
+  }
+  try {
+    const fresh = await fetchMe()
+    if (fresh.discord) {
+      me.value = fresh
+      bind.value = null
+      setBindMsg(t('me.linked', { name: fresh.discord.discord_name }), true)
+      bindPoller.stop()
+      keepFocus(() => unlinkBtn.value)
+      reloadGuilds()  // 绑定后能操作的服务器变了
+    }
+  } catch { /* 下一轮再试 */ }
+}
+const bindPoller = usePolling(checkBind, 3000)
 
 async function startBind() {
   bindMsg.value = ''
@@ -145,27 +168,7 @@ async function startBind() {
   try {
     bind.value = await createBindCode()
     keepFocus(() => copyBtn.value)
-    clearInterval(bindPoll)
-    bindPoll = setInterval(async () => {
-      if (!bind.value || Date.now() / 1000 > bind.value.expires_at) {
-        clearInterval(bindPoll)
-        if (bind.value) setBindMsg(t('me.codeExpired'), false)
-        bind.value = null
-        keepFocus(() => linkBtn.value)
-        return
-      }
-      try {
-        const fresh = await fetchMe()
-        if (fresh.discord) {
-          me.value = fresh
-          bind.value = null
-          setBindMsg(t('me.linked', { name: fresh.discord.discord_name }), true)
-          clearInterval(bindPoll)
-          keepFocus(() => unlinkBtn.value)
-          reloadGuilds()  // 绑定后能操作的服务器变了
-        }
-      } catch { /* 下一轮再试 */ }
-    }, 3000)
+    bindPoller.start()
   } catch {
     setBindMsg(t('me.codeFailed'), false, true)
   }
@@ -193,8 +196,6 @@ async function unlink() {
   keepFocus(() => linkBtn.value)
   reloadGuilds()
 }
-
-onBeforeUnmount(() => clearInterval(bindPoll))
 
 // 确认框(<dialog>)不在 root 里,但它是从弹层里打开的:在里面点击 / 按 Esc 不算离开弹层
 function inDialog(target: EventTarget | null) {

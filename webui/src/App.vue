@@ -1,6 +1,10 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowReactive, watch,
+  type Component,
+} from 'vue'
 import NowPlaying from './components/NowPlaying.vue'
+import ViewLoadError, { RETRY_VIEW } from './components/ViewLoadError.vue'
 import QueueList from './components/QueueList.vue'
 import UserChip from './components/UserChip.vue'
 import GuildSwitcher from './components/GuildSwitcher.vue'
@@ -20,12 +24,25 @@ const loaders = {
   cache: () => import('./components/CachePage.vue'),
   settings: () => import('./components/SettingsPage.vue'),
 }
-const SearchPage = defineAsyncComponent(loaders.search)
-const LibraryPage = defineAsyncComponent(loaders.library)
-const PlaylistsPage = defineAsyncComponent(loaders.lists)
-const StatsPage = defineAsyncComponent(loaders.stats)
-const CachePage = defineAsyncComponent(loaders.cache)
-const SettingsPage = defineAsyncComponent(loaders.settings)
+type LazyView = keyof typeof loaders
+// 页面代码加载失败(断网、刚重新部署旧文件没了):先悄悄重试一次,还不行就显示
+// ViewLoadError,它的"重试"会重建这个组件,让浏览器再请求一次
+function lazyView(name: LazyView): Component {
+  return defineAsyncComponent({
+    loader: loaders[name],
+    errorComponent: ViewLoadError,
+    onError(_err, retry, fail, attempts) {
+      if (attempts <= 1) setTimeout(retry, 1000)
+      else fail()
+    },
+  })
+}
+const pages = shallowReactive({} as Record<LazyView, Component>)
+for (const name of Object.keys(loaders) as LazyView[]) pages[name] = lazyView(name)
+provide(RETRY_VIEW, () => {
+  const v = view.value
+  if (v !== 'home') pages[v] = lazyView(v)
+})
 
 type Theme = 'light' | 'dark' | 'auto'
 type Scheme = 'light' | 'dark'
@@ -239,12 +256,7 @@ onBeforeUnmount(() => {
         <NowPlaying />
         <QueueList />
       </template>
-      <SearchPage v-else-if="view === 'search'" />
-      <LibraryPage v-else-if="view === 'library'" />
-      <PlaylistsPage v-else-if="view === 'lists'" />
-      <CachePage v-else-if="view === 'cache'" />
-      <SettingsPage v-else-if="view === 'settings'" />
-      <StatsPage v-else />
+      <component :is="pages[view]" v-else />
     </main>
   </div>
 </template>
