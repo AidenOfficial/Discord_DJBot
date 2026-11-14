@@ -33,6 +33,7 @@ const isCategory = computed(() => props.node.kind === 'category')
       class="group flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl px-2.5"
       :class="isCategory ? 'pt-3 pb-1' : 'py-2'"
       :style="isHere ? { background: 'var(--c-accent-soft)' } : {}"
+      :aria-current="isHere ? 'true' : undefined"
     >
       <span class="flex min-w-0 items-center gap-1.5"
             :class="isCategory ? 'text-[11px] font-semibold uppercase tracking-wider' : 'text-sm font-medium'"
@@ -47,7 +48,7 @@ const isCategory = computed(() => props.node.kind === 'category')
             :title="t(node.kind === 'stage' ? 'ch.stageTitle' : 'ch.noAccessTitle')"><Icon icon="lock" class="mr-0.5" />{{ t(node.kind === 'stage' ? 'ch.stage' : 'ch.noAccess') }}</span>
       <span v-if="people" class="text-[11px] tabular-nums" :style="{ color: 'var(--c-text-faint)' }">{{ people }} <Icon icon="user" class="text-[10px]" /></span>
 
-      <span v-if="canUse" class="ml-auto flex shrink-0 gap-1 opacity-70 transition-opacity group-hover:opacity-100">
+      <span v-if="canUse" class="ml-auto flex shrink-0 gap-1 opacity-70 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
         <button
           v-if="!isHere"
           class="cursor-pointer rounded-md border-0 px-2 py-0.5 text-[11px]"
@@ -90,7 +91,7 @@ const isCategory = computed(() => props.node.kind === 'category')
       </div>
     </div>
 
-    <ul v-if="node.children.length"
+    <ul v-if="node.children.length" role="list"
         :class="depth === 0 ? '' : 'ml-4 border-l pl-2'"
         :style="{ borderColor: 'var(--c-border)' }">
       <ChannelTreeNode

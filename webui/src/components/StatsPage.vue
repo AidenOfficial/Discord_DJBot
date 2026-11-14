@@ -47,23 +47,17 @@ async function load() {
 onMounted(load)
 watch(scope, load)
 
-// Categorical palette for source identity - validated (dataviz six checks)
-// for both surfaces; light mode relies on the visible labels for relief.
-const TYPE_COLORS: Record<string, { light: string; dark: string }> = {
-  url: { light: '#6d5ef2', dark: '#8577ff' },
-  file: { light: '#1baf7a', dark: '#199e70' },
-  radio: { light: '#eda100', dark: '#c98500' },
-  playlist: { light: '#e87ba4', dark: '#d55181' },
+// Source colors are CSS custom properties (see <style> below), so they follow
+// theme changes without any JS theme detection.
+const TYPE_COLORS: Record<string, string> = {
+  url: 'var(--stats-url)',
+  file: 'var(--stats-file)',
+  radio: 'var(--stats-radio)',
+  playlist: 'var(--stats-playlist)',
 }
-const isDark = () =>
-  document.documentElement.getAttribute('data-theme') === 'dark' ||
-  (!document.documentElement.getAttribute('data-theme') &&
-    window.matchMedia('(prefers-color-scheme: dark)').matches)
 
 function typeColor(t: string): string {
-  const entry = TYPE_COLORS[t]
-  if (!entry) return 'var(--c-text-faint)'
-  return isDark() ? entry.dark : entry.light
+  return TYPE_COLORS[t] ?? 'var(--c-text-faint)'
 }
 
 const totalHours = computed(() =>
@@ -76,16 +70,17 @@ const typeTotal = computed(() =>
   Math.max(1, (stats.value?.by_type ?? []).reduce((a, b) => a + b.count, 0)))
 
 const HOUR_LABELS = [0, 6, 12, 18]
+const pad = (h: number) => String(h).padStart(2, '0')
 </script>
 
 <template>
-  <section class="mx-auto w-full max-w-3xl px-4 py-8">
+  <section class="stats mx-auto w-full max-w-3xl px-4 py-8">
     <div v-if="showScope" class="mb-5 flex items-center justify-end gap-2 text-sm">
       <label for="stats-scope" :style="{ color: 'var(--c-text-muted)' }">{{ t('stats.scope') }}</label>
       <select
         id="stats-scope"
         v-model="scope"
-        class="max-w-[14rem] cursor-pointer rounded-full border px-3 py-1.5 text-sm outline-none"
+        class="max-w-[14rem] cursor-pointer rounded-full border px-3 py-1.5 text-sm"
         :style="{ background: 'var(--c-bg)', borderColor: 'var(--c-border)', color: 'var(--c-text)' }"
       >
         <option v-if="owner" value="all">{{ t('stats.allServers') }}</option>
@@ -130,7 +125,7 @@ const HOUR_LABELS = [0, 6, 12, 18]
       <!-- source share -->
       <div class="mt-6 rounded-xl p-4" :style="{ background: 'var(--c-surface)', boxShadow: 'var(--shadow-1)' }">
         <h2 class="mb-3 text-sm font-semibold">{{ t('stats.sources') }}</h2>
-        <div class="flex h-3 w-full gap-[2px] overflow-hidden rounded-full">
+        <div class="flex h-3 w-full gap-[2px] overflow-hidden rounded-full" aria-hidden="true">
           <div
             v-for="row in stats.by_type"
             :key="row.type"
@@ -138,19 +133,19 @@ const HOUR_LABELS = [0, 6, 12, 18]
             :title="`${typeLabel(row.type)}: ${row.count}`"
           />
         </div>
-        <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1">
-          <span v-for="row in stats.by_type" :key="row.type" class="flex items-center gap-1.5 text-xs">
-            <span class="h-2.5 w-2.5 rounded-sm" :style="{ background: typeColor(row.type) }" />
-            <span>{{ typeLabel(row.type) }}</span>
+        <ul role="list" class="mt-3 flex flex-wrap gap-x-4 gap-y-1">
+          <li v-for="row in stats.by_type" :key="row.type" class="flex items-center gap-1.5 text-xs">
+            <span class="h-2.5 w-2.5 rounded-sm" :style="{ background: typeColor(row.type) }" aria-hidden="true" />
+            <span>{{ typeLabel(row.type) }}<span class="sr-only">:</span></span>
             <span class="tabular-nums" :style="{ color: 'var(--c-text-muted)' }">{{ row.count }}</span>
-          </span>
-        </div>
+          </li>
+        </ul>
       </div>
 
       <!-- hour histogram -->
       <div class="mt-4 rounded-xl p-4" :style="{ background: 'var(--c-surface)', boxShadow: 'var(--shadow-1)' }">
-        <h2 class="mb-3 text-sm font-semibold">{{ t('stats.whenListens') }}</h2>
-        <div class="flex h-24 items-end gap-[2px]">
+        <h2 id="stats-hours-title" class="mb-3 text-sm font-semibold">{{ t('stats.whenListens') }}</h2>
+        <div class="flex h-24 items-end gap-[2px]" aria-hidden="true">
           <div
             v-for="(count, h) in stats.hours"
             :key="h"
@@ -161,13 +156,28 @@ const HOUR_LABELS = [0, 6, 12, 18]
               opacity: count ? 1 : 0.15,
               minHeight: '2px',
             }"
-            :title="t('stats.hourTip', { h: String(h).padStart(2, '0'), n: count })"
+            :title="t('stats.hourTip', { h: pad(h), n: count })"
           />
         </div>
-        <div class="mt-1 flex justify-between text-[10px] tabular-nums" :style="{ color: 'var(--c-text-faint)' }">
-          <span v-for="h in HOUR_LABELS" :key="h">{{ String(h).padStart(2, '0') }}:00</span>
+        <div class="mt-1 flex justify-between text-[10px] tabular-nums" :style="{ color: 'var(--c-text-faint)' }" aria-hidden="true">
+          <span v-for="h in HOUR_LABELS" :key="h">{{ pad(h) }}:00</span>
           <span>23:00</span>
         </div>
+        <!-- the bars above are hidden from screen readers; this table carries the same numbers -->
+        <table class="sr-only" aria-labelledby="stats-hours-title">
+          <thead>
+            <tr>
+              <th scope="col">{{ t('stats.hour') }}</th>
+              <th scope="col">{{ t('stats.playsCol') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(count, h) in stats.hours" :key="h">
+              <th scope="row">{{ pad(h) }}:00</th>
+              <td>{{ count }}</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
 
       <!-- top tracks / users -->
@@ -177,7 +187,7 @@ const HOUR_LABELS = [0, 6, 12, 18]
             {{ t('stats.mostPlayed') }}
             <span v-if="stats.top_tracks[0]" class="ml-1 rounded-full px-1.5 py-0.5 text-[10px]" :style="{ background: 'var(--c-accent-soft)', color: 'var(--c-accent)' }">{{ t('stats.crown') }}</span>
           </h2>
-          <ol class="flex flex-col gap-2">
+          <ol role="list" class="flex flex-col gap-2">
             <li v-for="t in stats.top_tracks.slice(0, 8)" :key="t.item_id" class="text-xs">
               <div class="mb-0.5 flex justify-between gap-2">
                 <span class="truncate" :title="t.title">{{ t.title || t.item_id }}</span>
@@ -193,7 +203,7 @@ const HOUR_LABELS = [0, 6, 12, 18]
         <div class="flex flex-col gap-4">
           <div class="rounded-xl p-4" :style="{ background: 'var(--c-surface)', boxShadow: 'var(--shadow-1)' }">
             <h2 class="mb-3 text-sm font-semibold">{{ t('stats.topUsers') }}</h2>
-            <ol class="flex flex-col gap-2">
+            <ol role="list" class="flex flex-col gap-2">
               <li v-for="u in stats.top_users.slice(0, 5)" :key="u.user" class="text-xs">
                 <div class="mb-0.5 flex justify-between gap-2">
                   <span class="truncate">{{ u.user }}</span>
@@ -208,7 +218,7 @@ const HOUR_LABELS = [0, 6, 12, 18]
 
           <div v-if="stats.most_skipped.length" class="rounded-xl p-4" :style="{ background: 'var(--c-surface)', boxShadow: 'var(--shadow-1)' }">
             <h2 class="mb-2 text-sm font-semibold">{{ t('stats.mostSkipped') }}</h2>
-            <ul class="flex flex-col gap-1">
+            <ul role="list" class="flex flex-col gap-1">
               <li v-for="s in stats.most_skipped.slice(0, 3)" :key="s.item_id" class="flex justify-between gap-2 text-xs">
                 <span class="truncate" :title="s.title">{{ s.title || s.item_id }}</span>
                 <span class="tabular-nums" :style="{ color: 'var(--c-text-muted)' }">{{ s.count }}×</span>
@@ -224,3 +234,36 @@ const HOUR_LABELS = [0, 6, 12, 18]
     </template>
   </section>
 </template>
+
+<style scoped>
+/* Categorical palette for source identity - validated (dataviz six checks)
+   for both surfaces; light mode relies on the visible labels for relief.
+   The selectors mirror the theme blocks in style.css. */
+.stats {
+  --stats-url: #6d5ef2;
+  --stats-file: #1baf7a;
+  --stats-radio: #eda100;
+  --stats-playlist: #e87ba4;
+}
+@media (prefers-color-scheme: dark) {
+  .stats {
+    --stats-url: #8577ff;
+    --stats-file: #199e70;
+    --stats-radio: #c98500;
+    --stats-playlist: #d55181;
+  }
+}
+:root[data-theme='light'] .stats {
+  --stats-url: #6d5ef2;
+  --stats-file: #1baf7a;
+  --stats-radio: #eda100;
+  --stats-playlist: #e87ba4;
+}
+:root[data-theme='dark'] .stats,
+:root[data-theme-default='dark']:not([data-theme]) .stats {
+  --stats-url: #8577ff;
+  --stats-file: #199e70;
+  --stats-radio: #c98500;
+  --stats-playlist: #d55181;
+}
+</style>
