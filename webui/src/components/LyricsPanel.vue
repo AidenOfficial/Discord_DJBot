@@ -76,8 +76,16 @@ function scrollToActive(smooth: boolean) {
     behavior: smooth && !reduceMotion ? 'smooth' : 'auto',
   })
 }
+// 键盘焦点在某一行上时也不自动滚:否则聚焦的那行会被滚出框外
+function keyboardFocusInside() {
+  try {
+    return !!box.value?.querySelector(':focus-visible')
+  } catch {
+    return false  // 不认识 :focus-visible 的旧内核
+  }
+}
 watch(active, () => {
-  if (performance.now() - userScrollAt < 4000) return
+  if (performance.now() - userScrollAt < 4000 || keyboardFocusInside()) return
   nextTick(() => scrollToActive(true))
 })
 watch([hidden, lyrics], () => nextTick(() => scrollToActive(false)))
@@ -85,6 +93,21 @@ watch([hidden, lyrics], () => nextTick(() => scrollToActive(false)))
 function onLineClick(time: number) {
   if (!seekable.value) return
   emit('seek', Math.max(0, time + offset.value))
+}
+
+// 每行都是按钮,但只有当前行在 Tab 顺序里(否则要按几十下 Tab 才能离开歌词),
+// 行与行之间用 ↑ / ↓ / Home / End 移动焦点
+const tabLine = computed(() => Math.max(0, active.value))
+function onLineKey(e: KeyboardEvent, i: number) {
+  const last = lines.value.length - 1
+  let next: number
+  if (e.key === 'ArrowDown') next = Math.min(last, i + 1)
+  else if (e.key === 'ArrowUp') next = Math.max(0, i - 1)
+  else if (e.key === 'Home') next = 0
+  else if (e.key === 'End') next = last
+  else return
+  e.preventDefault()
+  box.value?.querySelector<HTMLElement>(`[data-line="${next}"] > .lyr-seek`)?.focus()
 }
 
 // ---- 手动调偏移:立即生效,停手 0.6 秒后存到服务器(大家共用) ----
@@ -180,7 +203,14 @@ const state = computed(() => props.current.lyrics ?? 'off')
                 class="lyr-line"
                 :class="{ 'lyr-line--active': i === active, 'lyr-line--past': follows && i < active }"
               >
-                <button v-if="seekable" type="button" class="lyr-seek" @click="onLineClick(line[0])">
+                <button
+                  v-if="seekable"
+                  type="button"
+                  class="lyr-seek"
+                  :tabindex="i === tabLine ? 0 : -1"
+                  @click="onLineClick(line[0])"
+                  @keydown="onLineKey($event, i)"
+                >
                   <span v-if="line[1]">{{ line[1] }}</span>
                   <span v-else aria-hidden="true">♪</span>
                   <span v-if="line[2]" class="lyr-trans">{{ line[2] }}</span>

@@ -99,10 +99,14 @@ function onSeekFocus() {
   seekFocused.value = true
 }
 function onSeekInput(e: Event) {
-  const delta = Number((e.target as HTMLInputElement).value) - sliderValue.value
+  const el = e.target as HTMLInputElement
+  const delta = Number(el.value) - sliderValue.value
   if (!delta) return
   const base = dragAt.value ?? clock.playhead
-  scheduleSeek(clampSeek(base + (Math.abs(delta) < 5 ? Math.sign(delta) * 5 : delta)))
+  const target = clampSeek(base + (Math.abs(delta) < 5 ? Math.sign(delta) * 5 : delta))
+  scheduleSeek(target)
+  // 夹到两端时 sliderValue 可能没变,Vue 不会改写 DOM:手动对齐,下一次的增量才算得对
+  el.value = String(Math.round(target))
 }
 
 async function seek(position: number) {
