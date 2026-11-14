@@ -32,6 +32,8 @@ export const zhCN: Record<Key, Msg> = {
   'nav.stats': '统计',
   'nav.cache': '缓存',
   'nav.settings': '设置',
+  'nav.queue': '队列',
+  'nav.pages': '页面',
   'nav.loadFailed': '这个页面没能加载出来。检查一下网络，再试一次。',
   'nav.reload': '重新载入',
   'theme.title': '主题：{mode}',
@@ -42,6 +44,14 @@ export const zhCN: Record<Key, Msg> = {
   'theme.toDark': '切换到深色主题',
   'theme.toLight': '切换到浅色主题',
   'lang.title': '语言',
+
+  'metro.now': '此刻',
+  'metro.upNext': '接下来',
+  'metro.searchAdd': '搜索并点歌',
+  'metro.manageQueue': '管理队列',
+  'metro.preparing': '准备中',
+  'metro.removed': '已从队列移除：{title}',
+  'metro.nothingNext': '后面没有排队的歌了。',
 
   'type.url': '在线',
   'type.file': '曲库',
@@ -89,6 +99,8 @@ export const zhCN: Record<Key, Msg> = {
   'ctl.skip': '下一首',
   'ctl.volume': '音量',
   'ctl.mode': '播放模式',
+  'ctl.previous': '上一首',
+  'ctl.modeNow': '播放模式：{mode}',
 
   'prep.info': '获取信息',
   'prep.infoHint': '正在向网站请求音频流',

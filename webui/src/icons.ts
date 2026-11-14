@@ -10,6 +10,7 @@ import {
   faPen, faPlay, faPlus, faShuffle, faStar, faSun, faThumbtack, faTrashCan, faUser,
   faVolumeLow, faVolumeXmark, faXmark,
   faFolder, faVolumeHigh, faRightFromBracket, faRobot, faMicrophone, faTriangleExclamation,
+  faBackwardStep, faRepeat, faArrowRight, faInfinity, faRotateRight,
 } from '@fortawesome/free-solid-svg-icons'
 import { faHeart as farHeart, faStar as farStar } from '@fortawesome/free-regular-svg-icons'
 
@@ -23,6 +24,7 @@ library.add(
   faPen, faPlay, faPlus, faShuffle, faStar, faSun, faThumbtack, faTrashCan, faUser,
   faVolumeLow, faVolumeXmark, faXmark,
   faFolder, faVolumeHigh, faRightFromBracket, faRobot, faMicrophone, faTriangleExclamation,
+  faBackwardStep, faRepeat, faArrowRight, faInfinity, faRotateRight,
   farHeart, farStar,
 )
 

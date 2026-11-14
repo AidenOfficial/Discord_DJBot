@@ -35,6 +35,8 @@ export const en = {
   'nav.stats': 'Stats',
   'nav.cache': 'Cache',
   'nav.settings': 'Settings',
+  'nav.queue': 'Queue',
+  'nav.pages': 'Pages',
   'nav.loadFailed': 'This page could not be loaded. Check the connection and try again.',
   'nav.reload': 'Reload the app',
   'theme.title': 'Theme: {mode}',
@@ -45,6 +47,15 @@ export const en = {
   'theme.toDark': 'Switch to dark theme',
   'theme.toLight': 'Switch to light theme',
   'lang.title': 'Language',
+
+  // ---- Activity (Metro layout) ----
+  'metro.now': 'Now',
+  'metro.upNext': 'Up next',
+  'metro.searchAdd': 'Search and add songs',
+  'metro.manageQueue': 'Manage queue',
+  'metro.preparing': 'Getting ready',
+  'metro.removed': 'Removed from the queue: {title}',
+  'metro.nothingNext': 'Nothing else is queued.',
 
   // ---- 枚举 ----
   'type.url': 'Stream',
@@ -98,6 +109,8 @@ export const en = {
   'ctl.skip': 'Skip',
   'ctl.volume': 'Volume',
   'ctl.mode': 'Playback mode',
+  'ctl.previous': 'Previous',
+  'ctl.modeNow': 'Playback mode: {mode}',
 
   // ---- 准备面板 ----
   'prep.info': 'Fetching info',

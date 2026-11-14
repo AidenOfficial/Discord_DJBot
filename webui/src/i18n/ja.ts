@@ -32,6 +32,8 @@ export const ja: Record<Key, Msg> = {
   'nav.stats': '統計',
   'nav.cache': 'キャッシュ',
   'nav.settings': '設定',
+  'nav.queue': 'キュー',
+  'nav.pages': 'ページ',
   'nav.loadFailed': 'このページを読み込めませんでした。接続を確認して、もう一度お試しください。',
   'nav.reload': 'アプリを再読み込み',
   'theme.title': 'テーマ：{mode}',
@@ -42,6 +44,14 @@ export const ja: Record<Key, Msg> = {
   'theme.toDark': 'ダークテーマに切り替え',
   'theme.toLight': 'ライトテーマに切り替え',
   'lang.title': '言語',
+
+  'metro.now': 'いま',
+  'metro.upNext': '次に再生',
+  'metro.searchAdd': '曲を検索して追加',
+  'metro.manageQueue': 'キューを管理',
+  'metro.preparing': '準備中',
+  'metro.removed': 'キューから削除しました：{title}',
+  'metro.nothingNext': 'この後に再生する曲はありません。',
 
   'type.url': 'ストリーム',
   'type.file': 'ライブラリ',
@@ -89,6 +99,8 @@ export const ja: Record<Key, Msg> = {
   'ctl.skip': 'スキップ',
   'ctl.volume': '音量',
   'ctl.mode': '再生モード',
+  'ctl.previous': '前の曲',
+  'ctl.modeNow': '再生モード：{mode}',
 
   'prep.info': '情報を取得',
   'prep.infoHint': 'サイトに音声ストリームを問い合わせ中',

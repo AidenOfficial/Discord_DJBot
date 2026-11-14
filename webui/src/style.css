@@ -187,6 +187,23 @@ html.embedded body {
 /* 真正滚动的是视口,视口只读根元素的 overscroll-behavior(不像 overflow 会从 body 传过去) */
 html.embedded {
   overscroll-behavior: none;
+
+  /* Metro 版面(src/metro/)的令牌:只有 Activity 里用。系统字体,不加载网络字体
+     (Activity 的 iframe 只能访问自己的域名)。日文界面优先用日文字体显示汉字。 */
+  --m-cjk: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC";
+  --m-font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, var(--m-cjk), sans-serif;
+  --m-font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, var(--m-cjk), sans-serif;
+  /* 平铺磁贴的底色:和背景拉开一点距离。text-muted 在上面两种配色都 >= 4.5:1(text-faint 不够,磁贴上不用) */
+  --m-tile: color-mix(in oklab, var(--c-text) 8%, var(--c-bg));
+  --m-tile-hover: color-mix(in oklab, var(--c-text) 13%, var(--c-bg));
+  --m-track: color-mix(in oklab, var(--c-text) 22%, transparent);
+  --m-gap: 0.5rem;
+  /* 左右边距:手机 16px,窄 ~26px,宽 40px(iframe 里视口就是 Activity 的框) */
+  --m-pad: clamp(1rem, 4vw, 2.5rem);
+}
+
+html.embedded:lang(ja) {
+  --m-cjk: "Hiragino Sans", "Yu Gothic UI", "Meiryo", "Noto Sans CJK JP";
 }
 
 /* ==========================================================================

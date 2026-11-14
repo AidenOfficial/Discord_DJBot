@@ -9,7 +9,10 @@ import QueueList from './components/QueueList.vue'
 import UserChip from './components/UserChip.vue'
 import GuildSwitcher from './components/GuildSwitcher.vue'
 import ActivityMini from './components/ActivityMini.vue'
+import MetroShell from './metro/MetroShell.vue'
+import MetroNow from './metro/MetroNow.vue'
 import { embedded } from './activity'
+import { useStatus } from './composables/useStatus'
 import { useGuilds } from './composables/useGuilds'
 import { getItem, removeItem, setItem } from './storage'
 import { LOCALES, locale, setLocale, t, type Locale } from './i18n'
@@ -42,11 +45,11 @@ for (const name of Object.keys(loaders) as LazyView[]) pages[name] = lazyView(na
 const mainEl = ref<HTMLElement | null>(null)
 provide(RETRY_VIEW, () => {
   const v = view.value
-  if (v === 'home') return
+  if (v === 'home' || v === 'queue') return
   // 点的"重试"按钮马上会被换掉:焦点先放到 <main> 开头,别掉回 body;
   // 加载成功或再次失败,Tab 都从这里进入新内容。tabindex 只临时加,
   // 平时点 main 的空白处不会把焦点落到 main 上
-  const el = mainEl.value
+  const el = embedded ? shell.value?.main ?? null : mainEl.value
   if (el) {
     el.tabIndex = -1
     el.addEventListener('blur', () => el.removeAttribute('tabindex'), { once: true })
@@ -59,15 +62,26 @@ type Theme = 'light' | 'dark' | 'auto'
 type Scheme = 'light' | 'dark'
 const THEME_KEY: Record<Theme, Key> = { auto: 'theme.auto', light: 'theme.light', dark: 'theme.dark' }
 
-type View = 'home' | 'search' | 'library' | 'lists' | 'stats' | 'cache' | 'settings'
+// 'queue' 只在 Activity 的 Metro 外壳里是单独的视图;网页版的队列在首页里
+type View = 'home' | 'queue' | 'search' | 'library' | 'lists' | 'stats' | 'cache' | 'settings'
 const VIEWS: View[] = ['home', 'search', 'library', 'lists', 'stats', 'cache', 'settings']
+const EMBED_VIEWS: View[] = ['home', 'queue', 'search', 'library', 'lists', 'stats', 'settings', 'cache']
 const VIEW_LABEL: Record<View, Key> = {
-  home: 'nav.home', search: 'nav.search', library: 'nav.library', lists: 'nav.lists', stats: 'nav.stats', cache: 'nav.cache', settings: 'nav.settings',
+  home: 'nav.home', queue: 'nav.queue', search: 'nav.search', library: 'nav.library', lists: 'nav.lists', stats: 'nav.stats', cache: 'nav.cache', settings: 'nav.settings',
 }
 // 这些页面自己没有 <h1>,由这里补一个只给读屏用的
-const NEEDS_HEADING: View[] = ['search', 'library', 'stats', 'cache']
+const NEEDS_HEADING: View[] = ['queue', 'search', 'library', 'stats', 'cache']
 const view = ref<View>('home')
 const { noAccess } = useGuilds()
+
+// ---- Activity:Metro 外壳 ----
+const shell = ref<{ main: HTMLElement | null; focusCurrent: () => void } | null>(null)
+const { status } = useStatus()
+/** 正在播放页的磁贴切换视图("搜索并点歌"、"管理队列"):按的那块磁贴随之消失,焦点交给新视图名 */
+function goFromContent(v: View) {
+  view.value = v
+  shell.value?.focusCurrent()
+}
 
 // Activity 被缩成画中画小窗:只显示一条迷你播放器。
 // 监听先注册,后面读存储即使出问题也不会漏掉它。
@@ -194,6 +208,61 @@ onBeforeUnmount(() => {
 
 <template>
   <ActivityMini v-if="compact" class="h-full" />
+  <!-- Activity:Metro 外壳。网页版仍是下面原来的顶栏 + 页面 -->
+  <MetroShell
+    v-else-if="embedded"
+    ref="shell"
+    :views="EMBED_VIEWS"
+    :view="view"
+    :label="(v: View) => t(VIEW_LABEL[v])"
+    :fill="view === 'home' && !noAccess"
+    @select="view = $event"
+  >
+    <template #actions>
+      <select
+        :value="locale"
+        class="h-9 cursor-pointer border-0 px-2 text-xs"
+        :style="{ background: 'var(--m-tile)', color: 'var(--c-text)' }"
+        :title="t('lang.title')"
+        :aria-label="t('lang.title')"
+        @change="onLangChange"
+      >
+        <option v-for="l in LOCALES" :key="l.code" :value="l.code">{{ l.label }}</option>
+      </select>
+      <button
+        type="button"
+        class="flex h-9 w-9 cursor-pointer items-center justify-center border-0 text-sm"
+        :style="{ background: 'var(--m-tile)', color: 'var(--c-text)' }"
+        :aria-label="themeAction"
+        :title="`${themeAction} · ${themeState}`"
+        @click="toggleTheme"
+      >
+        <Icon :icon="rendered === 'dark' ? 'moon' : 'sun'" aria-hidden="true" />
+      </button>
+    </template>
+
+    <h1 v-if="NEEDS_HEADING.includes(view)" class="sr-only">{{ t(VIEW_LABEL[view]) }}</h1>
+    <div v-if="noAccess" class="metro-pad pt-3">
+      <div class="p-4" :style="{ background: 'var(--m-tile)' }">
+        <p class="font-medium"><Icon icon="lock" class="mr-2" aria-hidden="true" :style="{ color: 'var(--c-text-muted)' }" />{{ t('guild.noAccessTitle') }}</p>
+        <p class="mt-1 text-sm" :style="{ color: 'var(--c-text-muted)' }">{{ t('guild.noAccessHint') }}</p>
+      </div>
+    </div>
+    <template v-if="view === 'home'">
+      <MetroNow v-if="!noAccess" @go="goFromContent" />
+    </template>
+    <div v-else class="pt-3">
+      <template v-if="view === 'queue'">
+        <QueueList />
+        <p
+          v-if="status && status.queue_length === 0"
+          class="metro-pad text-sm"
+          :style="{ color: 'var(--c-text-muted)' }"
+        >{{ t('np.emptyHint') }}</p>
+      </template>
+      <component :is="pages[view as LazyView]" v-else />
+    </div>
+  </MetroShell>
   <div v-else class="flex min-h-full flex-col">
     <!-- Activity 里 body 让出了顶部安全区;吸顶后 header 停在视口最上面,所以把它拉进这块区域,
          用自己的背景盖住刘海 / 状态栏,内容再往下让出同样的高度 -->
@@ -277,12 +346,14 @@ onBeforeUnmount(() => {
         <NowPlaying />
         <QueueList />
       </template>
-      <component :is="pages[view]" v-else />
+      <component :is="pages[view as LazyView]" v-else />
     </main>
   </div>
 </template>
 
 <style scoped>
+.metro-pad { padding-inline: var(--m-pad); }
+
 /* 导航在窄屏横向滚动:哪一端后面还有按钮,哪一端就渐隐,提示可以继续滑。
    滚动驱动动画按自身滚动位置伸缩两端的渐隐带;内容放得下时时间线不激活,也就没有渐隐。 */
 @property --fade-start {
