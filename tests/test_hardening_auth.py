@@ -133,8 +133,22 @@ def test_revoked_authorization_drops_guilds(env, status):
     env.discord.guilds_status = status
     assert env.auth.discord_guilds(USER) == []
     assert entry['token'] is None and entry['guilds'] == []
+    # 当成没登录:重新走一次 Discord 登录(取消了授权的人会看到确认页),而不是卡在 403
     rv = env.client.get('/api/me')
-    assert rv.status_code == 403 and rv.get_json()['error'] == 'not_a_member'
+    assert rv.status_code == 401 and rv.get_json()['error'] == 'login_required'
+    env.discord.guilds_status = 200
+    login(env.client)
+    assert env.client.get('/api/me').status_code == 200
+    assert env.auth._cache[USER]['token'] is not None
+
+
+def test_dead_token_ends_the_owner_session_too(env):
+    env.discord.user = dict(env.discord.user, id=OWNER)
+    login(env.client)
+    env.auth._cache[OWNER]['fetched_at'] = 0
+    env.discord.guilds_status = 401
+    assert env.auth.discord_guilds(OWNER) == []
+    assert env.client.get('/api/queue').status_code == 401
 
 
 def test_invalid_grant_on_refresh_fails_closed(env):
@@ -203,7 +217,7 @@ def test_logout_get_does_not_log_out(env):
     assert 'method="post"' in body and 'action="/auth/logout"' in body
     assert env.client.get('/api/me').status_code == 200
     rv = env.client.get('/auth/logout', headers={'Accept': 'application/json'})
-    assert rv.status_code == 405
+    assert rv.status_code == 405 and rv.headers['Allow'] == 'POST'
     assert env.client.get('/api/me').status_code == 200
 
 

@@ -404,7 +404,12 @@ def session_user():
     if LEGACY_SESSION_TOKEN in session:
         session.pop(LEGACY_SESSION_TOKEN, None)
     user = session.get(SESSION_USER)
-    if not user or not user.get('id') or _entry(str(user['id'])) is None:
+    if not user or not user.get('id'):
+        return None
+    entry = _entry(str(user['id']))
+    # token 被 Discord 判死(_refresh 收回了权限):当成没登录,prompt=none 重新登录一次就能拿到新 token,
+    # 取消了授权的人会看到 Discord 的确认页,而不是一直卡在"不是成员"
+    if entry is None or entry['token'] is None:
         return None
     return user
 
@@ -585,7 +590,7 @@ def create_blueprint():
             if not _prefers_html():
                 return jsonify({'ok': True})
         elif _prefers_json():
-            return jsonify({'error': 'method_not_allowed'}), 405
+            return jsonify({'error': 'method_not_allowed'}), 405, {'Allow': 'POST'}
         elif any(key in session for key in _LOGIN_KEYS):
             action = escape(request.script_root + '/auth/logout')
             form = Markup(f'<form method="post" action="{action}">'
