@@ -1,13 +1,17 @@
 <!doctype html>
+<!-- lang is the fallback; src/i18n sets the chosen locale before the app mounts -->
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
+    <!-- Must stay right after the color-scheme meta, classic and render-blocking -->
+    <script src="./assets/theme-init.js"></script>
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <title>DJ Bot</title>
-    <script type="module" crossorigin src="./assets/index-BzDjh_Ux.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-DkPopjbL.css">
+    <script type="module" crossorigin src="./assets/index-DGqa5DfV.js"></script>
+    <link rel="modulepreload" crossorigin href="./assets/i18n-D7Q79Utm.js">
+    <link rel="stylesheet" crossorigin href="./assets/index-asjoqlR7.css">
   </head>
   <body>
     <div id="app"></div>

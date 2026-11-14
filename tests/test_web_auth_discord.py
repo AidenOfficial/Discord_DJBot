@@ -30,6 +30,12 @@ class FakeResp:
         return self._payload
 
 
+# Activity 的授权码要过 ^[A-Za-z0-9]{16,64}$;网页登录的回调没有这个检查
+GOOD_ACTIVITY_CODE = 'GoodActivityCode1234'
+BAD_ACTIVITY_CODE = 'BadActivityCode12345'
+GOOD_CODES = ('good', GOOD_ACTIVITY_CODE)
+
+
 class FakeDiscord:
     """假的 Discord OAuth / REST 端点。"""
 
@@ -53,7 +59,7 @@ class FakeDiscord:
         self.calls.append(('post', url, dict(data or {})))
         assert kwargs.get('timeout')
         if data['grant_type'] == 'authorization_code':
-            return self._token() if data['code'] == 'good' else FakeResp(400, {'error': 'invalid_grant'})
+            return self._token() if data['code'] in GOOD_CODES else FakeResp(400, {'error': 'invalid_grant'})
         if data['grant_type'] == 'refresh_token':
             return self._token()
         return FakeResp(400, {})
@@ -287,14 +293,16 @@ def test_non_member_is_forbidden(env):
 def test_logout(env):
     login(env.client)
     assert env.client.get('/api/me').status_code == 200
+    # GET 不退出(别的网站能用 <img> / 链接触发),只给一个 POST 按钮
     rv = env.client.get('/auth/logout')
     assert rv.status_code == 200
-    assert '/auth/discord/login' in rv.get_data(as_text=True)
-    assert env.client.get('/api/me').status_code == 401
-    login(env.client)
+    assert '<form method="post"' in rv.get_data(as_text=True)
+    assert env.client.get('/api/me').status_code == 200
     rv = env.client.post('/auth/logout')
     assert rv.get_json() == {'ok': True}
     assert env.client.get('/api/me').status_code == 401
+    rv = env.client.get('/auth/logout')
+    assert '/auth/discord/login' in rv.get_data(as_text=True)
 
 
 def test_session_ignored_when_discord_login_unconfigured(env):
@@ -380,17 +388,18 @@ def test_expired_token_is_refreshed(env):
     assert refresh and refresh[0][2]['refresh_token'] == 'rt1'
     assert entry['token']['access_token'] == 'at2'
     assert env.discord.calls[-1][2] == 'Bearer at2'
+    assert entry['token']['refresh_token'] == 'rt2'
     with env.client.session_transaction() as s:
-        assert s[mod.SESSION_TOKEN]['refresh_token'] == 'rt2'  # 会话里的 token 也跟着换
+        assert 'refresh_token' not in str(dict(s))  # Discord 的令牌只放服务端,不进 Cookie
 
 
-def test_cache_restored_from_session_after_restart(env):
+def test_restart_requires_a_fresh_login(env):
+    # Discord 令牌只在服务端内存里:重启后会话里没有令牌可用,得重新登录(不再从 Cookie 里恢复)
     login(env.client)
     env.mod._cache.clear()  # 模拟重启
     rv = env.client.get('/api/me')
-    assert rv.status_code == 200
-    assert '42' in env.mod._cache
-    assert env.discord.count('/guilds') == 2
+    assert rv.status_code in (401, 403)
+    assert env.discord.count('/guilds') == 1
 
 
 def test_identity_helpers_in_request(env):

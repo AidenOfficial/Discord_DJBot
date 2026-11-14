@@ -18,7 +18,7 @@ function applyStatus(s: BotStatus) {
   status.value = s
   lastSync = performance.now()
   syncedAt.value = lastSync
-  clock.playhead = s.playhead
+  clock.playhead = quantize(s.playhead)
   error.value = null
 }
 
@@ -40,16 +40,36 @@ watch(selectedGuild, () => {
   if (started) poll()
 })
 
-function tick() {
-  const s = status.value
-  if (s && s.play && !s.empty && !s.prep) {  // 还在准备(没出声)时进度不走
-    const elapsed = (performance.now() - lastSync) / 1000
-    const duration = s.current?.duration || 0
-    const pos = s.playhead + elapsed
-    clock.playhead = duration > 0 ? Math.min(pos, duration) : pos
-  }
-  requestAnimationFrame(tick)
+// 播放头按 0.25 秒一档写进响应式状态:进度条用 CSS 过渡补齐中间的动画,歌词换行也够准,
+// 而不是每一帧(120Hz 屏上每秒 120 次)让正在播放页整页重渲染。
+const PLAYHEAD_STEP = 0.25
+let raf = 0
+function quantize(seconds: number) {
+  return Math.floor(seconds / PLAYHEAD_STEP) * PLAYHEAD_STEP
 }
+
+function isAdvancing() {
+  const s = status.value
+  return !!s && s.play && !s.empty && !s.prep  // 还在准备(没出声)时进度不走
+}
+
+function tick() {
+  raf = 0
+  const s = status.value
+  if (!s || !isAdvancing()) return  // 暂停 / 没歌:停掉循环,状态变了 ensureTicking() 再开
+  const elapsed = (performance.now() - lastSync) / 1000
+  const duration = s.current?.duration || 0
+  const pos = s.playhead + elapsed
+  const next = quantize(duration > 0 ? Math.min(pos, duration) : pos)
+  if (next !== clock.playhead) clock.playhead = next
+  raf = requestAnimationFrame(tick)
+}
+
+function ensureTicking() {
+  if (!raf && isAdvancing()) raf = requestAnimationFrame(tick)
+}
+
+watch(() => isAdvancing(), ensureTicking)
 
 // 等待开播 / 后台下载时每秒刷新,平时 3 秒一次
 function nextDelay() {
@@ -57,16 +77,38 @@ function nextDelay() {
   return s?.prep || s?.current?.download ? 1000 : POLL_MS
 }
 
+// 页面隐藏(切走标签页、Discord 最小化;Electron 常常不节流后台定时器)时不轮询,
+// 回到前台立刻拉一次,让进度马上对齐。
+let pollTimer: ReturnType<typeof setTimeout> | undefined
+let polling = false
+
 async function pollLoop() {
-  await poll()
-  setTimeout(pollLoop, nextDelay())
+  clearTimeout(pollTimer)
+  pollTimer = undefined
+  if (polling) return
+  polling = true
+  try {
+    await poll()
+  } finally {
+    polling = false
+  }
+  if (document.visibilityState !== 'hidden') pollTimer = setTimeout(pollLoop, nextDelay())
+}
+
+function onVisibility() {
+  if (document.visibilityState === 'hidden') {
+    clearTimeout(pollTimer)
+    pollTimer = undefined
+  } else if (!pollTimer) {
+    void pollLoop()
+  }
 }
 
 function ensureStarted() {
   if (started) return
   started = true
-  pollLoop()
-  requestAnimationFrame(tick)
+  document.addEventListener('visibilitychange', onVisibility)
+  void pollLoop()
 }
 
 /** Fire a control action; the response is a fresh status, applied at once. */

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   addGuildBan, fetchGuildBans, fetchGuildSettings, removeGuildBan, saveGuildSettings,
   type BanKind, type GuildBans, type GuildSettings,
@@ -7,6 +7,7 @@ import {
 import { selectedGuild } from '../guild'
 import { t, timeAgo } from '../i18n'
 import type { Key } from '../i18n/en'
+import { announce } from '../composables/useAnnounce'
 
 // 设置 → 服务器:只有能管理这个服务器的人看得到(父组件按 can_manage 决定显示)。
 const settings = ref<GuildSettings | null>(null)
@@ -17,14 +18,21 @@ const toast = ref('')
 const toastOk = ref(true)
 
 let toastTimer: ReturnType<typeof setTimeout> | undefined
+/** Failures stay until the next message or until dismissed; successes fade after 3 s. */
 function say(msg: string, ok = true) {
   toast.value = msg
   toastOk.value = ok
   clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => (toast.value = ''), 3000)
+  if (ok) toastTimer = setTimeout(() => (toast.value = ''), 3000)
+  announce(msg, { assertive: !ok })
+}
+function dismissToast() {
+  clearTimeout(toastTimer)
+  toast.value = ''
 }
 
 const announceDraft = ref('')
+const announceError = ref('')
 const volumeDraft = ref(100)
 const banDraft = ref<Record<BanKind, { value: string; note: string }>>({
   user_ban: { value: '', note: '' },
@@ -34,7 +42,8 @@ const banDraft = ref<Record<BanKind, { value: string; note: string }>>({
 function applySettings(s: GuildSettings) {
   settings.value = s
   announceDraft.value = s.announce_channel ?? ''
-  volumeDraft.value = s.max_volume
+  // keep a slider value that is still waiting to be saved
+  if (!volumeTimer && !volumeSending) volumeDraft.value = s.max_volume
 }
 
 async function reload() {
@@ -46,23 +55,37 @@ async function reload() {
     bans.value = b
     error.value = ''
   } catch {
-    if (guild === selectedGuild.value) error.value = t('adm.loadFailed')
+    if (guild !== selectedGuild.value) return
+    error.value = t('adm.loadFailed')
+    announce(error.value, { assertive: true })
   }
 }
 
 onMounted(reload)
 watch(selectedGuild, () => {
+  // a queued max-volume save belongs to the previous server
+  clearTimeout(volumeTimer)
+  volumeTimer = undefined
+  volumeSeq++
+  volumeSending = 0
   settings.value = null
   bans.value = null
   reload()
 })
 
+function onAnnounceInvalid() {
+  announceError.value = t('adm.invalidChannel')
+  announce(announceError.value, { assertive: true })
+}
+
 async function saveAnnounce() {
   const value = announceDraft.value.trim()
   if (value && !/^\d{1,20}$/.test(value)) {
-    say(t('adm.invalid'), false)
+    // The pattern attribute normally stops this first; keep the check for pasted spaces etc.
+    onAnnounceInvalid()
     return
   }
+  announceError.value = ''
   busy.value = true
   try {
     applySettings(await saveGuildSettings({ announce_channel: value || null }))
@@ -74,16 +97,35 @@ async function saveAnnounce() {
   }
 }
 
+// Arrow keys fire change on every step, so wait for the user to settle before saving.
+// The slider stays enabled throughout: disabling it would drop keyboard focus.
+let volumeTimer: ReturnType<typeof setTimeout> | undefined
+let volumeSeq = 0
+let volumeSending = 0 // seq of the request in flight, 0 when none
+function queueVolume() {
+  clearTimeout(volumeTimer)
+  volumeTimer = setTimeout(saveVolume, 400)
+}
+onBeforeUnmount(() => clearTimeout(volumeTimer))
+
 async function saveVolume() {
+  volumeTimer = undefined
   const n = Math.max(0, Math.min(100, Math.round(Number(volumeDraft.value) || 0)))
-  busy.value = true
+  const mySeq = ++volumeSeq
+  volumeSending = mySeq
   try {
-    applySettings(await saveGuildSettings({ max_volume: n }))
+    const s = await saveGuildSettings({ max_volume: n })
+    // a newer value is queued or on its way: let that response settle the slider
+    if (mySeq !== volumeSeq || volumeTimer) return
+    settings.value = s
+    volumeDraft.value = s.max_volume
     say(t('adm.maxVolumeSaved', { n }))
   } catch {
+    if (mySeq !== volumeSeq || volumeTimer) return
     say(t('common.saveFailed'), false)
+    if (settings.value) volumeDraft.value = settings.value.max_volume
   } finally {
-    busy.value = false
+    if (volumeSending === mySeq) volumeSending = 0
   }
 }
 
@@ -136,15 +178,15 @@ function unescape(s: string) {
       <div class="mt-5 rounded-2xl p-5" :style="{ background: 'var(--c-surface)', boxShadow: 'var(--shadow-1)' }">
         <!-- 公告频道 -->
         <label for="announce-channel" class="text-sm font-semibold uppercase tracking-wider" :style="{ color: 'var(--c-text-muted)' }">{{ t('adm.announce') }}</label>
-        <p class="mt-1 text-xs" :style="{ color: 'var(--c-text-muted)' }">{{ t('adm.announceHint') }}</p>
+        <p id="announce-hint" class="mt-1 text-xs" :style="{ color: 'var(--c-text-muted)' }">{{ t('adm.announceHint') }}</p>
         <form class="mt-3 flex flex-wrap gap-2" @submit.prevent="saveAnnounce">
           <select
             v-if="settings.text_channels.length"
             id="announce-channel"
             v-model="announceDraft"
-            class="min-w-0 flex-1 rounded-lg border px-3 py-1.5 text-sm outline-none"
+            aria-describedby="announce-hint"
+            class="min-w-0 flex-1 rounded-lg border px-3 py-1.5 text-sm"
             :style="{ background: 'var(--c-bg)', borderColor: 'var(--c-border)', color: 'var(--c-text)' }"
-            :disabled="busy"
           >
             <option value="">{{ t('adm.announceAuto') }}</option>
             <option v-for="c in settings.text_channels" :key="c.id" :value="c.id"># {{ c.name }}</option>
@@ -154,10 +196,18 @@ function unescape(s: string) {
             id="announce-channel"
             v-model="announceDraft"
             inputmode="numeric"
+            pattern="\s*\d{1,20}\s*"
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="none"
+            spellcheck="false"
             :placeholder="`${t('adm.announcePlaceholder')} · ${t('adm.announceAuto')}`"
-            class="min-w-0 flex-1 rounded-lg border px-3 py-1.5 font-mono text-sm outline-none"
-            :style="{ background: 'var(--c-bg)', borderColor: 'var(--c-border)', color: 'var(--c-text)' }"
-            :disabled="busy"
+            :aria-invalid="announceError ? 'true' : undefined"
+            :aria-describedby="announceError ? 'announce-error announce-hint' : 'announce-hint'"
+            class="min-w-0 flex-1 rounded-lg border px-3 py-1.5 font-mono text-sm"
+            :style="{ background: 'var(--c-bg)', borderColor: announceError ? 'var(--c-danger)' : 'var(--c-border)', color: 'var(--c-text)' }"
+            @invalid="onAnnounceInvalid"
+            @input="announceError = ''"
           />
           <button
             type="submit"
@@ -166,10 +216,13 @@ function unescape(s: string) {
             :disabled="busy"
           >{{ t('common.save') }}</button>
         </form>
+        <p v-if="announceError" id="announce-error" class="mt-1.5 text-xs" :style="{ color: 'var(--c-danger)' }">
+          <Icon icon="triangle-exclamation" class="mr-1" aria-hidden="true" />{{ announceError }}
+        </p>
 
         <!-- 最大音量 -->
         <label for="max-volume" class="mt-6 block text-sm font-semibold uppercase tracking-wider" :style="{ color: 'var(--c-text-muted)' }">{{ t('adm.maxVolume') }}</label>
-        <p class="mt-1 text-xs" :style="{ color: 'var(--c-text-muted)' }">{{ t('adm.maxVolumeHint', { n: settings.default_max_volume }) }}</p>
+        <p id="max-volume-hint" class="mt-1 text-xs" :style="{ color: 'var(--c-text-muted)' }">{{ t('adm.maxVolumeHint', { n: settings.default_max_volume }) }}</p>
         <div class="mt-3 flex items-center gap-3">
           <input
             id="max-volume"
@@ -180,13 +233,25 @@ function unescape(s: string) {
             step="1"
             class="min-w-0 flex-1"
             :style="{ accentColor: 'var(--c-accent)' }"
-            :disabled="busy"
-            @change="saveVolume"
+            :aria-valuetext="`${volumeDraft}%`"
+            aria-describedby="max-volume-hint"
+            @change="queueVolume"
           />
           <span class="w-12 text-right text-sm tabular-nums">{{ volumeDraft }}%</span>
         </div>
 
-        <p v-if="toast" class="mt-3 text-xs" :style="{ color: toastOk ? 'var(--c-success)' : 'var(--c-danger)' }">{{ toast }}</p>
+        <p v-if="toast" class="mt-3 flex items-start gap-1.5 text-xs" :style="{ color: toastOk ? 'var(--c-success)' : 'var(--c-danger)' }">
+          <Icon :icon="toastOk ? 'check' : 'triangle-exclamation'" class="mt-0.5" aria-hidden="true" />
+          <span class="min-w-0 flex-1">{{ toast }}</span>
+          <button
+            v-if="!toastOk"
+            type="button"
+            class="cursor-pointer rounded border-0 bg-transparent px-1 text-xs"
+            :style="{ color: 'var(--c-text-muted)' }"
+            :aria-label="t('common.dismiss')"
+            @click="dismissToast"
+          ><Icon icon="xmark" aria-hidden="true" /></button>
+        </p>
       </div>
 
       <!-- 本服务器的封禁 -->
@@ -196,7 +261,7 @@ function unescape(s: string) {
 
         <div v-for="sec in BAN_SECTIONS" :key="sec.kind" class="mt-4">
           <h3 class="text-sm font-medium">{{ t(sec.title) }}</h3>
-          <ul v-if="bans[sec.kind].length" class="mt-2 divide-y" :style="{ borderColor: 'var(--c-border)' }">
+          <ul v-if="bans[sec.kind].length" role="list" class="mt-2 divide-y" :style="{ borderColor: 'var(--c-border)' }">
             <li v-for="r in bans[sec.kind]" :key="r.value" class="flex items-center gap-3 py-2 text-sm" :style="{ borderColor: 'var(--c-border)' }">
               <div class="min-w-0 flex-1">
                 <p class="truncate font-mono text-xs" :title="r.value">{{ r.value }}</p>
@@ -216,27 +281,31 @@ function unescape(s: string) {
           <form class="mt-2 flex flex-wrap gap-2" @submit.prevent="ban(sec.kind)">
             <input
               v-model="banDraft[sec.kind].value"
+              :type="sec.kind === 'user_ban' ? 'text' : 'url'"
+              required
               :placeholder="t(sec.placeholder)"
               :aria-label="t(sec.placeholder)"
               :inputmode="sec.kind === 'user_ban' ? 'numeric' : 'url'"
-              class="min-w-0 flex-[2] rounded-lg border px-3 py-1.5 text-sm outline-none"
+              autocomplete="off"
+              autocorrect="off"
+              autocapitalize="none"
+              spellcheck="false"
+              class="min-w-0 flex-[2] rounded-lg border px-3 py-1.5 text-sm"
               :style="{ background: 'var(--c-bg)', borderColor: 'var(--c-border)', color: 'var(--c-text)' }"
-              :disabled="busy"
             />
             <input
               v-model="banDraft[sec.kind].note"
               maxlength="100"
               :placeholder="t('adm.notePlaceholder')"
               :aria-label="t('adm.notePlaceholder')"
-              class="min-w-0 flex-1 rounded-lg border px-3 py-1.5 text-sm outline-none"
+              class="min-w-0 flex-1 rounded-lg border px-3 py-1.5 text-sm"
               :style="{ background: 'var(--c-bg)', borderColor: 'var(--c-border)', color: 'var(--c-text)' }"
-              :disabled="busy"
             />
             <button
               type="submit"
               class="cursor-pointer rounded-lg border-0 px-3 py-1.5 text-xs font-semibold"
               :style="{ background: 'var(--c-accent)', color: 'var(--c-on-accent)' }"
-              :disabled="busy || !banDraft[sec.kind].value.trim()"
+              :disabled="busy"
             >{{ t('adm.ban') }}</button>
           </form>
         </div>

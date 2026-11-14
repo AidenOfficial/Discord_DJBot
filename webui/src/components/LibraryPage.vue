@@ -3,6 +3,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { enqueueLibraryItem, fetchLibraryInfo, formatBytes, queryLibrary, type LibraryItem } from '../api'
 import { uploadFile, UploadError } from '../upload'
 import { useStatus } from '../composables/useStatus'
+import { announce } from '../composables/useAnnounce'
 import AddToPlaylist from './AddToPlaylist.vue'
 import FavButton from './FavButton.vue'
 import { t, typeLabel } from '../i18n'
@@ -56,16 +57,32 @@ async function query(toPage = 1) {
   }
 }
 
+const feedbackTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+// The Queue / Next buttons stay mounted (and focused) while this runs; the result
+// shows beside them. A failure stays until the next attempt on that row.
 async function add(item: LibraryItem, next: boolean) {
+  if (feedback.value[item.id] === '...') return
+  clearTimeout(feedbackTimers.get(item.id))
   feedback.value[item.id] = '...'
   try {
     await enqueueLibraryItem(item.id, next ? 'next' : 'append')
     feedback.value[item.id] = 'ok'
+    announce(t('lib.queuedItem', {
+      verb: t(next ? 'pl.verbNext' : 'pl.verbAppend'),
+      title: item.title || item.path,
+    }))
     refresh()
+    feedbackTimers.set(item.id, setTimeout(() => delete feedback.value[item.id], 2000))
   } catch {
     feedback.value[item.id] = 'err'
+    announce(t('lib.queueFailed'), { assertive: true })
   }
-  setTimeout(() => delete feedback.value[item.id], 2000)
+}
+
+function goPage(to: number) {
+  if (to < 1 || to > totalPages.value) return
+  query(to)
 }
 
 interface UploadRow {
@@ -77,6 +94,7 @@ interface UploadRow {
   message: string
   itemId?: string
   queued?: boolean
+  queueFailed?: boolean
   ctrl: AbortController
 }
 const uploads = ref<UploadRow[]>([])
@@ -107,27 +125,35 @@ async function onUpload(e: Event) {
           ? t('lib.savedAudio', { size: formatBytes(rv.final_size ?? 0) })
           : t('lib.savedAs', { path: rv.path ?? '' })
         query(page.value)
+        announce(`${row.name}: ${row.message}`)
       } else {
         row.phase = 'error'
         row.message = rv.error ?? t('lib.processFailed')
+        announce(`${row.name}: ${row.message}`, { assertive: true })
       }
     } catch (err) {
       row.phase = 'error'
       row.message = !(err instanceof UploadError) ? t('lib.uploadFailed')
         : UPLOAD_ERRORS.includes(err.code) ? t(`upload.${err.code}` as Key)
         : t('lib.uploadFailedCode', { code: err.code })
+      const cancelled = err instanceof UploadError && err.code === 'aborted'
+      announce(`${row.name}: ${row.message}`, { assertive: !cancelled })
     }
   }
 }
 
 async function queueUpload(row: UploadRow) {
   if (!row.itemId) return
+  row.queueFailed = false
   try {
     await enqueueLibraryItem(row.itemId, 'append')
     row.queued = true
+    announce(t('lib.queuedItem', { verb: t('pl.verbAppend'), title: row.name }))
     refresh()
   } catch {
+    row.queueFailed = true
     row.message = t('lib.queueFailed')
+    announce(t('lib.queueFailed'), { assertive: true })
   }
 }
 
@@ -142,43 +168,48 @@ const TYPES = ['', 'file', 'url', 'radio'] as const
         v-model="keywords"
         type="search"
         :placeholder="t('lib.filter')"
-        class="w-full rounded-full border px-5 py-2.5 text-sm outline-none"
+        :aria-label="t('lib.filter')"
+        class="w-full rounded-full border px-5 py-2.5 text-sm"
         :style="{ background: 'var(--c-surface)', borderColor: 'var(--c-border)', color: 'var(--c-text)' }"
         @input="onInput"
       />
       <div class="flex flex-wrap items-center gap-2">
-        <div class="flex gap-1 rounded-full p-1" :style="{ background: 'var(--c-surface-2)' }">
+        <div role="group" :aria-label="t('lib.typeFilter')" class="flex gap-1 rounded-full p-1" :style="{ background: 'var(--c-surface-2)' }">
           <button
             v-for="k in TYPES"
             :key="k"
+            type="button"
             class="cursor-pointer rounded-full border-0 px-3 py-1 text-xs font-medium"
             :style="typeFilter === k
               ? { background: 'var(--c-accent)', color: 'var(--c-on-accent)' }
               : { background: 'transparent', color: 'var(--c-text-muted)' }"
+            :aria-pressed="typeFilter === k"
             @click="typeFilter = k; query(1)"
           >{{ k ? typeLabel(k) : t('common.all') }}</button>
         </div>
         <select
           v-if="allTags.length"
           v-model="tagFilter"
-          class="rounded-full border px-3 py-1.5 text-xs outline-none"
+          :aria-label="t('lib.tagFilter')"
+          class="rounded-full border px-3 py-1.5 text-xs"
           :style="{ background: 'var(--c-surface)', borderColor: 'var(--c-border)', color: 'var(--c-text)' }"
           @change="query(1)"
         >
           <option value="">{{ t('lib.allTags') }}</option>
           <option v-for="tag in allTags" :key="tag" :value="tag">{{ tag }}</option>
         </select>
+        <!-- The input stays in the tab order (sr-only, not display:none); the label shows its focus ring. -->
         <label
           v-if="uploadEnabled"
-          class="ml-auto cursor-pointer rounded-full px-3 py-1.5 text-xs font-medium"
+          class="relative ml-auto cursor-pointer rounded-full px-3 py-1.5 text-xs font-medium has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-[var(--c-accent)]"
           :style="{ background: 'var(--c-accent-soft)', color: 'var(--c-accent)' }"
         >
           <Icon icon="upload" class="mr-1" />{{ t('lib.upload') }}
-          <input type="file" accept="audio/*,video/*,.mkv,.flv" multiple class="hidden" @change="onUpload" />
+          <input type="file" accept="audio/*,video/*,.mkv,.flv" multiple class="sr-only" @change="onUpload" />
         </label>
       </div>
       <!-- 上传进度 -->
-      <ul v-if="uploads.length" class="flex flex-col gap-1.5">
+      <ul v-if="uploads.length" role="list" class="flex flex-col gap-1.5">
         <li v-for="u in uploads" :key="u.key" class="rounded-xl px-3 py-2"
             :style="{ background: 'var(--c-surface)', boxShadow: 'var(--shadow-1)' }">
           <div class="flex items-center gap-2 text-xs">
@@ -188,26 +219,28 @@ const TYPES = ['', 'file', 'url', 'radio'] as const
               <template v-else-if="u.phase === 'processing'">{{ t('lib.processing') }}</template>
             </span>
             <button v-if="u.phase === 'uploading'" class="shrink-0 cursor-pointer border-0 bg-transparent p-0 text-xs"
-                    :style="{ color: 'var(--c-text-faint)' }" :title="t('common.cancel')" @click="u.ctrl.abort()"><Icon icon="xmark" /></button>
+                    :style="{ color: 'var(--c-text-faint)' }" :title="t('common.cancel')"
+                    :aria-label="t('common.itemAction', { action: t('common.cancel'), title: u.name })"
+                    @click="u.ctrl.abort()"><Icon icon="xmark" aria-hidden="true" /></button>
             <button v-if="u.phase === 'done' && u.itemId && !u.queued"
                     class="shrink-0 cursor-pointer rounded-md border-0 px-2 py-0.5 text-xs font-semibold"
                     :style="{ background: 'var(--c-accent)', color: 'var(--c-on-accent)' }"
-                    @click="queueUpload(u)"><Icon icon="plus" class="mr-1" />{{ t('common.queue') }}</button>
+                    :aria-label="t('common.itemAction', { action: t('common.queue'), title: u.name })"
+                    @click="queueUpload(u)"><Icon icon="plus" class="mr-1" aria-hidden="true" />{{ t('common.queue') }}</button>
             <span v-if="u.queued" class="shrink-0" :style="{ color: 'var(--c-accent)' }"><Icon icon="check" class="mr-1" />{{ t('common.queued') }}</span>
           </div>
-          <div v-if="u.phase === 'uploading' || u.phase === 'processing'" class="mt-1.5 h-1 w-full overflow-hidden rounded-full"
-               :style="{ background: 'var(--c-surface-2)' }">
-            <div class="h-full rounded-full" :class="u.phase === 'processing' ? 'animate-pulse' : ''"
-                 :style="{ width: `${u.total ? (u.sent / u.total) * 100 : 0}%`, background: 'var(--c-accent)', transition: 'width 300ms' }" />
-          </div>
+          <progress v-if="u.phase === 'uploading'" class="bar mt-1.5" :value="u.sent" :max="Math.max(u.total, 1)"
+                    :aria-label="u.name" />
+          <!-- no value = indeterminate while the server extracts audio -->
+          <progress v-else-if="u.phase === 'processing'" class="bar mt-1.5" :aria-label="u.name" />
           <p v-if="u.message" class="mt-1 text-xs"
-             :style="{ color: u.phase === 'error' ? 'var(--c-danger)' : 'var(--c-success)' }">{{ u.message }}</p>
+             :style="{ color: u.phase === 'error' || u.queueFailed ? 'var(--c-danger)' : 'var(--c-success)' }">{{ u.message }}</p>
         </li>
       </ul>
     </div>
 
     <!-- results -->
-    <ul v-if="items.length" class="mt-4 flex flex-col gap-1.5">
+    <ul v-if="items.length" role="list" class="mt-4 flex flex-col gap-1.5">
       <li
         v-for="item in items"
         :key="item.id"
@@ -227,29 +260,35 @@ const TYPES = ['', 'file', 'url', 'radio'] as const
             <span v-for="tag in item.tags.slice(0, 3)" :key="tag" class="rounded-full px-1.5 py-0.5 text-[10px]" :style="{ background: 'var(--c-accent-soft)', color: 'var(--c-accent)' }">{{ tag }}</span>
           </p>
         </div>
-        <div class="flex shrink-0 gap-1">
-          <span v-if="feedback[item.id]" class="px-2 py-1 text-xs"
+        <div class="flex shrink-0 items-center gap-1">
+          <!-- result is announced; the icon is the visual echo -->
+          <span v-if="feedback[item.id]" class="px-1 text-xs" aria-hidden="true"
                 :style="{ color: feedback[item.id] === 'err' ? 'var(--c-danger)' : 'var(--c-accent)' }">
             <Icon v-if="feedback[item.id] === 'ok'" icon="check" />
             <Icon v-else-if="feedback[item.id] === 'err'" icon="xmark" />
             <template v-else>...</template>
           </span>
-          <template v-else>
-            <FavButton :item-id="item.id" :source="{ source: 'library', item_id: item.id }" />
-            <AddToPlaylist :source="{ source: 'library', item_id: item.id }" />
-            <button
-              class="cursor-pointer rounded-md border-0 px-2 py-1 text-xs"
-              :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
-              :title="t('common.playNext')"
-              @click="add(item, true)"
-            ><Icon icon="arrow-turn-up" class="mr-1" />{{ t('lib.next') }}</button>
-            <button
-              class="cursor-pointer rounded-md border-0 px-2.5 py-1 text-xs font-semibold"
-              :style="{ background: 'var(--c-accent)', color: 'var(--c-on-accent)' }"
-              :title="t('common.addToQueue')"
-              @click="add(item, false)"
-            ><Icon icon="plus" class="mr-1" />{{ t('common.queue') }}</button>
-          </template>
+          <FavButton :item-id="item.id" :item-title="item.title || item.path" :source="{ source: 'library', item_id: item.id }" />
+          <AddToPlaylist :source="{ source: 'library', item_id: item.id }" :item-title="item.title || item.path" />
+          <!-- names start with the visible word and add the title (label in name) -->
+          <button
+            type="button"
+            class="cursor-pointer rounded-md border-0 px-2 py-1 text-xs aria-disabled:opacity-60"
+            :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
+            :title="t('common.playNext')"
+            :aria-label="t('common.itemAction', { action: t('lib.next'), title: item.title || item.path })"
+            :aria-disabled="feedback[item.id] === '...' || undefined"
+            @click="add(item, true)"
+          ><Icon icon="arrow-turn-up" class="mr-1" aria-hidden="true" />{{ t('lib.next') }}</button>
+          <button
+            type="button"
+            class="cursor-pointer rounded-md border-0 px-2.5 py-1 text-xs font-semibold aria-disabled:opacity-60"
+            :style="{ background: 'var(--c-accent)', color: 'var(--c-on-accent)' }"
+            :title="t('common.addToQueue')"
+            :aria-label="t('common.itemAction', { action: t('common.queue'), title: item.title || item.path })"
+            :aria-disabled="feedback[item.id] === '...' || undefined"
+            @click="add(item, false)"
+          ><Icon icon="plus" class="mr-1" aria-hidden="true" />{{ t('common.queue') }}</button>
         </div>
       </li>
     </ul>
@@ -259,19 +298,78 @@ const TYPES = ['', 'file', 'url', 'radio'] as const
 
     <!-- pagination -->
     <div v-if="totalPages > 1" class="mt-4 flex items-center justify-center gap-2 text-xs">
+      <!-- aria-disabled, not disabled: reaching the last page must not drop focus from the button -->
       <button
-        class="cursor-pointer rounded-full border-0 px-3 py-1.5"
+        class="cursor-pointer rounded-full border-0 px-3 py-1.5 aria-disabled:cursor-default aria-disabled:opacity-50"
         :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
-        :disabled="page <= 1"
-        @click="query(page - 1)"
+        :aria-disabled="page <= 1 || undefined"
+        @click="goPage(page - 1)"
       ><Icon icon="angle-left" class="mr-1" />{{ t('lib.prev') }}</button>
       <span class="tabular-nums" :style="{ color: 'var(--c-text-muted)' }">{{ page }} / {{ totalPages }}</span>
       <button
-        class="cursor-pointer rounded-full border-0 px-3 py-1.5"
+        class="cursor-pointer rounded-full border-0 px-3 py-1.5 aria-disabled:cursor-default aria-disabled:opacity-50"
         :style="{ background: 'var(--c-surface-2)', color: 'var(--c-text)' }"
-        :disabled="page >= totalPages"
-        @click="query(page + 1)"
+        :aria-disabled="page >= totalPages || undefined"
+        @click="goPage(page + 1)"
       >{{ t('lib.nextPage') }}<Icon icon="angle-right" class="ml-1" /></button>
     </div>
   </section>
 </template>
+
+<style scoped>
+/* Native <progress> (exposes role=progressbar and its value), restyled as the thin accent bar. */
+.bar {
+  appearance: none;
+  border: 0 solid;
+  overflow: clip;
+  display: block;
+  inline-size: 100%;
+  block-size: 0.25rem;
+  border-radius: 1e5px;
+  background: var(--c-surface-2);
+  /* lets the indeterminate fill move in track units (cqi) */
+  container-type: inline-size;
+  --bar-indeterminate-duration: 1.5s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar {
+    --bar-indeterminate-duration: 10s;
+  }
+}
+
+.bar:indeterminate {
+  --bar-animation: lib-bar-indeterminate var(--bar-indeterminate-duration) infinite linear;
+}
+
+.bar::-webkit-progress-bar {
+  background: transparent;
+}
+
+.bar::-webkit-progress-value {
+  background: var(--c-accent);
+  border-radius: 1e5px;
+  transition: inline-size 0.3s;
+  animation: var(--bar-animation, revert-rule);
+}
+
+.bar::-moz-progress-bar {
+  background: var(--c-accent);
+  border-radius: 1e5px;
+  transition: inline-size 0.3s;
+  animation: var(--bar-animation, revert-rule);
+}
+</style>
+
+<style>
+/* Unscoped on purpose: the name is referenced from a custom property, which
+   Vue's scoped keyframe renaming does not rewrite. */
+@keyframes lib-bar-indeterminate {
+  from, to {
+    inline-size: 30%;
+    margin-right: auto;
+  }
+  from { translate: -100%; }
+  to { translate: 100cqi; }
+}
+</style>

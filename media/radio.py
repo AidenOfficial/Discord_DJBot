@@ -1,4 +1,5 @@
 import re
+import json
 import logging
 import struct
 import requests
@@ -10,6 +11,20 @@ from media.item import item_builders, item_loaders, item_id_generators
 from constants import tr_cli as tr
 
 log = logging.getLogger("bot")
+
+MAX_DESCRIPTION_BYTES = 64 * 1024
+MAX_ICY_METAINT = 64 * 1024
+
+
+def _get_json(url):
+    """读电台状态 JSON,最多 MAX_DESCRIPTION_BYTES 字节;超了或不是 JSON 都抛 ValueError。"""
+    with requests.get(url, timeout=10, stream=True) as response:
+        data = b''
+        for chunk in response.iter_content(16 * 1024):
+            data += chunk
+            if len(data) > MAX_DESCRIPTION_BYTES:
+                raise ValueError("radio status larger than %d bytes" % MAX_DESCRIPTION_BYTES)
+    return json.loads(data)
 
 
 def get_radio_server_description(url):
@@ -23,8 +38,7 @@ def get_radio_server_description(url):
     try:
         response = requests.head(url_shoutcast, timeout=3)
         if not response.headers.get('content-type', '').startswith(("audio/", "video/")):
-            response = requests.get(url_shoutcast, timeout=10)
-            data = response.json()
+            data = _get_json(url_shoutcast)
             title_server = data['servertitle']
             return title_server
             # logging.info("TITLE FOUND SHOUTCAST: " + title_server)
@@ -37,12 +51,13 @@ def get_radio_server_description(url):
         log.debug("radio: unsuccessful attempts on fetching radio description (shoutcast): " + error)
     except ValueError:
         return url
+    except (KeyError, TypeError, IndexError):
+        log.debug("radio: unexpected shoutcast status response")
 
     try:
         response = requests.head(url_shoutcast, timeout=3)
         if not response.headers.get('content-type', '').startswith(("audio/", "video/")):
-            response = requests.get(url_icecast, timeout=10)
-            data = response.json()
+            data = _get_json(url_icecast)
             source = data['icestats']['source']
             if type(source) is list:
                 source = source[0]
@@ -58,6 +73,8 @@ def get_radio_server_description(url):
         error_traceback = traceback.format_exc()
         error = error_traceback.rstrip().split("\n")[-1]
         log.debug("radio: unsuccessful attempts on fetching radio description (icecast): " + error)
+    except (ValueError, KeyError, TypeError, IndexError):
+        log.debug("radio: unexpected icecast status response")
 
     return url
 
@@ -66,12 +83,15 @@ def get_radio_title(url):
 
     log.debug("radio: fetching radio server description")
     try:
-        r = requests.get(url, headers={'Icy-MetaData': '1'}, stream=True, timeout=10)
-        icy_metaint_header = int(r.headers['icy-metaint'])
-        r.raw.read(icy_metaint_header)
+        with requests.get(url, headers={'Icy-MetaData': '1'}, stream=True, timeout=10) as r:
+            icy_metaint_header = int(r.headers['icy-metaint'])
+            # 这个数决定先读掉多少音频字节,服务器随便填就能让我们读上几个 G
+            if not 0 < icy_metaint_header <= MAX_ICY_METAINT:
+                raise ValueError("icy-metaint out of range: %d" % icy_metaint_header)
+            r.raw.read(icy_metaint_header)
 
-        metadata_length = struct.unpack('B', r.raw.read(1))[0] * 16  # length byte
-        metadata = r.raw.read(metadata_length).rstrip(b'\0')
+            metadata_length = struct.unpack('B', r.raw.read(1))[0] * 16  # length byte
+            metadata = r.raw.read(metadata_length).rstrip(b'\0')
         logging.info(metadata)
         # extract title from the metadata
         m = re.search(br"StreamTitle='([^']*)';", metadata)
@@ -83,7 +103,7 @@ def get_radio_title(url):
             requests.exceptions.HTTPError,
             requests.exceptions.ReadTimeout,
             requests.exceptions.Timeout,
-            KeyError):
+            KeyError, ValueError, struct.error):
         log.debug("radio: unsuccessful attempts on fetching radio title (icy)")
     return url
 

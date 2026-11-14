@@ -18,7 +18,7 @@ def _web_user(text, user):
 
 
 def cmd_web_access(bot, user, text, command, parameter):
-    auth_method = var.config.get("webinterface", "auth_method")
+    auth_method = var.config.get("webinterface", "auth_method").strip().lower()
     user = _web_user(text, user)
 
     if auth_method == 'token':
@@ -69,7 +69,7 @@ def cmd_web_user_add(bot, user, text, command, parameter):
         bot.send_msg(tr('bad_parameter', command=command), text)
         return
 
-    auth_method = var.config.get("webinterface", "auth_method")
+    auth_method = var.config.get("webinterface", "auth_method").strip().lower()
 
     if auth_method == 'password':
         web_users = json.loads(var.db.get("privilege", "web_access", fallback='[]'))
@@ -86,7 +86,7 @@ def cmd_web_user_remove(bot, user, text, command, parameter):
         bot.send_msg(tr('bad_parameter', command=command), text)
         return
 
-    auth_method = var.config.get("webinterface", "auth_method")
+    auth_method = var.config.get("webinterface", "auth_method").strip().lower()
 
     if auth_method == 'password':
         web_users = json.loads(var.db.get("privilege", "web_access", fallback='[]'))
@@ -99,7 +99,7 @@ def cmd_web_user_remove(bot, user, text, command, parameter):
 
 
 def cmd_web_user_list(bot, user, text, command, parameter):
-    auth_method = var.config.get("webinterface", "auth_method")
+    auth_method = var.config.get("webinterface", "auth_method").strip().lower()
 
     if auth_method == 'password':
         web_users = json.loads(var.db.get("privilege", "web_access", fallback='[]'))

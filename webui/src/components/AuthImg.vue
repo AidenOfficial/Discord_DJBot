@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // <img>,但 Activity 里图片请求带不了 Authorization 头:用 apiFetch 取成 blob 再显示。
 // 普通网页里就是原样的 <img :src>。外部地址先经 imageSrc() 换成 /api/thumbnail/external。
-// class、alt、loading、@load、@error 等都透传给 <img>;loading="lazy" 时等滚到附近才取。
+// class、alt、loading、fetchpriority、@load、@error 等都透传给 <img>;loading="lazy" 时等滚到附近才取。
 import { onBeforeUnmount, onMounted, ref, useAttrs, watch } from 'vue'
 import { embedded, imageSrc } from '../activity'
 import { authedImage } from '../authedImage'
@@ -27,7 +27,8 @@ async function load() {
   }
   if (!visible) return
   wanted = url
-  const blobUrl = await authedImage(url)
+  const fp = attrs.fetchpriority
+  const blobUrl = await authedImage(url, fp === 'high' || fp === 'low' ? fp : undefined)
   if (wanted !== url) return // 等的时候换图了
   // 取不到:给个无效地址让 <img> 触发 error 事件,和普通网页的行为一致
   shown.value = blobUrl ?? 'data:,'

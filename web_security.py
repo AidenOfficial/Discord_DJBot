@@ -6,18 +6,20 @@
   Discord(Activity 是嵌在 discord.com 里的 iframe,经 <app id>.discordsays.com 代理),
   可用 [webinterface] frame_ancestors 改;
 - X-Content-Type-Options: nosniff;Referrer-Policy: no-referrer(令牌登录的 ?token= 不会经
-  Referer 漏给封面图所在的外站)。
+  Referer 漏给封面图所在的外站);
+- public_url 是 https:// 时加 Strict-Transport-Security;状态码 >= 400 的响应加 Cache-Control: no-store。
   路由自己设过的同名头不覆盖。
 
 限流:按「谁」计数,而不是只按 IP。Activity 的请求都从 Discord 代理的 IP 过来,只按 IP 一个人刷就会
 把所有人一起限住。所以:
 - client:登录身份(web_users.current_identity().key);没有身份(未登录、auth_method=none)才按 IP;
 - guild:选中的服务器(web_context.guild_id()),防止一个服务器的人一起把 bot 刷爆;
-- ip:只按 IP(登录前的接口,比如校验令牌)。
+- ip:只按 IP(登录前的接口,比如校验令牌);IPv6 按 /64 算。
 计数在本进程内存里(滑动窗口),重启清零。
 """
 
 import collections
+import ipaddress
 import threading
 import time
 from functools import wraps
@@ -67,11 +69,34 @@ def content_security_policy():
     return '; '.join(parts)
 
 
+HSTS = 'max-age=31536000'
+
+
+def _public_https():
+    config = var.config
+    if config is None:
+        return False
+    return (config.get('webinterface', 'public_url', fallback='') or '').strip().lower().startswith('https://')
+
+
 def apply_security_headers(response):
     headers = response.headers
     headers.setdefault('Content-Security-Policy', content_security_policy())
     headers.setdefault('X-Content-Type-Options', 'nosniff')
     headers.setdefault('Referrer-Policy', 'no-referrer')
+    if _public_https():
+        headers.setdefault('Strict-Transport-Security', HSTS)
+    if response.status_code >= 400:
+        # 401 / 403 里有登录地址、错误详情:别让 Cloudflare / 浏览器缓存
+        headers.setdefault('Cache-Control', 'no-store')
+    if response.mimetype == 'text/html':
+        # Cloudflare 的 Rocket Loader 等会改写 HTML:把 <script> 换成它自己的加载器(主题预加载不再阻塞渲染、
+        # 模块入口由它重新执行),还往错误页里塞 CSP 不允许的内联脚本。no-transform 让边缘原样转发。
+        cc = headers.get('Cache-Control')
+        if not cc:
+            headers['Cache-Control'] = 'no-transform'
+        elif 'no-transform' not in cc:
+            headers['Cache-Control'] = cc + ', no-transform'
     return response
 
 
@@ -93,9 +118,15 @@ RULES = {
     'discord_auth': (('client', 30, 60),),
     # 令牌校验(?token=):登录前,只能按 IP
     'token': (('ip', 30, 60),),
-    # Activity 换令牌(code -> 我们的令牌,每次要调 2~3 次 Discord API):还没身份,只能按 IP,
-    # 而 Activity 的请求都来自 Discord 代理的少数几个 IP,所以上限放宽,只防刷
-    'activity_token': (('ip', 120, 60),),
+    # Activity 换令牌:请求都来自 Discord 代理的少数几个 IP,按 IP 限所有请求会把大家一起限住,
+    # 所以只数失败的(code 无效 / 不是成员 / 不在语音里……),失败太多的 IP 先不让换
+    'activity_token_fail': (('ip', 10, 60),),
+    # 换令牌成功、知道是谁之后按 Discord 账号限
+    'activity_login': (('client', 10, 60),),
+    # Activity 续期 / 登出(按令牌里的身份)
+    'activity_refresh': (('client', 6, 60),),
+    # 上传文件
+    'upload': (('client', 20, 60),),
     # Activity 里的外部图片代理(搜索结果封面等):每张图都是一次出站请求
     'image_proxy': (('client', 240, 60),),
 }
@@ -128,6 +159,17 @@ class RateLimiter:
             q.append(now)
             return 0
 
+    def peek(self, key, limit, window, now=None):
+        """和 hit() 一样判断,但不记这一次。"""
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            q = self._hits.get(key)
+            while q and q[0] <= now - window:
+                q.popleft()
+            if q and len(q) >= limit:
+                return max(1, int(q[0] + window - now + 0.999))
+            return 0
+
     def _prune(self, now):
         # 最长窗口之外的都可以丢掉
         horizon = max(w for rules in RULES.values() for _, _, w in rules)
@@ -153,6 +195,19 @@ def remote_ip():
     return request.remote_addr or 'unknown'
 
 
+def ip_bucket(ip):
+    """限流用的 IP 键:IPv6 按 /64 算(一个用户通常分到整个 /64,换个地址不费事)。"""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6:
+        if addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr)
+
+
 def client_key():
     """登录身份;没有就看 Discord 登录的会话(登录流程中途);都没有才是 IP。"""
     ident = getattr(g, 'web_identity', None)
@@ -166,7 +221,7 @@ def client_key():
         user = None
     if user and user.get('id'):
         return f"discord:{user['id']}"
-    return f"ip:{remote_ip()}"
+    return f"ip:{ip_bucket(remote_ip())}"
 
 
 def guild_key():
@@ -186,18 +241,21 @@ def _key_for(scope):
         return client_key()
     if scope == 'guild':
         return guild_key()
-    return f"ip:{remote_ip()}"
+    return f"ip:{ip_bucket(remote_ip())}"
 
 
-def check(bucket):
-    """当前请求在 bucket 里是否超限:超了返回要等的秒数,没超返回 0。"""
+def check(bucket, record=True, key=None):
+    """当前请求在 bucket 里是否超限:超了返回要等的秒数,没超返回 0。
+    record=False 只看不记(只数失败次数的桶:先看一眼,失败了再记)。
+    key 给了就用它代替按范围算出来的键(还没挂上身份时,比如刚换完令牌)。"""
     if not enabled() or not has_request_context():
         return 0
     for scope, limit, window in RULES[bucket]:
-        key = _key_for(scope)
-        if key is None:
+        bucket_key = key or _key_for(scope)
+        if bucket_key is None:
             continue
-        wait = limiter.hit(f"{bucket}|{key}", limit, window)
+        name = f"{bucket}|{bucket_key}"
+        wait = limiter.hit(name, limit, window) if record else limiter.peek(name, limit, window)
         if wait:
             return wait
     return 0
@@ -210,15 +268,16 @@ def too_many(wait):
     return resp
 
 
-def rate_limited(bucket):
-    """路由装饰器,放在 requires_auth 下面(先鉴权、有了身份再计数)。"""
+def rate_limited(bucket, record=True):
+    """路由装饰器,放在 requires_auth 下面(先鉴权、有了身份再计数)。
+    record=False:只在已经超限时拦,计数由路由自己 check(bucket) 记(只数失败的桶)。"""
     if bucket not in RULES:
         raise KeyError(bucket)
 
     def decorator(f):
         @wraps(f)
         def wrapper(*args, **kwargs):
-            wait = check(bucket)
+            wait = check(bucket, record=record)
             if wait:
                 return too_many(wait)
             return f(*args, **kwargs)

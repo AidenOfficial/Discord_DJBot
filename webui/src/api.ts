@@ -115,8 +115,18 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
   return rv
 }
 
-async function getJson<T>(path: string): Promise<T> {
-  const rv = await apiFetch(`${BASE}${path}`, { headers: { Accept: 'application/json' } })
+/**
+ * Background refreshes (timed polls nobody is waiting on) pass `background: true`, which
+ * sends them at low fetch priority so a click's request is not queued behind them.
+ * Browsers without fetch priority ignore the option.
+ */
+export interface ReadOptions { background?: boolean }
+
+async function getJson<T>(path: string, opts: ReadOptions = {}): Promise<T> {
+  const rv = await apiFetch(`${BASE}${path}`, {
+    headers: { Accept: 'application/json' },
+    ...(opts.background ? { priority: 'low' as const } : {}),
+  })
   if (!rv.ok) throw new Error(`${path} -> ${rv.status}`)
   return rv.json()
 }
@@ -132,7 +142,7 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 }
 
 export const fetchStatus = () => getJson<BotStatus>('/api/status')
-export const fetchQueue = () => getJson<QueueResponse>('/api/queue')
+export const fetchQueue = (opts?: ReadOptions) => getJson<QueueResponse>('/api/queue', opts)
 
 export type ControlAction =
   | { action: 'pause' | 'resume' | 'skip' | 'stop' | 'clear' }
@@ -312,8 +322,8 @@ async function send<T>(method: string, path: string, body?: unknown): Promise<T>
 
 export const fetchPlaylists = () =>
   getJson<{ playlists: PlaylistSummary[] }>('/api/playlists').then((r) => r.playlists)
-export const fetchPublicPlaylists = () =>
-  getJson<{ playlists: PlaylistSummary[] }>('/api/playlists/public').then((r) => r.playlists)
+export const fetchPublicPlaylists = (opts?: ReadOptions) =>
+  getJson<{ playlists: PlaylistSummary[] }>('/api/playlists/public', opts).then((r) => r.playlists)
 export const fetchPlaylist = (id: number) => getJson<PlaylistDetail>(`/api/playlists/${id}`)
 export const setPlaylistPublic = (id: number, isPublic: boolean) =>
   send<PlaylistDetail>('POST', `/api/playlists/${id}/visibility`, { public: isPublic })
@@ -492,7 +502,7 @@ export interface ChannelOverview {
   can_edit_settings?: boolean
 }
 
-export const fetchChannels = () => getJson<ChannelOverview>('/api/channels')
+export const fetchChannels = (opts?: ReadOptions) => getJson<ChannelOverview>('/api/channels', opts)
 export const saveChannelSettings = (body: Partial<{
   default_channel_id: string | null; follow: FollowMode; follow_user: string; return_home: boolean
   idle_pause_minutes: number; idle_resume: boolean
@@ -579,5 +589,6 @@ export function reportClientError(message: string, stack?: string) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message, stack: stack ?? '', url: location.href }),
+    priority: 'low', // telemetry: never ahead of the user's own requests
   }).catch(() => { /* 报错本身失败就算了 */ })
 }

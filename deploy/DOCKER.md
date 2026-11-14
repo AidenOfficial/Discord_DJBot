@@ -159,6 +159,12 @@ SSH 里执行 `crontab -e`,加一行(每天凌晨 5 点重启):
 `music_folder/`(本地音乐 + Web 上传)、`cache/`(YouTube / B 站下载缓存)、
 `spotdl_cache/`(Spotify 下载缓存)都挂载在 `<项目目录>` 下,容器删除重建都不会丢。
 
+**容器加固与资源上限**(`docker-compose.yml` 已写好):两个容器都带 `security_opt: no-new-privileges:true`;
+bot 限 `mem_limit: 1536m`、`pids_limit: 512`,cloudflared 限 `mem_limit: 256m`,ffmpeg / yt-dlp 失控时只影响
+这个容器。没有 `cap_drop: ALL`,因为 entrypoint 要用默认能力装出站过滤规则。cloudflared 固定在
+`cloudflare/cloudflared:2026.10.0`(不用 `:latest`),升级时改 compose 里的版本号再 `docker compose --profile tunnel up -d`。
+内存不够用(日志里反复重启、`docker inspect` 退出码 137)时调大 `mem_limit`。
+
 > 从旧版本升级:`cache/` 是新加的挂载(以前缓存在容器内的 `/tmp`,每次重建都清空)。
 > `docker compose up -d` 时 Docker 会自动建好这个目录。缓存上限默认 4GB,
 > 在 Web UI 的 **Cache** 页查看占用、固定常听的歌、手动释放空间。
