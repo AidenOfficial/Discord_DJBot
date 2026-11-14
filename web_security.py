@@ -112,7 +112,7 @@ RULES = {
     'token': (('ip', 30, 60),),
     # Activity 换令牌:请求都来自 Discord 代理的少数几个 IP,按 IP 限所有请求会把大家一起限住,
     # 所以只数失败的(code 无效 / 不是成员 / 不在语音里……),失败太多的 IP 先不让换
-    'activity_token_fail': (('ip', 30, 60),),
+    'activity_token_fail': (('ip', 10, 60),),
     # 换令牌成功、知道是谁之后按 Discord 账号限
     'activity_login': (('client', 10, 60),),
     # Activity 续期 / 登出(按令牌里的身份)

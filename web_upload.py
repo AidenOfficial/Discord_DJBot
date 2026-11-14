@@ -35,6 +35,7 @@ from flask import Blueprint, abort, jsonify, make_response, request
 import util
 import variables as var
 import web_context
+from web_security import rate_limited
 from web_users import current_identity, current_user_name
 
 log = logging.getLogger("bot")
@@ -244,6 +245,7 @@ def create_blueprint(requires_auth):
 
     @api.route('/init', methods=['POST'])
     @requires_auth
+    @rate_limited('upload')
     def upload_init():
         _check_enabled()
         payload = request.get_json(silent=True) or {}

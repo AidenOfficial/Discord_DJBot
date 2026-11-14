@@ -189,6 +189,17 @@ def test_csrf_rejects_simple_content_types(interface, ctype):
     assert csrf(interface, data=b'a=1', content_type=ctype) == 403
 
 
+def test_csrf_allows_same_origin_form(interface, config):
+    # 本站页面里的 <form method=post>(退出登录确认页)发的是 urlencoded,浏览器会带同源证明
+    config.set('webinterface', 'public_url', 'https://discord.example.org')
+    assert csrf(interface, path='/auth/logout', data=b'', content_type='application/x-www-form-urlencoded',
+                headers={'Origin': 'https://discord.example.org'}) is None
+    assert csrf(interface, path='/auth/logout', data=b'', content_type='application/x-www-form-urlencoded',
+                headers={'Sec-Fetch-Site': 'same-origin'}) is None
+    assert csrf(interface, path='/auth/logout', data=b'', content_type='application/x-www-form-urlencoded',
+                headers={'Sec-Fetch-Site': 'cross-site'}) == 403
+
+
 def test_csrf_only_guards_api_and_auth(interface):
     assert csrf(interface, path='/', data=b'a=1', content_type='text/plain') is None
 

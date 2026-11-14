@@ -50,7 +50,7 @@ CACHE_MAX_USERS = 5000
 # Discord 明确说 token 不能用了
 _TOKEN_DEAD = (400, 401, 403)
 # 进程内所有换 token 请求(登录、Activity、续期)的总预算:(次数, 秒)
-TOKEN_BUDGET = (30, 60)
+TOKEN_BUDGET = (60, 60)
 MIN_BACKOFF = 5
 
 PERM_ADMINISTRATOR = 0x8
@@ -88,7 +88,7 @@ def configured():
 
 
 def is_gate():
-    return var.config.get('webinterface', 'auth_method', fallback='none') == 'discord'
+    return (var.config.get('webinterface', 'auth_method', fallback='none') or '').strip().lower() == 'discord'
 
 
 def redirect_uri():

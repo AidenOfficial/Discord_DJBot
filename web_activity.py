@@ -492,7 +492,8 @@ def create_blueprint(requires_auth):
         try:
             check_context(user['id'], guild_id, channel_id, guilds)
         except Rejected as e:
-            _failed()
+            # 不记进按 IP 的失败桶:换令牌已经成功、人是真的,只是不在语音频道等;
+            # 大家共用 Discord 代理的 IP,记进去会把别人一起锁住(按人的 activity_login 已经限过了)
             log.info("web: Activity login of discord:%s for %s/%s refused: %s",
                      _for_log(user['id']), _for_log(guild_id), _for_log(channel_id), e.error)
             return _error(e.error, e.status)

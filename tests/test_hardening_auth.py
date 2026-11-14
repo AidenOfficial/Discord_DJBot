@@ -311,12 +311,13 @@ def test_activity_only_failures_count_per_ip(env, monkeypatch):
     assert exchange(env.client, environ_base={'REMOTE_ADDR': '10.9.9.9'}).status_code == 200
 
 
-def test_activity_context_rejections_count_as_failures(env, monkeypatch):
+def test_activity_context_rejections_do_not_lock_out_the_shared_ip(env, monkeypatch):
+    # 不在语音频道之类的拒绝发生在换令牌成功之后:人是真的,不能把同一个代理 IP 后面的其他人锁住
     import web_security
     monkeypatch.setitem(web_security.RULES, 'activity_token_fail', (('ip', 2, 60),))
-    for _ in range(2):
+    for _ in range(3):
         assert exchange(env.client, channel=OTHER_VOICE).status_code == 403
-    assert exchange(env.client).status_code == 429
+    assert exchange(env.client).status_code == 200
 
 
 def test_activity_login_limited_per_user(env, monkeypatch):
@@ -345,7 +346,7 @@ def test_activity_refresh_and_logout_rate_limited(env, monkeypatch):
 def test_rules_registered():
     import web_security
     rules = web_security.RULES
-    assert rules['activity_token_fail'] == (('ip', 30, 60),)
+    assert rules['activity_token_fail'] == (('ip', 10, 60),)
     assert rules['activity_login'] == (('client', 10, 60),)
     assert rules['activity_refresh'] == (('client', 6, 60),)
     assert rules['upload'] == (('client', 20, 60),)

@@ -353,8 +353,11 @@ def _csrf_protect():
     origin = request.headers.get('Origin')
     if origin is not None and origin.lower().rstrip('/') not in allowed_origins():
         return _csrf_rejected()
+    # 跨站表单只能发这几种类型;本站页面里的 <form>(如退出登录确认页)要有浏览器给的同源证明才放行
     if request.mimetype in CSRF_SIMPLE_CONTENT_TYPES:
-        return _csrf_rejected()
+        same_origin = origin is not None or (fetch_site or '').lower() == 'same-origin'
+        if not same_origin:
+            return _csrf_rejected()
     return None
 
 
