@@ -54,6 +54,7 @@ export const zhCN: Record<Key, Msg> = {
   'np.emptyHint': '队列是空的——在 Discord 里用 /play 或在搜索页点一首吧。',
   'np.skipped': '将跳过：{from}–{to}',
   'np.seek': '播放进度',
+  'np.seekValue': '{at}，共 {total}',
   'np.bgDownload': '后台仍在下载 · {pct}%',
   'np.bgDone': '{eta} 后完成',
   'np.skipping': '将跳过 {n} 段非音乐内容（SponsorBlock）',
