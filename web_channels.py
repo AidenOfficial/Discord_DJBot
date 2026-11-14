@@ -93,7 +93,9 @@ def _fetch_voice_perms(guild_id, user_id):
     try:
         result = dc.call(collect(), timeout=10)
     except Exception:
-        log.debug("web: could not resolve voice permissions of %s in %s", user_id, guild_id, exc_info=True)
+        log.debug("web: could not resolve voice permissions of %s in %s",
+                  str(user_id).replace('\r', ' ').replace('\n', ' '),
+                  str(guild_id).replace('\r', ' ').replace('\n', ' '), exc_info=True)
         return None
     return result if isinstance(result, dict) else None
 

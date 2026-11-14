@@ -125,7 +125,8 @@ def user_banned(discord_id, guild_id, manage=False):
     try:
         return DJBot.banned(probe, 'user_ban', str(discord_id), admin=owner or manage, owner=owner)
     except Exception:
-        log.warning("web: ban lookup for %s in %s failed", discord_id, guild_id, exc_info=True)
+        log.warning("web: ban lookup for %s in %s failed", web_activity._for_log(discord_id),
+                    web_activity._for_log(guild_id), exc_info=True)
         return False
 
 

@@ -23,14 +23,16 @@ DEFAULT_TRUSTED_PROXIES = "127.0.0.0/8, ::1/128, 10.0.0.0/8, 172.16.0.0/12, 192.
 
 def parse_networks(value):
     networks = []
-    for part in (value or '').split(','):
+    for position, part in enumerate((value or '').split(','), start=1):
         part = part.strip()
         if not part:
             continue
         try:
             networks.append(ipaddress.ip_network(part, strict=False))
         except ValueError:
-            logging.getLogger("bot").warning("web: ignoring invalid [webinterface] trusted_proxies entry %r", part)
+            # 不把值本身写进日志:配置文件里有密钥,别让日志成为泄露的出口
+            logging.getLogger("bot").warning(
+                "web: ignoring entry #%d of [webinterface] trusted_proxies: not an IP network", position)
     return networks
 
 

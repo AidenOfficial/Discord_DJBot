@@ -203,7 +203,8 @@ def unified_search(query, limit=DEFAULT_LIMIT):
         try:
             per_source[name] = future.result(timeout=max(0.0, deadline - time.monotonic()))
         except Exception as e:
-            log.warning('web: %s search failed for %r (%s)', name, query, e or type(e).__name__)
+            log.warning('web: %s search failed for %r (%s)', name,
+                        str(query).replace('\r', ' ').replace('\n', ' '), e or type(e).__name__)
             per_source[name] = []
             failed.append(name)
 
