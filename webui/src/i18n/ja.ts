@@ -13,6 +13,7 @@ export const ja: Record<Key, Msg> = {
   'common.playNext': '次に再生',
   'common.addToQueue': 'キューに追加',
   'common.remove': '削除',
+  'common.itemAction': '{action}：{title}',
   'common.cancel': 'キャンセル',
   'common.confirm': 'OK',
   'common.delete': '削除',
@@ -105,6 +106,9 @@ export const ja: Record<Key, Msg> = {
   'queue.clear': 'すべてクリア',
   'queue.preparing': '準備中',
   'queue.requestedBy': 'リクエスト：{name}',
+  'queue.moveUp': '上へ移動',
+  'queue.moveDown': '下へ移動',
+  'queue.moved': '「{title}」を {n} 番目に移動しました',
 
   'search.placeholder': 'YouTube と bilibili を検索…',
   'search.partial': '{sources} の検索は現在利用できません。その他の結果を表示しています。',

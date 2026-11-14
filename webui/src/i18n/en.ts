@@ -15,6 +15,7 @@ export const en = {
   'common.playNext': 'Play next',
   'common.addToQueue': 'Add to queue',
   'common.remove': 'Remove',
+  'common.itemAction': '{action}: {title}',
   'common.cancel': 'Cancel',
   'common.confirm': 'Confirm',
   'common.delete': 'Delete',
@@ -116,6 +117,9 @@ export const en = {
   'queue.clear': 'Clear all',
   'queue.preparing': 'preparing',
   'queue.requestedBy': 'Requested by {name}',
+  'queue.moveUp': 'Move up',
+  'queue.moveDown': 'Move down',
+  'queue.moved': '{title} moved to position {n}',
 
   // ---- 搜索 ----
   'search.placeholder': 'Search YouTube and Bilibili...',

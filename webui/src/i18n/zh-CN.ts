@@ -13,6 +13,7 @@ export const zhCN: Record<Key, Msg> = {
   'common.playNext': '下一首播放',
   'common.addToQueue': '加入队列',
   'common.remove': '移除',
+  'common.itemAction': '{action}：{title}',
   'common.cancel': '取消',
   'common.confirm': '确定',
   'common.delete': '删除',
@@ -105,6 +106,9 @@ export const zhCN: Record<Key, Msg> = {
   'queue.clear': '全部清空',
   'queue.preparing': '准备中',
   'queue.requestedBy': '点歌人：{name}',
+  'queue.moveUp': '上移',
+  'queue.moveDown': '下移',
+  'queue.moved': '“{title}”已移到第 {n} 位',
 
   'search.placeholder': '搜索 YouTube 和 B 站…',
   'search.partial': '{sources} 搜索暂时不可用——只显示其余结果。',
