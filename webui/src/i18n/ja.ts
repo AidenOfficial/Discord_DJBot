@@ -469,5 +469,8 @@ export const ja: Record<Key, Msg> = {
   'act.err.activity_disabled': "この bot では Discord Activity が無効になっています。",
   'act.err.authorize_cancelled': "Discord の認可がキャンセルされました。",
   'act.err.discord_auth_failed': "Discord のログインに失敗しました。もう一度お試しください。",
+  'act.err.user_banned': "このサーバーでは bot の利用が禁止されています。",
+  'act.err.discord_unavailable': "Discord が応答していません。1 分ほどしてからもう一度お試しください。",
+  'act.err.rate_limited': "試行回数が多すぎます。1 分待ってから Activity を開き直してください。",
   'act.err.other': "エラーが発生しました({code})。",
 }

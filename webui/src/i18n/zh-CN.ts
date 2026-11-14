@@ -469,5 +469,8 @@ export const zhCN: Record<Key, Msg> = {
   'act.err.activity_disabled': "这个 bot 没有开启 Discord Activity。",
   'act.err.authorize_cancelled': "Discord 授权被取消了。",
   'act.err.discord_auth_failed': "Discord 没有通过这次登录,请重试。",
+  'act.err.user_banned': "你已被禁止在这个服务器使用 bot。",
+  'act.err.discord_unavailable': "Discord 暂时没有响应,请过一分钟再试。",
+  'act.err.rate_limited': "尝试次数太多,请等一分钟再重新打开 Activity。",
   'act.err.other': "出错了({code})。",
 }

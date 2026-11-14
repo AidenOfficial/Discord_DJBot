@@ -491,6 +491,9 @@ export const en = {
   'act.err.activity_disabled': "The Discord Activity is turned off on this bot.",
   'act.err.authorize_cancelled': "Discord authorization was cancelled.",
   'act.err.discord_auth_failed': "Discord did not accept the login. Try again.",
+  'act.err.user_banned': "You are banned from using the bot in this server.",
+  'act.err.discord_unavailable': "Discord is not answering right now. Try again in a minute.",
+  'act.err.rate_limited': "Too many attempts. Wait a minute, then open the Activity again.",
   'act.err.other': "Something went wrong ({code}).",
 } satisfies Record<string, Msg>
 
