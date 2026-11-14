@@ -231,6 +231,14 @@ def _queue_remove(index):
     web_context.session().remove_from_queue(index)
 
 
+def _in_own_queue(item_id):
+    """这首在当前服务器的队列里(正在放的或排着的)。"""
+    playlist = web_context.playlist()
+    with playlist.playlist_lock:
+        wrappers = list(playlist)
+    return any(getattr(w, 'id', None) == item_id for w in wrappers)
+
+
 def _search_result_url(source, url, video_id=None):
     """搜索结果 -> 真正入队用的链接(B 站统一成 av 号链接,和其他入口一致)。"""
     url = (url or '').strip()
@@ -468,6 +476,10 @@ def create_blueprint(requires_auth):
             abort(400)
         if item is None:
             abort(404)
+        # 偏移是所有服务器共用的:多服务器时只有能管理的人,或这首正在自己服务器的队列里才能改
+        if web_context.hub() is not None and not web_context.can_manage() \
+                and not _in_own_queue(item_id):
+            return jsonify({'error': 'not_in_queue'}), 403
         data = lyrics.set_offset(item, offset)
         if data is None:
             abort(409)
